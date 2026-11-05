@@ -1,0 +1,21 @@
+[package]
+name = "lig-expr"
+description = "oxc arena AST → ExprIR lowering; scope/binding resolution; pure-builtin whitelist"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dev-dependencies]
+oxc_parser = { workspace = true }
+
+[dependencies]
+lig-core = { workspace = true }
+lig-ir = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_span = { workspace = true }
+
+[lints]
+workspace = true
