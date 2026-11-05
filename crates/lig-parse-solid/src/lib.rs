@@ -14,17 +14,15 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-pub mod anchors;
-
 /// Shared test/bench fixture sources.
 pub mod tests_support;
 
-use anchors::assign_anchor_paths;
 use lig_core::diagnostic::LigDiagnostic;
 use lig_core::id::{ComponentId, ExprId, ReactionId, StrId};
 use lig_core::span::Span;
 use lig_expr::lower::to_span;
-use lig_expr::{Lowering, Scope};
+use lig_expr::{Lowering, Scope, ty_of_expr, value_kind_is_str};
+use lig_ir::anchor::assign_anchor_paths;
 use lig_ir::expr::{Expr, Lit, Ty};
 use lig_ir::fragment::{
     ComponentIr, DynamicIr, DynamicKind, EventName, ForIr, FragmentIr, IfIr, PropBinding, PropDecl,
@@ -33,6 +31,7 @@ use lig_ir::fragment::{
 use lig_ir::module::{ReactionDecl, ReactionKind, Tier, ViewModule};
 use lig_ir::template::{AttrValue, NodeIr, StaticAttr, TemplateIr};
 use lig_ir::{FileId, FragmentId, Frontend, StyleConstId, TemplateId};
+use lig_style::camel_to_kebab;
 use oxc_allocator::Allocator;
 use oxc_ast::ast::{
     ArrowFunctionBody, Declaration, Expression, Function, JSXAttributeItem, JSXAttributeName,
@@ -158,6 +157,8 @@ struct ComponentScope {
     prop_names: BTreeSet<String>,
     /// Event-object parameter inside a handler body (§6.1).
     event_param: Option<String>,
+    /// `<For>` index accessor names visible in the current body (§7.5).
+    index_accessors: BTreeSet<String>,
 }
 
 /// One open fragment during JSX lowering.
@@ -226,24 +227,34 @@ fn lower_component(
                     // block get the model treatment (state + reactions).
                     if let Expression::CallExpression(call) = unwrap_parens(&es.expression)
                         && let Expression::Identifier(callee) = &call.callee
-                        && callee.name == "model"
                     {
-                        for arg in &call.arguments {
-                            let Some(Expression::ArrowFunctionExpression(arrow)) =
-                                arg.as_expression()
-                            else {
-                                continue;
-                            };
-                            let ArrowFunctionBody::FunctionBody(fb) = &arrow.body else {
-                                continue;
-                            };
-                            for inner in &fb.statements {
-                                if let Statement::VariableDeclaration(v) = inner {
-                                    for d in &v.declarations {
-                                        comp.lower_declarator(d);
+                        match callee.name.as_str() {
+                            "model" => {
+                                for arg in &call.arguments {
+                                    let Some(Expression::ArrowFunctionExpression(arrow)) =
+                                        arg.as_expression()
+                                    else {
+                                        continue;
+                                    };
+                                    let ArrowFunctionBody::FunctionBody(fb) = &arrow.body else {
+                                        continue;
+                                    };
+                                    for inner in &fb.statements {
+                                        if let Statement::VariableDeclaration(v) = inner {
+                                            for d in &v.declarations {
+                                                comp.lower_declarator(d);
+                                            }
+                                        }
                                     }
                                 }
                             }
+                            // A bare `createEffect(() => …)` / `watchEffect(…)`
+                            // statement is the idiomatic spelling (§7.1) — it
+                            // must not be dropped.
+                            "createEffect" | "watchEffect" => {
+                                comp.lower_effect_call(call);
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -303,6 +314,7 @@ fn scan_scope(module: &mut ViewModule, f: &Function<'_>, root: FragmentId) -> Co
             .collect::<Vec<_>>(),
         prop_names: BTreeSet::new(),
         event_param: None,
+        index_accessors: BTreeSet::new(),
     };
     // Destructured props become Prop state decls (§7.6).
     if let Some(p) = f.params.items.first()
@@ -360,16 +372,20 @@ fn scan_declarator_scope(
     match callee.name.as_str() {
         "createSignal" => {
             if let oxc_ast::ast::BindingPattern::ArrayPattern(arr) = &d.id
-                && let (
-                    Some(Some(oxc_ast::ast::BindingPattern::BindingIdentifier(name))),
-                    Some(Some(oxc_ast::ast::BindingPattern::BindingIdentifier(setter))),
-                ) = (arr.elements.first(), arr.elements.get(1))
+                && let Some(Some(oxc_ast::ast::BindingPattern::BindingIdentifier(name))) =
+                    arr.elements.first()
             {
                 scope.state.insert(name.name.to_string());
-                scope.model_fns.insert(setter.name.to_string());
-                scope
-                    .setter_targets
-                    .push((setter.name.to_string(), name.name.to_string()));
+                // The setter half of the destructure is optional (read-only
+                // signals are admitted — §7.5 list reads without writes).
+                if let Some(Some(oxc_ast::ast::BindingPattern::BindingIdentifier(setter))) =
+                    arr.elements.get(1)
+                {
+                    scope.model_fns.insert(setter.name.to_string());
+                    scope
+                        .setter_targets
+                        .push((setter.name.to_string(), name.name.to_string()));
+                }
             }
         }
         "createMemo" | "computed" | "ref" => {
@@ -401,6 +417,8 @@ impl ComponentLowering<'_, '_> {
             model_fns: self.scope.model_fns.clone(),
             setter_targets: self.scope.setter_targets.iter().cloned().collect(),
             event_param: self.scope.event_param.clone(),
+            index_accessors: self.scope.index_accessors.clone(),
+            unwrapped_refs: BTreeSet::new(),
         };
         Lowering::new(self.module).lower(e, &scope)
     }
@@ -609,74 +627,41 @@ impl ComponentLowering<'_, '_> {
                     }
                 }
             }
-            "createEffect" | "watchEffect" => {
-                if let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) {
-                    let body = match arg {
-                        Expression::ArrowFunctionExpression(arrow) => arrow_body_expr(&arrow.body),
-                        other => Some(other),
-                    };
-                    if let Some(body) = body {
-                        match self.lower_expr(body) {
-                            Ok(body_id) => {
-                                let reads = self.collect_reads(body_id);
-                                let owner = self.frames[0].fragment;
-                                self.push_reaction(ReactionDecl {
-                                    kind: ReactionKind::Effect { tier: Tier::Post },
-                                    reads,
-                                    writes: vec![],
-                                    body: body_id,
-                                    owner,
-                                });
-                            }
-                            Err(diag) => self.diags.push(diag),
-                        }
+            "createEffect" | "watchEffect" => self.lower_effect_call(call),
+            _ => {}
+        }
+    }
+
+    /// `createEffect(() => …)` / `watchEffect(…)` → a post-tier reaction
+    /// (§7.1) — shared by the declarator and bare-statement spellings.
+    fn lower_effect_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
+        if let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) {
+            let body = match arg {
+                Expression::ArrowFunctionExpression(arrow) => arrow_body_expr(&arrow.body),
+                other => Some(other),
+            };
+            if let Some(body) = body {
+                match self.lower_expr(body) {
+                    Ok(body_id) => {
+                        let reads = self.collect_reads(body_id);
+                        let owner = self.frames[0].fragment;
+                        self.push_reaction(ReactionDecl {
+                            kind: ReactionKind::Effect { tier: Tier::Post },
+                            reads,
+                            writes: vec![],
+                            body: body_id,
+                            owner,
+                        });
                     }
+                    Err(diag) => self.diags.push(diag),
                 }
             }
-            _ => {}
         }
     }
 
     /// All `State` names an expr tree reads (dataflow edge extraction, D-3).
     fn collect_reads(&self, id: ExprId) -> Vec<StrId> {
-        fn walk(e: &Expr, out: &mut Vec<StrId>) {
-            match e {
-                Expr::State(s) => out.push(*s),
-                Expr::Field(inner, _) | Expr::Unary(_, inner) => walk(inner, out),
-                Expr::Index(a, b) | Expr::Binary(_, a, b) => {
-                    walk(a, out);
-                    walk(b, out);
-                }
-                Expr::Array(items) => {
-                    for i in items {
-                        walk(i, out);
-                    }
-                }
-                Expr::Ternary(c, a, b) => {
-                    walk(c, out);
-                    walk(a, out);
-                    walk(b, out);
-                }
-                Expr::Tpl(parts) => {
-                    for p in parts {
-                        if let lig_ir::expr::TplPart::Hole(h) = p {
-                            walk(h, out);
-                        }
-                    }
-                }
-                Expr::Call(_, args) => {
-                    for a in args {
-                        walk(a, out);
-                    }
-                }
-                Expr::Event(_) | Expr::Lit(_) | Expr::Local(_) | Expr::Native(_) => {}
-            }
-        }
-        let mut out = Vec::new();
-        walk(self.module.exprs.get(id), &mut out);
-        out.sort();
-        out.dedup();
-        out
+        lig_ir::expr::collect_reads(self.module, id)
     }
 
     fn jsx_to_node(&mut self, jsx: &Expression<'_>, path: &mut Vec<u32>) -> NodeIr {
@@ -1156,8 +1141,10 @@ impl ComponentLowering<'_, '_> {
         let Ok(cond) = self.lower_expr(cond_src) else {
             return NodeIr::Marker;
         };
-        // Branch fragment: a single element child becomes the branch template
-        // root; anchors inside it are root-relative (fresh path space).
+        // Branch fragments: a single element child becomes the branch
+        // template root; anchors inside it are root-relative (fresh path
+        // space). `fallback={<jsx/>}` lowers to the else fragment (C4) —
+        // both frontends share the `branch_N` naming scheme.
         let element_child = el.children.iter().find_map(|c| match c {
             JSXChild::Element(e) => Some(&**e),
             _ => None,
@@ -1176,12 +1163,37 @@ impl ComponentLowering<'_, '_> {
             self.enter_fragment("branch");
             self.exit_fragment()
         };
+        let else_frag = el.opening_element.attributes.iter().find_map(|item| {
+            let JSXAttributeItem::Attribute(attr) = item else {
+                return None;
+            };
+            let JSXAttributeName::Identifier(id) = &attr.name else {
+                return None;
+            };
+            if id.name != "fallback" {
+                return None;
+            }
+            match &attr.value {
+                Some(JSXAttributeValue::ExpressionContainer(c)) => {
+                    match c.expression.as_expression() {
+                        Some(Expression::JSXElement(elsb)) => Some(&**elsb),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            }
+        });
+        let else_frag = else_frag.map(|elsb| {
+            self.fragment_from("branch", el.span(), move |comp, path| {
+                comp.jsx_element(elsb, path)
+            })
+        });
         let reads = self.collect_reads(cond);
         self.push_dynamic(
             DynamicKind::If(IfIr {
                 cond,
                 then: then_frag,
-                else_: None,
+                else_: else_frag,
             }),
             cond,
             reads,
@@ -1254,7 +1266,10 @@ impl ComponentLowering<'_, '_> {
         let item_id = self.intern(&item);
         self.scope.local.insert(item);
         if let Some(i) = &index_name {
+            // Solid's `<For>` index is an accessor: `i()` inside the body
+            // reads the current index (§7.5).
             self.scope.local.insert(i.clone());
+            self.scope.index_accessors.insert(i.clone());
         }
         let body_frag = self.fragment_from_jsx(body_src, "items");
         let index_id = index_name.as_ref().map(|i| self.intern(i));
@@ -1532,11 +1547,14 @@ impl ComponentLowering<'_, '_> {
         path: &mut Vec<u32>,
     ) -> NodeIr {
         let path = &*path;
+        // Conditional fragments share the `branch_N` naming scheme across
+        // both frontends (the canonical IR must not encode which surface
+        // syntax produced a branch — ternary vs `Show` vs `v-if`).
         let Ok(cond) = self.lower_expr(&c.test) else {
             return NodeIr::Marker;
         };
-        let then_frag = self.fragment_from_jsx(&c.consequent, "then");
-        let else_frag = self.fragment_from_jsx(&c.alternate, "els");
+        let then_frag = self.fragment_from_jsx(&c.consequent, "branch");
+        let else_frag = self.fragment_from_jsx(&c.alternate, "branch");
         let reads = self.collect_reads(cond);
         self.push_dynamic(
             DynamicKind::If(IfIr {
@@ -1573,56 +1591,6 @@ fn unwrap_parens<'a, 'b>(e: &'a Expression<'b>) -> &'a Expression<'b> {
     }
 }
 
-/// Infer the small-lattice type of a lowered expression (§5.5; unknown ⇒
-/// `Int` — the numeric default for the spike's arithmetic-first subset).
-fn ty_of(module: &ViewModule, e: &Expr) -> Ty {
-    match e {
-        Expr::Lit(Lit::Float(_)) => Ty::Float,
-        Expr::Lit(Lit::Bool(_)) | Expr::Unary(lig_ir::expr::UnOp::Not, _) => Ty::Bool,
-        // For-item/index locals type by use; strings dominate fixtures (v1).
-        Expr::Lit(Lit::Str(_))
-        | Expr::Local(_)
-        | Expr::Event(_)
-        | Expr::Tpl(_)
-        | Expr::Native(_) => Ty::Str,
-        Expr::State(s) => module.state_by_name(*s).map_or(Ty::Int, |d| d.ty.clone()),
-        Expr::Field(obj, f) => {
-            if module.strings.get(*f) == "length" {
-                Ty::Int
-            } else {
-                ty_of(module, obj)
-            }
-        }
-        Expr::Array(items) => Ty::List(Box::new(
-            items.first().map_or(Ty::Int, |i| ty_of(module, i)),
-        )),
-        Expr::Ternary(_, a, _) => ty_of(module, a),
-        Expr::Binary(op, _, _) if is_bool_binop(*op) => Ty::Bool,
-        // Int/Null literals and everything unlisted fall to the numeric
-        // default (§5.5: unknown ⇒ Int).
-        _ => Ty::Int,
-    }
-}
-
-fn ty_of_expr(module: &ViewModule, id: ExprId) -> Ty {
-    ty_of(module, module.exprs.get(id))
-}
-
-fn value_kind_is_str(module: &ViewModule, id: ExprId) -> bool {
-    matches!(
-        ty_of(module, module.exprs.get(id)),
-        Ty::Str | Ty::List(_) | Ty::Bool
-    )
-}
-
-fn is_bool_binop(op: lig_ir::expr::BinOp) -> bool {
-    use lig_ir::expr::BinOp as B;
-    matches!(
-        op,
-        B::Eq | B::Neq | B::Lt | B::Lte | B::Gt | B::Gte | B::And | B::Or
-    )
-}
-
 /// Post-pass: unify each component's prop types with the types its callers
 /// bind (§7.6 — props are plain struct fields, typed once). String wins over
 /// numeric (rendering is the dominant use; arithmetic props keep `Int` only
@@ -1651,21 +1619,6 @@ fn unify_prop_types(module: &mut ViewModule) {
             p.ty = ty;
         }
     }
-}
-
-fn camel_to_kebab(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 4);
-    for (i, c) in s.chars().enumerate() {
-        if c.is_ascii_uppercase() {
-            if i > 0 {
-                out.push('-');
-            }
-            out.push(c.to_ascii_lowercase());
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }
 
 fn event_from_jsx_name(rest: &str) -> Option<EventName> {
