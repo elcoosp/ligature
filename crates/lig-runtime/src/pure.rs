@@ -4,11 +4,21 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::vec::Vec;
 
 /// `items.join(sep)` on a list of strings.
 #[must_use]
 pub fn join(items: &[String], sep: &str) -> String {
     items.join(sep)
+}
+
+/// `[...a, b]` — list concatenation for the `arr.concat` builtin (§7.5).
+#[must_use]
+pub fn concat<T: Clone>(a: &[T], b: &[T]) -> Vec<T> {
+    let mut out = Vec::with_capacity(a.len() + b.len());
+    out.extend_from_slice(a);
+    out.extend_from_slice(b);
+    out
 }
 
 /// Stable `u64` key for a string list item (keyed reconcile, §7.5).
