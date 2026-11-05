@@ -1,0 +1,19 @@
+[package]
+name = "lig-sourcemap"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+lig-codegen = { workspace = true }
+lig-core = { workspace = true }
+lig-ir = { workspace = true }
+oxc_sourcemap = { workspace = true }
+
+[dev-dependencies]
+lig-parse-solid = { workspace = true }
+
+[lints]
+workspace = true
