@@ -425,12 +425,17 @@ pub fn patch_spike() -> i32 {
         return 1;
     }
 
-    // "Save": the tip source changed. The clock starts here.
+    // "Save": the tip source changed. The clock starts here. M3's ThinLink
+    // story is two generations against one running host: v1 (label/count)
+    // and v2 (which also fills the host's stub thunk). The budget applies
+    // per save — each generation's build + apply + first frame — and to the
+    // whole gate.
     let t0 = std::time::Instant::now();
 
-    // option_env! values are not fingerprinted by cargo — drop the tip's
-    // target dir (a tiny crate) so the v1 bodies really get compiled in.
     let tip_target = tip.join("target");
+    // option_env! values are not fingerprinted by cargo — drop the tip's
+    // target dir (a tiny crate) so each generation's bodies really get
+    // compiled in.
     if tip_target.exists() {
         std::fs::remove_dir_all(&tip_target).expect("clean tip target");
     }
@@ -443,11 +448,47 @@ pub fn patch_spike() -> i32 {
         eprintln!("patch-spike: tip v1 build failed ({code})");
         return 1;
     }
+    // Each generation gets its own artifact, staged OUTSIDE the tip's target
+    // dir (the v2 build wipes it): the second build overwrites the tip's
+    // output path, and the host must load v1 and v2 side by side.
+    let stage_dir = root.join("target/lig-patch-spike");
+    std::fs::create_dir_all(&stage_dir).expect("stage dir");
+    let dylib1 = {
+        let built = tip_dylib(&tip_target);
+        let staged = stage_dir.join("gen1.dylib");
+        std::fs::copy(&built, &staged).expect("stage generation 1 dylib");
+        staged
+    };
 
-    let dylib = tip_dylib(&tip_target);
+    let t_save2 = std::time::Instant::now();
+    if tip_target.exists() {
+        std::fs::remove_dir_all(&tip_target).expect("clean tip target for v2");
+    }
+    if let Err(code) = run_cargo(
+        &tip,
+        &["build", "--quiet"],
+        &[
+            ("LIG_TIP_LABEL", "v2"),
+            ("LIG_TIP_COUNT", "43"),
+            ("LIG_TIP_EXTRA", "7"),
+        ],
+        false,
+    ) {
+        eprintln!("patch-spike: tip v2 build failed ({code})");
+        return 1;
+    }
+    let dylib2 = {
+        let built = tip_dylib(&tip_target);
+        let staged = tip_target.join("gen2.dylib");
+        std::fs::copy(&built, &staged).expect("stage generation 2 dylib");
+        staged
+    };
+    let save2 = t_save2.elapsed();
+
     let host_bin = root.join("target/debug/dummy-host");
     let out = std::process::Command::new(&host_bin)
-        .env("LIG_PATCH_DYLIB", &dylib)
+        .env("LIG_PATCH_DYLIB", &dylib1)
+        .env("LIG_PATCH_DYLIB2", &dylib2)
         .output()
         .unwrap_or_else(|e| panic!("spawn {}: {e}", host_bin.display()));
     let total = t0.elapsed();
@@ -473,10 +514,14 @@ pub fn patch_spike() -> i32 {
         eprintln!("patch-spike: dummy-host did not report frame_ns:\n{stdout}");
         return 1;
     };
-    let Some(_frame2_ns) = field("frame2_ns") else {
+    if field("apply2_ns").is_none() {
+        eprintln!("patch-spike: dummy-host did not report apply2_ns:\n{stdout}");
+        return 1;
+    }
+    if field("frame2_ns").is_none() {
         eprintln!("patch-spike: dummy-host did not report frame2_ns:\n{stdout}");
         return 1;
-    };
+    }
     if !stdout.contains("host_result=PASS") {
         eprintln!("patch-spike: dummy-host did not pass:\n{stdout}");
         return 1;
@@ -484,15 +529,163 @@ pub fn patch_spike() -> i32 {
 
     let budget = std::time::Duration::from_secs(1);
     let total_ms = total.as_millis();
-    let ok = total < budget;
+    // Per-save budget: each generation's build → apply → first frame.
+    let ok = total < budget && save2 < budget;
     println!(
-        "patch-spike: save→frame {} ms (apply {} µs, routed frame {} µs) — {}",
+        "patch-spike: two generations, {} ms total (gen1 apply {} µs, frame {} µs; gen2 save→apply {} ms) — {}",
         total_ms,
         apply_ns / 1_000,
         frame_ns / 1_000,
-        if ok { "PASS (< 1 s budget)" } else { "FAIL" }
+        save2.as_millis(),
+        if ok {
+            "PASS (< 1 s per save, < 1 s total)"
+        } else {
+            "FAIL"
+        }
     );
     i32::from(!ok)
+}
+
+// ---------------------------------------------------------------------------
+// D-9 incremental gate (M3): digest-gated re-emission + cycle recovery
+// ---------------------------------------------------------------------------
+
+/// The D-9 gate (`lig incremental`): drives a session through scripted edits
+/// over a temp dir and proves, end to end, that
+///
+/// 1. the first build writes every unit,
+/// 2. an unedited rebuild **keeps** the artifacts byte-for-byte (same-session
+///    memo reuse AND cross-session state gating),
+/// 3. one edit re-emits exactly the edited unit,
+/// 4. reverting the edit re-emits byte-identical output (D-8 across passes),
+/// 5. a cyclic component source denies with LIG-E020 — never a hang — and a
+///    denied pass never touches `dist` (BR-1 for watch).
+pub fn incremental() -> i32 {
+    let tmp = std::env::temp_dir().join(format!("lig-incremental-gate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let src = tmp.join("src");
+    let dist = tmp.join("dist");
+    if std::fs::create_dir_all(&src).is_err() {
+        eprintln!("incremental: cannot create the temp workspace");
+        return 1;
+    }
+    let counter_path = src.join("counter.tsx");
+    std::fs::write(&counter_path, lig_parse_solid::tests_support::COUNTER_TSX)
+        .expect("seed counter source");
+
+    let fail = |msg: String| {
+        eprintln!("incremental: {msg}");
+        let _ = std::fs::remove_dir_all(&tmp);
+        1
+    };
+    let dist_rs = || dist.join("counter.rs");
+    let file_hash = |p: &std::path::Path| -> Option<u64> {
+        std::fs::read(p).ok().map(|b| lig_core::hash::fnv1a64(&b))
+    };
+
+    let profile = lig_admission::Profile::Layout;
+
+    // Pass 1 — first build writes.
+    let mut session = lig_incremental::Session::new();
+    session.set_source(&counter_path, counter_text());
+    session.compile(profile);
+    if let Err(e) =
+        lig_incremental::emit::emit_units(&dist, session.units().as_slice(), "taffy", false)
+    {
+        return fail(format!("pass 1 emit failed: {e}"));
+    }
+    let Some(original_hash) = file_hash(&dist_rs()) else {
+        return fail("pass 1 did not write counter.rs".to_string());
+    };
+
+    // Pass 2 — same session, no edits: full memo reuse, everything kept.
+    let r2 = session.compile(profile);
+    let e2 = lig_incremental::emit::emit_units(&dist, session.units().as_slice(), "taffy", false);
+    match e2 {
+        Ok(rep) if rep.written.is_empty() && rep.kept.len() == 1 => {}
+        Ok(rep) => return fail(format!("pass 2 expected 1 kept / 0 written, got {rep:?}")),
+        Err(e) => return fail(format!("pass 2 emit failed: {e}")),
+    }
+    if !r2.all_reused() {
+        return fail("pass 2 must serve every query from memos".to_string());
+    }
+    if file_hash(&dist_rs()) != Some(original_hash) {
+        return fail("pass 2 touched a byte-identical artifact".to_string());
+    }
+
+    // Pass 3 — a fresh session (cold memos, warm build-state): still all kept.
+    let mut session = lig_incremental::Session::new();
+    session.set_source(&counter_path, counter_text());
+    session.compile(profile);
+    match lig_incremental::emit::emit_units(&dist, session.units().as_slice(), "taffy", false) {
+        Ok(rep) if rep.written.is_empty() && rep.kept.len() == 1 => {}
+        Ok(rep) => return fail(format!("pass 3 expected state-gated keep, got {rep:?}")),
+        Err(e) => return fail(format!("pass 3 emit failed: {e}")),
+    }
+
+    // Pass 4 — one edit re-emits exactly the edited unit, with different bytes.
+    let edited = counter_text().replace("Add", "Add2");
+    session.set_source(&counter_path, edited.clone());
+    let r4 = session.compile(profile);
+    if r4.recompiled.len() != 1 {
+        return fail("pass 4 must recompile exactly the edited unit".to_string());
+    }
+    match lig_incremental::emit::emit_units(&dist, session.units().as_slice(), "taffy", false) {
+        Ok(rep) if rep.written.len() == 1 && rep.kept.is_empty() => {}
+        Ok(rep) => return fail(format!("pass 4 expected 1 written, got {rep:?}")),
+        Err(e) => return fail(format!("pass 4 emit failed: {e}")),
+    }
+    let Some(edited_hash) = file_hash(&dist_rs()) else {
+        return fail("pass 4 lost counter.rs".to_string());
+    };
+    if edited_hash == original_hash {
+        return fail("pass 4 emitted identical bytes for an edited source".to_string());
+    }
+
+    // Pass 5 — revert: re-emits byte-identical output (D-8 across passes).
+    session.set_source(&counter_path, counter_text());
+    session.compile(profile);
+    match lig_incremental::emit::emit_units(&dist, session.units().as_slice(), "taffy", false) {
+        Ok(rep) if rep.written.len() == 1 => {}
+        Ok(rep) => return fail(format!("pass 5 expected a re-emit, got {rep:?}")),
+        Err(e) => return fail(format!("pass 5 emit failed: {e}")),
+    }
+    if file_hash(&dist_rs()) != Some(original_hash) {
+        return fail("pass 5 reverted output is not byte-identical (D-8)".to_string());
+    }
+
+    // Pass 6 — cycle recovery: LIG-E020 denies, dist untouched (BR-1).
+    let cycle_path = src.join("cycle.tsx");
+    session.set_source(&cycle_path, cycle_text());
+    session.compile(profile);
+    let Some(unit) = session.unit(&cycle_path) else {
+        return fail("pass 6 lost the cycle unit".to_string());
+    };
+    if unit.admitted {
+        return fail("pass 6 admitted a cyclic component import".to_string());
+    }
+    if !unit.diagnostics.iter().any(|d| d.code == "LIG-E020") {
+        return fail("pass 6 did not surface LIG-E020".to_string());
+    }
+    if file_hash(&dist_rs()) != Some(original_hash) {
+        return fail("pass 6 let a denied pass touch dist (BR-1)".to_string());
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
+    println!(
+        "incremental: digest-gated re-emit green (6 passes: write, memo-keep, state-keep, edit, revert, LIG-E020 deny)"
+    );
+    0
+}
+
+/// The counter fixture text (inlined so the gate never depends on CWD).
+fn counter_text() -> &'static str {
+    lig_parse_solid::tests_support::COUNTER_TSX
+}
+
+/// The cyclic-component source (LIG-E020 recovery case).
+fn cycle_text() -> &'static str {
+    "export function A() {\n  return <B />;\n}\n\nexport function B() {\n  return <A />;\n}\n"
 }
 
 // ---------------------------------------------------------------------------
@@ -511,8 +704,8 @@ pub fn errors_gen() -> i32 {
         .filter(|p| p.extension().is_some_and(|x| x == "md"))
         .collect();
     entries.sort();
-    for path in entries {
-        let text = std::fs::read_to_string(&path).expect("read error doc");
+    for path in &entries {
+        let text = std::fs::read_to_string(path).expect("read error doc");
         let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
         let title = text
             .lines()
@@ -550,7 +743,37 @@ pub fn errors_gen() -> i32 {
     out.push_str("];\n");
     let path = root.join("crates/lig-core/src/error_code/generated.rs");
     std::fs::write(&path, out).expect("write generated.rs");
-    println!("errors-gen: {} codes → {}", rows.len(), path.display());
+
+    // M3: the embedded catalog — `lig explain` serves these without a repo
+    // checkout (the `lig doctor` hardening).
+    let mut cat = String::from(
+        "// @generated by `lig errors-gen` from docs/errors/*.md — do not edit.\n\n//! Embedded catalog Markdown bodies (M3): shipped inside the binary so\n//! `lig explain` works far from the workspace.\n\n// Raw-string fences and literal Markdown bodies are generator-owned;\n// rustfmt must not reindent them.\n#[rustfmt::skip]\npub static CATALOG: &[(&str, &str)] = &[\n",
+    );
+    let mut embedded = 0usize;
+    for path_md in &entries {
+        let text = std::fs::read_to_string(path_md).expect("read error doc");
+        let stem = path_md.file_stem().unwrap().to_string_lossy().into_owned();
+        // Raw-string delimiters adapt to the content: a literal quote
+        // followed by the fence inside the Markdown would terminate the raw
+        // string, so grow the fence (0 hashes first — clippy wants minimal).
+        let mut hashes = 0usize;
+        while text.contains(&format!("\"{}", "#".repeat(hashes))) {
+            hashes += 1;
+        }
+        let fence = "#".repeat(hashes);
+        let _ = writeln!(cat, "    (\"{stem}\", r{fence}\"{text}\"{fence}),");
+        embedded += 1;
+    }
+    cat.push_str("];\n");
+    let cat_path = root.join("crates/lig-core/src/error_code/catalog_md.rs");
+    std::fs::write(&cat_path, cat).expect("write catalog_md.rs");
+    println!(
+        "errors-gen: {} codes ({} embedded) → {}, {}",
+        rows.len(),
+        embedded,
+        path.display(),
+        cat_path.display()
+    );
     0
 }
 
