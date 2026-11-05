@@ -232,6 +232,40 @@ pub enum EventName {
 }
 
 impl EventName {
+    /// Parse a DOM event name from an attribute (`onClick`, `@input`,
+    /// `v-on:keydown` — the `on` prefix is stripped by the callers).
+    #[must_use]
+    pub fn from_name(name: &str) -> Option<EventName> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "click" => EventName::Click,
+            "input" => EventName::Input,
+            "keydown" => EventName::Keydown,
+            "keyup" => EventName::Keyup,
+            "dblclick" => EventName::Dblclick,
+            "contextmenu" => EventName::Contextmenu,
+            "focusin" => EventName::Focusin,
+            "focusout" => EventName::Focusout,
+            "beforeinput" => EventName::Beforeinput,
+            "mousedown" => EventName::Mousedown,
+            "mouseenter" => EventName::Mouseenter,
+            "mouseleave" => EventName::Mouseleave,
+            "mousemove" => EventName::Mousemove,
+            "mouseout" => EventName::Mouseout,
+            "mouseover" => EventName::Mouseover,
+            "mouseup" => EventName::Mouseup,
+            "pointerdown" => EventName::Pointerdown,
+            "pointermove" => EventName::Pointermove,
+            "pointerout" => EventName::Pointerout,
+            "pointerover" => EventName::Pointerover,
+            "pointerup" => EventName::Pointerup,
+            "touchcancel" => EventName::Touchcancel,
+            "touchend" => EventName::Touchend,
+            "touchmove" => EventName::Touchmove,
+            "touchstart" => EventName::Touchstart,
+            _ => return None,
+        })
+    }
+
     /// Every delegatable event name, in table order (the `DELEGATABLE` set).
     pub const DELEGATABLE: &'static [EventName] = &[
         EventName::Beforeinput,
