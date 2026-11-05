@@ -56,6 +56,7 @@ pub mod generated {
     static StaticCard_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[],
         writes: &[],
+        writes_hi: &[],
     };
     impl StaticCard {
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
