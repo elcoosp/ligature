@@ -131,7 +131,7 @@ pub struct PatchReceipt {
 /// If `dlsym(RTLD_DEFAULT, "main")` fails — the ASLR anchor is load-bearing.
 pub fn apply_patch(dylib: &std::path::Path, symbols: &[&str]) -> Result<PatchReceipt, PatchError> {
     // Never-dlclose: leak the Library.
-    // SAFETY: the dylib path was produced by our own build step (xtask /
+    // SAFETY: the dylib path was produced by our own build step (patch-spike /
     // patch driver); loading it is the documented purpose of this module and
     // the loaded code is exercised only through the typed safepoint call.
     let lib: &'static libloading::Library = Box::leak(Box::new(
