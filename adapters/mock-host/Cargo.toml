@@ -1,0 +1,17 @@
+[package]
+name = "mock-host"
+description = "Mock Host adapter: records the commit stream for spike S1 render tests and compile-clean gates (§13)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+lig-runtime = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[lints]
+workspace = true
