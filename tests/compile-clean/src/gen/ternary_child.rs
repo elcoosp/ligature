@@ -20,14 +20,6 @@ pub mod generated {
     const Flip_N_REACTIONS: usize = 1usize;
     pub static Flip_TPL_T0: &[::lig_runtime::TplNode] = &[
         ::lig_runtime::TplNode::Element {
-            tag: "div",
-            attrs: &[],
-            style: None,
-            children: &[::lig_runtime::TplNode::Marker],
-        },
-    ];
-    pub static Flip_TPL_T1: &[::lig_runtime::TplNode] = &[
-        ::lig_runtime::TplNode::Element {
             tag: "i",
             attrs: &[],
             style: None,
@@ -36,6 +28,14 @@ pub mod generated {
                     value: "no",
                 },
             ],
+        },
+    ];
+    pub static Flip_TPL_T1: &[::lig_runtime::TplNode] = &[
+        ::lig_runtime::TplNode::Element {
+            tag: "div",
+            attrs: &[],
+            style: None,
+            children: &[::lig_runtime::TplNode::Marker],
         },
     ];
     pub static Flip_TPL_T2: &[::lig_runtime::TplNode] = &[
@@ -80,7 +80,7 @@ pub mod generated {
                 ev: ::lig_runtime::EvData::new(),
                 frag: ::lig_runtime::Fragment::new(
                     h,
-                    Flip_TPL_T0,
+                    Flip_TPL_T1,
                     Flip_HOLE_ANCHORS_F0,
                     Flip_BRANCH_ANCHORS_F0,
                 ),
