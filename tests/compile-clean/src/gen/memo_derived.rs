@@ -35,6 +35,7 @@ pub mod generated {
     static Sum_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8, 1u8],
         writes: &[2u64, 0u64],
+        writes_hi: &[0u64, 0u64],
     };
     const Sum_READS_A: u64 = 1u64;
     const Sum_READS_B: u64 = 1u64;
