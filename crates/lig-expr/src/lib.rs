@@ -13,7 +13,9 @@
 pub mod dyn_check;
 pub mod lower;
 pub mod pure;
+pub mod ty;
 
 pub use dyn_check::is_dynamic;
 pub use lower::{Lowering, Scope};
 pub use pure::{PURE_BUILTINS, PureBuiltin};
+pub use ty::{ty_of, ty_of_expr, value_kind_is_str};
