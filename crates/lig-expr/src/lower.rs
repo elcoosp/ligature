@@ -27,6 +27,12 @@ pub struct Scope {
     pub setter_targets: BTreeMap<String, String>,
     /// The event-object parameter name inside a handler (`e` of `(e) => …`).
     pub event_param: Option<String>,
+    /// `<For>`'s index accessor names (Solid): a *call* `i()` inside the loop
+    /// body reads the current index (§7.5).
+    pub index_accessors: BTreeSet<String>,
+    /// Vue ref/computed names read through `.value` in script contexts —
+    /// `count.value` normalizes to a `State` read (§6.3).
+    pub unwrapped_refs: BTreeSet<String>,
 }
 
 /// Lowering driver over one module.
@@ -125,20 +131,43 @@ impl<'m> Lowering<'m> {
                 }
             }
             Expression::ArrayExpression(a) => {
-                let mut items = Vec::with_capacity(a.elements.len());
+                // List literals with spread elements (`[...items(), x]`) are
+                // the admitted shape for list updates (§7.5): spreads lower
+                // to the whitelisted `arr.concat` builtin, literal batches to
+                // nested `Array` literals. Holes stay fail-closed (LIG-E001).
+                let mut acc: Option<Expr> = None;
+                let mut batch: Vec<Expr> = Vec::new();
                 for el in &a.elements {
+                    if let oxc_ast::ast::ArrayExpressionElement::SpreadElement(s) = el {
+                        let spread_id = self.lower(&s.argument, scope)?;
+                        let spread = self.module.exprs.get(spread_id).clone();
+                        let left = acc.take().or_else(|| {
+                            (!batch.is_empty()).then(|| Expr::Array(std::mem::take(&mut batch)))
+                        });
+                        batch.clear();
+                        acc = Some(match left {
+                            None => spread,
+                            Some(l) => self.concat_call(l, spread),
+                        });
+                        continue;
+                    }
                     let Some(e) = el.as_expression() else {
                         return Err(LigDiagnostic::error(
                             "LIG-E001",
-                            "array holes/spreads are outside the admitted subset",
+                            "array holes are outside the admitted subset",
                             to_span(el.span()),
                         ));
                     };
                     let lowered = self.lower(e, scope)?;
                     let value = self.module.exprs.get(lowered).clone();
-                    items.push(value);
+                    batch.push(value);
                 }
-                Ok(self.insert_spanned(Expr::Array(items), expr.span()))
+                let value = match acc {
+                    None => Expr::Array(batch),
+                    Some(a) if batch.is_empty() => a,
+                    Some(a) => self.concat_call(a, Expr::Array(batch)),
+                };
+                Ok(self.insert_spanned(value, expr.span()))
             }
             Expression::ComputedMemberExpression(m) => {
                 let obj = self.lower(&m.object, scope)?;
@@ -245,6 +274,15 @@ impl<'m> Lowering<'m> {
             }
         }
         let prop = m.property.name.as_ref();
+        // Vue script contexts read refs through `.value`; the unwrapping
+        // normalizes to a State read (§6.3).
+        if prop == "value"
+            && let Expression::Identifier(root) = &m.object
+            && scope.unwrapped_refs.contains(root.name.as_str())
+        {
+            let sid = self.intern(root.name.as_str());
+            return Ok(self.insert_spanned(Expr::State(sid), m.span));
+        }
         if prop == "length" {
             let obj = self.lower(&m.object, scope)?;
             let p = self.intern("length");
@@ -300,6 +338,11 @@ impl<'m> Lowering<'m> {
             if scope.state.contains(&name) {
                 let sid = self.intern(&name);
                 return Ok(self.insert_spanned(Expr::State(sid), call.span));
+            }
+            // `<For>`'s index accessor: i() reads the current index (§7.5).
+            if scope.index_accessors.contains(&name) {
+                let iid = self.intern(&name);
+                return Ok(self.insert_spanned(Expr::Local(iid), call.span));
             }
         }
         // Direct model-fn call: setCount(...)
@@ -435,6 +478,13 @@ impl<'m> Lowering<'m> {
         })
     }
 
+    /// `[...a, b]` → `arr.concat(a, [b])` through the pure-fn table (§7.5).
+    fn concat_call(&mut self, left: Expr, right: Expr) -> Expr {
+        let sid = self.intern("arr.concat");
+        let fid = self.module.intern_pure_fn(sid, crate::pure::BUILTIN_KIND);
+        Expr::Call(fid, vec![left, right])
+    }
+
     fn lower_args_and_call(
         &mut self,
         fid: PureFnId,
@@ -561,7 +611,7 @@ mod tests {
     use oxc_allocator::Allocator;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
-    use std::collections::BTreeMap;
+    use std::collections::{BTreeMap, BTreeSet};
 
     fn lower_src(src: &str, scope: &Scope) -> Result<Expr, String> {
         let allocator = Allocator::default();
@@ -588,6 +638,20 @@ mod tests {
             .clone())
     }
 
+    fn module_of(src: &str, scope: &Scope) -> lig_ir::ViewModule {
+        let allocator = Allocator::default();
+        let ret = Parser::new(&allocator, src, SourceType::mjs()).parse();
+        let oxc_ast::ast::Statement::ExpressionStatement(e) = &ret.program.body[0] else {
+            panic!("expected expression");
+        };
+        let mut module = lig_ir::ViewModule::new(Frontend::Solid);
+        let mut lowering = Lowering::new(&mut module);
+        lowering
+            .lower(&e.expression, scope)
+            .expect("probe source must lower");
+        module
+    }
+
     fn scope_with(states: &[&str], locals: &[&str], fns: &[&str]) -> Scope {
         Scope {
             state: states.iter().map(|s| (*s).to_string()).collect(),
@@ -595,6 +659,8 @@ mod tests {
             model_fns: fns.iter().map(|s| (*s).to_string()).collect(),
             setter_targets: BTreeMap::new(),
             event_param: None,
+            index_accessors: BTreeSet::new(),
+            unwrapped_refs: BTreeSet::new(),
         }
     }
 
@@ -605,6 +671,8 @@ mod tests {
             model_fns: std::collections::BTreeSet::new(),
             setter_targets: BTreeMap::new(),
             event_param: Some(param.to_string()),
+            index_accessors: BTreeSet::new(),
+            unwrapped_refs: BTreeSet::new(),
         }
     }
 
@@ -682,8 +750,32 @@ mod tests {
     fn array_literals_lower_to_expr_array() {
         let e = lower_src("[1, 2, 3]", &Scope::default()).unwrap();
         assert!(matches!(e, Expr::Array(items) if items.len() == 3));
-        let err = lower_src("[1, ...rest]", &Scope::default()).unwrap_err();
-        assert!(err.contains("LIG-E001"), "{err}");
+        let err = lower_src("[1, ...nope]", &Scope::default()).unwrap_err();
+        assert!(err.contains("LIG-E100"), "{err}");
+    }
+
+    #[test]
+    fn array_spreads_lower_to_concat_builtins() {
+        // [...items(), "z"] → Call(arr.concat, [State(items), Array["z"]]).
+        let e = lower_src("[...items(), \"z\"]", &scope_with(&["items"], &[], &[])).unwrap();
+        let Expr::Call(_, args) = e else {
+            panic!("expected concat call, got {e:?}");
+        };
+        assert!(matches!(args[0], Expr::State(_)));
+        assert!(matches!(&args[1], Expr::Array(a) if a.len() == 1));
+        // …and the pure-fn row is the whitelisted concat builtin.
+        let module = module_of("[...items(), \"z\"]", &scope_with(&["items"], &[], &[]));
+        assert_eq!(module.pure_fns.len(), 1);
+        assert_eq!(module.strings.get(module.pure_fns[0].name), "arr.concat");
+    }
+
+    #[test]
+    fn for_index_accessor_calls_read_locals() {
+        // i() inside a <For> body lowers to a Local read of the index (§7.5).
+        let mut scope = scope_with(&[], &["i"], &[]);
+        scope.index_accessors.insert("i".to_string());
+        let e = lower_src("i()", &scope).unwrap();
+        assert!(matches!(e, Expr::Local(_)));
     }
 
     #[test]
