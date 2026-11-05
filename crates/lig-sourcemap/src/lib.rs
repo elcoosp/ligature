@@ -145,19 +145,35 @@ pub fn ir_to_rust(
         let (line, col) = line_col(off as u32, generated);
         toks.push((line, col, 0, *rx_id, leak(reaction_name(*rx_id))));
     }
-    // Expression-level links: each expression with a span lands at the run
-    // region of the first reaction (arm-granularity fidelity; exact per-arm
-    // attribution lands with M3's digest-gated re-emit work).
+    // Expression-level links, per-arm (M3): each expression lands at the run
+    // region of the reaction that owns it — exact body match first, else the
+    // smallest reaction-body span containing it. Expressions outside every
+    // reaction body fall back to the first reaction's region.
+    let owned = expr_owners(module, links);
+    for (rx_id, const_name) in &links.reactions {
+        let needle = format!("const {const_name}: u8");
+        let Some(off) = generated.find(&needle) else {
+            continue; // verify() reports the missing marker fail-closed
+        };
+        let (line, col) = line_col(off as u32, generated);
+        for (idx, owner) in owned.iter().enumerate() {
+            if *owner == Some(*rx_id) {
+                toks.push((line, col, 0, idx as u32, leak(expr_name(idx as u32))));
+            }
+        }
+    }
     if let Some((_rx, const_name)) = links.reactions.first() {
         let needle = format!("const {const_name}: u8");
         if let Some(off) = generated.find(&needle) {
             let (line, col) = line_col(off as u32, generated);
-            for (idx, _e) in module.exprs.as_slice().iter().enumerate() {
-                let sp = module.exprs.span_of(lig_core::id::ExprId::new(idx as u32));
-                if sp.end == 0 {
-                    continue;
+            for (idx, owner) in owned.iter().enumerate() {
+                if owner.is_none() {
+                    let sp = module.exprs.span_of(lig_core::id::ExprId::new(idx as u32));
+                    if sp.end == 0 {
+                        continue;
+                    }
+                    toks.push((line, col, 0, idx as u32, leak(expr_name(idx as u32))));
                 }
-                toks.push((line, col, 0, idx as u32, leak(expr_name(idx as u32))));
             }
         }
     }
@@ -314,6 +330,60 @@ pub struct VerifyStats {
     pub merged_tokens: u32,
 }
 
+/// Per-expression reaction ownership for per-arm attribution (M3): an entry
+/// owned by the reaction whose body it is (exact), else by the reaction with
+/// the smallest body span containing it; `None` when no body covers it.
+#[must_use]
+fn expr_owners(module: &ViewModule, links: &lig_codegen::GenLinks) -> Vec<Option<u32>> {
+    let mut owners: Vec<Option<u32>> = vec![None; module.exprs.len()];
+    let bodies: Vec<(u32, (u32, u32))> = links
+        .reactions
+        .iter()
+        .filter_map(|(rx, _)| {
+            module.reactions.get(*rx as usize).map(|d| {
+                let sp = module.exprs.span_of(d.body);
+                (*rx, (sp.start, sp.end))
+            })
+        })
+        .collect();
+    for (idx, _e) in module.exprs.as_slice().iter().enumerate() {
+        let sp = module.exprs.span_of(lig_core::id::ExprId::new(idx as u32));
+        if sp.end == 0 {
+            continue;
+        }
+        let mut best: Option<(u32, u32)> = None; // (rx id, containing width)
+        for (rx, (b0, b1)) in &bodies {
+            if *b1 <= *b0 {
+                continue; // synthesized body — no containment geometry
+            }
+            let exact = sp.start == *b0 && sp.end == *b1;
+            let contains = sp.start >= *b0 && sp.end <= *b1;
+            if !exact && !contains {
+                continue;
+            }
+            let width = b1.saturating_sub(*b0);
+            let better = match best {
+                None => true,
+                Some((_rx, w)) => width < w,
+            };
+            if better {
+                best = Some((*rx, width));
+            }
+        }
+        owners[idx] = best.map(|(rx, _)| rx);
+    }
+    // Exact body entries always win over containment (same span would tie).
+    for (rx, _const) in &links.reactions {
+        if let Some(d) = module.reactions.get(*rx as usize) {
+            let b = d.body.get() as usize;
+            if b < owners.len() {
+                owners[b] = Some(*rx);
+            }
+        }
+    }
+    owners
+}
+
 fn leak(s: String) -> &'static str {
     Box::leak(s.into_boxed_str())
 }
@@ -374,6 +444,56 @@ mod tests {
         assert!(stats.expr_spans_resolved > 0);
         assert!(stats.reactions_linked >= 4, "counter reactions");
         assert!(stats.merged_tokens > 0);
+    }
+
+    #[test]
+    fn expressions_map_per_arm_to_their_own_reaction_region() {
+        let (m, _src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        // The generated position of each reaction's const marker.
+        let region_of = |name: &str| -> (u32, u32) {
+            let off = unit
+                .text
+                .find(&format!("const {name}: u8"))
+                .expect("marker");
+            super::line_col(off as u32, &unit.text)
+        };
+        let regions: Vec<(u32, (u32, u32))> = unit
+            .links
+            .reactions
+            .iter()
+            .map(|(rx, name)| (*rx, region_of(name)))
+            .collect();
+        assert!(regions.len() >= 2, "counter has several arms");
+        // Every expression attributed to a reaction resolves to that
+        // reaction's own region — different arms map to different positions.
+        let mut seen: Vec<(u32, (u32, u32))> = Vec::new();
+        for token in ir_map.get_tokens() {
+            let name = token
+                .get_name_id()
+                .and_then(|nid| ir_map.get_name(nid))
+                .unwrap_or("");
+            let Some(id) = name
+                .strip_prefix('e')
+                .and_then(|rest| rest.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            let owner = super::expr_owners(&m, &unit.links)[id as usize];
+            if let Some(rx) = owner {
+                let want = regions.iter().find(|(r, _)| *r == rx).expect("region").1;
+                let got = (token.get_dst_line(), token.get_dst_col());
+                assert_eq!(got, want, "e{id} must land in r{rx}'s own region");
+                if !seen.iter().any(|(r, _)| *r == rx) {
+                    seen.push((rx, got));
+                }
+            }
+        }
+        assert!(
+            seen.len() >= 2,
+            "at least two arms carry their own expressions: {seen:?}"
+        );
     }
 
     #[test]
