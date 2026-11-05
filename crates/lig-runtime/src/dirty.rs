@@ -49,6 +49,21 @@ impl DirtySet {
         self.low |= mask;
     }
 
+    /// Mark every bit of a spill word (word 0 = reactions 64..128).
+    ///
+    /// The spill-path counterpart of [`Self::set_mask`] — generated setters
+    /// and build-time init masks use it when a component's reaction count
+    /// exceeds the `u64` fast path (per-bit dispatch refinement, M3).
+    pub fn mark_spill_word(&mut self, word: usize, mask: u64) {
+        if mask == 0 {
+            return;
+        }
+        if self.spill.len() <= word {
+            self.spill.resize(word + 1, 0);
+        }
+        self.spill[word] |= mask;
+    }
+
     /// Read reaction `index`.
     #[must_use]
     pub fn get(&self, index: usize) -> bool {
