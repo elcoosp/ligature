@@ -17,10 +17,12 @@ lig-codegen = { workspace = true }
 lig-core = { workspace = true }
 lig-ir = { workspace = true }
 lig-parse-solid = { workspace = true }
+lig-parse-vue = { workspace = true }
 lig-sourcemap = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 oxc_sourcemap = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true
