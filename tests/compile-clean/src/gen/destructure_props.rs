@@ -38,6 +38,7 @@ pub mod generated {
     static Greeting_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8, 1u8],
         writes: &[0u64, 0u64],
+        writes_hi: &[0u64, 0u64],
     };
     const Greeting_READS_GREETING: u64 = 1u64;
     const Greeting_READS_NAME: u64 = 2u64;
