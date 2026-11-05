@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
-description = "The lig CLI: check, build, explain, resolve, inspect (§12.1)"
+description = "The lig CLI: check, build, watch, explain, resolve, inspect, doctor + the CI gates (§12.1)"
 
 [[bin]]
 name = "lig"
@@ -16,6 +16,7 @@ lig-admission = { workspace = true }
 lig-codegen = { workspace = true }
 lig-core = { workspace = true }
 lig-ir = { workspace = true }
+lig-incremental = { workspace = true }
 lig-parse-solid = { workspace = true }
 lig-parse-vue = { workspace = true }
 lig-sourcemap = { workspace = true }
