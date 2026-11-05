@@ -1,0 +1,71 @@
+# Ligature CI (§13). Gates: fmt, clippy pedantic (-D warnings), tests,
+# bench compilation (benched from day one, §14.2), S4 canonical-IR parity,
+# D-8 reproducibility, and the S2 patch-spike budget (< 1 s save→frame).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: fmt + clippy pedantic + test + gates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: rustfmt
+        run: cargo fmt --all -- --check
+      - name: clippy pedantic
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: tests
+        run: cargo test --workspace
+      - name: benchmarks compile (criterion, all targets)
+        run: cargo bench --workspace --no-run
+      - name: S4 canonical-IR parity (12 behavior fixtures)
+        run: cargo run -p xtask -- parity
+      - name: D-8 reproducibility (counter codegen byte-diff)
+        run: cargo run -p xtask -- reproducibility
+
+  patch-spike:
+    # S2 acceptance: save→frame < 1 s on Linux and macOS (§17).
+    name: S2 patch-spike (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: save→frame budget gate
+        run: cargo run -p xtask -- patch-spike
+
+  bench-swc:
+    # §2.5 / §14.2: Oxc vs SWC re-benchmark on our own workload. SWC is
+    # feature-gated (`bench-swc`) and never linked into compiler crates.
+    name: Oxc vs SWC re-benchmark
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: swc_compare bench
+        run: |
+          cargo bench -p lig-parse-solid --features bench-swc \
+            --bench swc_compare -- --warm-up-time 1 --measurement-time 3
