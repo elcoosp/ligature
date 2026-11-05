@@ -18,8 +18,8 @@ pub static REGISTRY: &[ErrorCode] = &[
     ErrorCode {
         code: "LIG-E020",
         title: "Cyclic component import",
-        reserved: true,
-        stage: "M3",
+        reserved: false,
+        stage: "active",
     },
     ErrorCode {
         code: "LIG-E100",
