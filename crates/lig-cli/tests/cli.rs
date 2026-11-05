@@ -130,3 +130,131 @@ fn rules_sync_and_reproducibility_gates_are_green() {
         assert!(out.status.success(), "lig {args:?} green: {out:?}");
     }
 }
+
+#[test]
+fn digest_gated_build_keeps_unchanged_units() {
+    let src = repo_root().join("fixtures/conformance/counter/input.solid.tsx");
+    let dist = std::env::temp_dir().join(format!("lig-cli-d9-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dist);
+    let out = lig()
+        .args(["build", &src.to_string_lossy(), "--out"])
+        .arg(&dist)
+        .output()
+        .expect("spawn lig build #1");
+    assert!(out.status.success(), "build #1 succeeds: {out:?}");
+    let stdout1 = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout1.contains("1 re-emitted"),
+        "first build writes: {stdout1}"
+    );
+    let rs = dist.join("counter.rs");
+    let bytes1 = std::fs::read(&rs).expect("counter.rs exists");
+    assert!(dist.join("build-state.json").exists(), "state file emitted");
+
+    let out = lig()
+        .args(["build", &src.to_string_lossy(), "--out"])
+        .arg(&dist)
+        .output()
+        .expect("spawn lig build #2");
+    assert!(out.status.success(), "build #2 succeeds: {out:?}");
+    let stdout2 = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout2.contains("1 kept, 0 re-emitted"),
+        "unchanged rebuild keeps (D-9): {stdout2}"
+    );
+    assert_eq!(
+        std::fs::read(&rs).expect("counter.rs still there"),
+        bytes1,
+        "kept artifact is byte-identical"
+    );
+    let _ = std::fs::remove_dir_all(&dist);
+}
+
+#[test]
+fn build_denies_cyclic_components_with_lig_e020_and_writes_nothing() {
+    let dir = std::env::temp_dir().join(format!("lig-cli-e020-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("temp src dir");
+    let src = dir.join("cycle.tsx");
+    std::fs::write(
+        &src,
+        "export function A() {\n  return <B />;\n}\n\nexport function B() {\n  return <A />;\n}\n",
+    )
+    .expect("seed cycle");
+    let dist = dir.join("dist");
+    let out = lig()
+        .args(["build", &src.to_string_lossy(), "--out"])
+        .arg(&dist)
+        .output()
+        .expect("spawn lig build on a cycle");
+    assert_eq!(out.status.code(), Some(1), "exit 1 = denied");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("LIG-E020"), "cycle code present: {stderr}");
+    assert!(stderr.contains("BR-1"), "fail-closed note: {stderr}");
+    assert!(!dist.exists(), "zero output written on denial");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn watch_once_runs_a_digest_gated_pass() {
+    let src = repo_root().join("fixtures/conformance/counter/input.solid.tsx");
+    let dist = std::env::temp_dir().join(format!("lig-cli-watch-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dist);
+    let out = lig()
+        .args([
+            "watch",
+            &src.to_string_lossy(),
+            "--out",
+            &dist.to_string_lossy(),
+            "--once",
+        ])
+        .output()
+        .expect("spawn lig watch --once");
+    assert!(out.status.success(), "watch --once is green: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("lig watch"), "watch summary: {stdout}");
+    assert!(dist.join("counter.rs").exists(), "watch emitted the unit");
+    let _ = std::fs::remove_dir_all(&dist);
+}
+
+#[test]
+fn incremental_gate_is_green() {
+    let out = lig()
+        .current_dir(repo_root())
+        .args(["incremental"])
+        .output()
+        .expect("spawn lig incremental");
+    assert!(out.status.success(), "incremental gate: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("digest-gated re-emit green"), "{stdout}");
+}
+
+#[test]
+fn doctor_reports_all_checks() {
+    let out = lig().args(["doctor"]).output().expect("spawn lig doctor");
+    assert!(out.status.success(), "doctor green: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("error catalog embedded"), "{stdout}");
+    assert!(stdout.contains("all checks pass"), "{stdout}");
+}
+
+#[test]
+fn explain_serves_the_embedded_catalog_far_from_the_repo() {
+    // Run from the temp dir: no docs/errors nearby, no ../docs — the M3
+    // embedded catalog must serve the code.
+    let out = lig()
+        .current_dir(std::env::temp_dir())
+        .args(["explain", "LIG-E114"])
+        .output()
+        .expect("spawn lig explain from /tmp");
+    assert!(out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("LIG-E114"),
+        "doc body echoes the code: {stdout}"
+    );
+    assert!(
+        stdout.contains("ligature.dev/e/LIG-E114"),
+        "catalog URL: {stdout}"
+    );
+}
