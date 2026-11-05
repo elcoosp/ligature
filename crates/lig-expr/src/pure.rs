@@ -52,6 +52,10 @@ pub const PURE_BUILTINS: &[PureBuiltin] = &[
         rust_path: "lig_runtime::pure::join",
     },
     PureBuiltin {
+        key: "arr.concat",
+        rust_path: "lig_runtime::pure::concat",
+    },
+    PureBuiltin {
         key: "str.toLowerCase",
         rust_path: "str::to_lowercase",
     },
