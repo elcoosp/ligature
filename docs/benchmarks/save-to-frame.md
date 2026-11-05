@@ -4,7 +4,7 @@ The S2 acceptance criterion is **save→frame < 1 s** on Linux and macOS:
 the wall-clock time from "the tip source was saved" to "the next frame runs
 patched code on the dummy host".
 
-## What the clock covers (`xtask patch-spike`)
+## What the clock covers (`lig patch-spike`)
 
 1. rebuild `tests/patch-tip` as a **cdylib** with v1 bodies
    (`LIG_TIP_LABEL=v1`, `LIG_TIP_COUNT=42`) — a fresh `target/` per run so
@@ -44,7 +44,7 @@ boundary cheap and the safepoint overhead negligible.
 
 - Numbers are from the M0 CI-reference runner (dev-profile tip dylib,
   debug host); re-run locally for your hardware.
-- The gate itself lives in `xtask patch-spike` and runs on Linux + macOS in
+- The gate itself lives in `lig patch-spike` and runs on Linux + macOS in
   CI (`.github/workflows/ci.yml`). Windows is skipped at M0 (unix-only
   `dlopen` protocol).
 - The dx ThinLink machinery (rustc replay + stub thunks, real app dylibs) is
