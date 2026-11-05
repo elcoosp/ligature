@@ -12,12 +12,13 @@ pub mod generated {
     use ::lig_runtime::prelude::*;
     pub struct Watcher {
         pub tick: i64,
+        pub log: ::alloc::string::String,
         pub ev: ::lig_runtime::EvData,
         pub frag: ::lig_runtime::Fragment,
     }
     #[derive(Default)]
     pub struct WatcherProps {}
-    const Watcher_N_REACTIONS: usize = 1usize;
+    const Watcher_N_REACTIONS: usize = 2usize;
     pub static Watcher_TPL_T0: &[::lig_runtime::TplNode] = &[
         ::lig_runtime::TplNode::Element {
             tag: "em",
@@ -31,22 +32,37 @@ pub mod generated {
     ];
     static Watcher_BRANCH_ANCHORS_F0: &[&[::lig_runtime::AnchorStep]] = &[];
     static Watcher_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
-        order: &[0u8],
-        writes: &[0u64],
+        order: &[0u8, 1u8],
+        writes: &[0u64, 0u64],
     };
+    const Watcher_READS_LOG: u64 = 2u64;
     const Watcher_READS_TICK: u64 = 1u64;
-    const Watcher_R0_BIND_D0: u8 = 0u8;
+    const Watcher_R0_FX: u8 = 0u8;
+    const Watcher_R1_BIND_D0: u8 = 1u8;
     impl Watcher {
         /// Generated setter — the only write path for this signal (§9.2).
         pub fn set_tick(&mut self, v: i64) {
             self.tick = v;
             self.frag.mark_mask(1u64);
         }
+        /// Generated setter — the only write path for this signal (§9.2).
+        pub fn set_log(&mut self, v: ::alloc::string::String) {
+            self.log = v;
+            self.frag.mark_mask(2u64);
+        }
+        /// Dispatch glue: capture the event payload, mark the handler
+        /// reaction, and flush (§10.1).
+        pub fn fire_0(&mut self, h: &mut dyn Host, ev: &::lig_runtime::EvData) {
+            self.ev = ev.clone();
+            self.frag.dirty.set(0usize as usize);
+            ::lig_runtime::flush(self, h);
+        }
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
         /// exclusively in reactions.
         pub fn build(h: &mut dyn Host, props: WatcherProps) -> Self {
             let mut s = Self {
                 tick: 0i64,
+                log: ::alloc::string::String::from(""),
                 ev: ::lig_runtime::EvData::new(),
                 frag: ::lig_runtime::Fragment::new(
                     h,
@@ -55,7 +71,7 @@ pub mod generated {
                     Watcher_BRANCH_ANCHORS_F0,
                 ),
             };
-            s.frag.mark_mask(0x1);
+            s.frag.mark_mask(0x3);
             ::lig_runtime::flush(&mut s, h);
             s
         }
@@ -69,14 +85,16 @@ pub mod generated {
         }
         fn run(&mut self, h: &mut dyn Host, r: u8) {
             match r {
-                Watcher_R0_BIND_D0 => {
-                    let mut buf = [0u8; 20];
-                    self.frag
-                        .set_text(
-                            h,
-                            0usize,
+                Watcher_R0_FX => {
+                    self.set_log({
+                        let mut buf = [0u8; 20];
+                        ::alloc::string::String::from(
                             ::lig_runtime::format_i64(&mut buf, self.tick),
-                        );
+                        )
+                    });
+                }
+                Watcher_R1_BIND_D0 => {
+                    self.frag.set_text(h, 0usize, &self.log);
                 }
                 _ => {}
             }
