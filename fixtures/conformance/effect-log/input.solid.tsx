@@ -1,5 +1,6 @@
 export function Watcher() {
   const [tick, setTick] = createSignal(0);
-  createEffect(() => console.log(tick()));
-  return <em>{tick()}</em>;
+  const [log, setLog] = createSignal("");
+  createEffect(() => setLog(tick().toString()));
+  return <em>{log()}</em>;
 }
