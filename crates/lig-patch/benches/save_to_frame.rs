@@ -10,7 +10,7 @@
 //!    different (same-signature) function — the steady-state patched call.
 //!
 //! The *end-to-end* save→frame budget (tip-crate recompile + relink + apply +
-//! first routed frame) is measured by the `patch-spike` xtask gate, which
+//! first routed frame) is measured by the `lig patch-spike` gate, which
 //! enforces the < 1 s acceptance criterion (§17 M0, S2) on Linux and macOS.
 //!
 //! Note on leaks: `commit_table` intentionally leaks each committed table
