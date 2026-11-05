@@ -1,7 +1,7 @@
 //! Typed expression forest (§5.5) — lowered, typed, and scope-resolved at IR
 //! time; the backend never sees JS/TS.
 
-use crate::ShapeId;
+use crate::{ShapeId, ViewModule};
 use lig_core::id::{ExprId, PureFnId, StrId};
 use serde::{Deserialize, Serialize};
 
@@ -22,6 +22,49 @@ pub struct SpanEntryLite {
     pub start: u32,
     /// End byte.
     pub end: u32,
+}
+
+/// All `State` names an expression tree reads — the dataflow edge
+/// extraction behind `reactions[].reads` (D-3). Shared by every frontend.
+pub fn collect_reads(module: &ViewModule, id: crate::ExprId) -> Vec<StrId> {
+    fn walk(e: &Expr, out: &mut Vec<StrId>) {
+        match e {
+            Expr::State(s) => out.push(*s),
+            Expr::Field(inner, _) | Expr::Unary(_, inner) => walk(inner, out),
+            Expr::Index(a, b) | Expr::Binary(_, a, b) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            Expr::Array(items) => {
+                for i in items {
+                    walk(i, out);
+                }
+            }
+            Expr::Ternary(c, a, b) => {
+                walk(c, out);
+                walk(a, out);
+                walk(b, out);
+            }
+            Expr::Tpl(parts) => {
+                for p in parts {
+                    if let TplPart::Hole(h) = p {
+                        walk(h, out);
+                    }
+                }
+            }
+            Expr::Call(_, args) => {
+                for a in args {
+                    walk(a, out);
+                }
+            }
+            Expr::Event(_) | Expr::Lit(_) | Expr::Local(_) | Expr::Native(_) => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(module.exprs.get(id), &mut out);
+    out.sort();
+    out.dedup();
+    out
 }
 
 impl ExprTable {
