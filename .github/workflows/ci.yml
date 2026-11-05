@@ -1,6 +1,9 @@
 # Ligature CI (§13). Gates: fmt, clippy pedantic (-D warnings), tests,
-# bench compilation (benched from day one, §14.2), S4 canonical-IR parity,
-# D-8 reproducibility, and the S2 patch-spike budget (< 1 s save→frame).
+# bench compilation (benched from day one, §14.2), S4 canonical-IR parity
+# (both frontend legs), D-8 reproducibility, and the S2 patch-spike budget
+# (< 1 s save→frame). The gates ship in the `lig` CLI itself (M2: the
+# former xtask folded into `lig fixtures …` / `lig reproducibility` /
+# `lig patch-spike`).
 name: CI
 
 on:
@@ -32,10 +35,14 @@ jobs:
         run: cargo test --workspace
       - name: benchmarks compile (criterion, all targets)
         run: cargo bench --workspace --no-run
-      - name: S4 canonical-IR parity (12 behavior fixtures)
-        run: cargo run -p xtask -- parity
+      - name: S4 canonical-IR parity (both frontend legs)
+        run: cargo run -p lig-cli -- fixtures verify
+      - name: NFR-5 admission fixtures
+        run: cargo run -p lig-cli -- fixtures admission
+      - name: V.7 rule table ↔ fixtures sync
+        run: cargo run -p lig-cli -- fixtures rules-sync
       - name: D-8 reproducibility (counter codegen byte-diff)
-        run: cargo run -p xtask -- reproducibility
+        run: cargo run -p lig-cli -- reproducibility
 
   patch-spike:
     # S2 acceptance: save→frame < 1 s on Linux and macOS (§17).
@@ -52,7 +59,7 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
       - name: save→frame budget gate
-        run: cargo run -p xtask -- patch-spike
+        run: cargo run -p lig-cli -- patch-spike
 
   bench-swc:
     # §2.5 / §14.2: Oxc vs SWC re-benchmark on our own workload. SWC is
