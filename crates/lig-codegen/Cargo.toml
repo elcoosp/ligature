@@ -1,0 +1,30 @@
+[package]
+name = "lig-codegen"
+description = "quote! → syn::File → prettyplease codegen; byte-reproducible; access-mode elision; readability budget (D-8, §9)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+lig-core = { workspace = true }
+lig-ir = { workspace = true }
+lig-reactivity = { workspace = true }
+prettyplease = { workspace = true }
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+criterion = { workspace = true }
+lig-parse-solid = { workspace = true }
+lig-reactivity = { workspace = true }
+
+[[bench]]
+name = "codegen"
+harness = false
+
+[lints]
+workspace = true
