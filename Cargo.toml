@@ -7,6 +7,7 @@ members = [
     "crates/lig-cli",
     "crates/lig-expr",
     "crates/lig-parse-solid",
+    "crates/lig-parse-vue",
     "crates/lig-reactivity",
     "crates/lig-sourcemap",
     "crates/lig-style",
@@ -17,7 +18,6 @@ members = [
     "adapters/mock-host",
     "tests/compile-clean",
     "tests/dummy-host",
-    "xtask",
 ]
 exclude = ["tests/patch-tip"]
 
@@ -73,6 +73,7 @@ lig-core = { path = "crates/lig-core", version = "0.1.0" }
 lig-expr = { path = "crates/lig-expr", version = "0.1.0" }
 lig-ir = { path = "crates/lig-ir", version = "0.1.0" }
 lig-parse-solid = { path = "crates/lig-parse-solid", version = "0.1.0" }
+lig-parse-vue = { path = "crates/lig-parse-vue", version = "0.1.0" }
 lig-patch = { path = "crates/lig-patch", version = "0.1.0" }
 lig-reactivity = { path = "crates/lig-reactivity", version = "0.1.0" }
 lig-runtime = { path = "crates/lig-runtime", version = "0.1.0" }
