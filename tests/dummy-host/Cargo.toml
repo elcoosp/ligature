@@ -1,0 +1,18 @@
+[package]
+name = "dummy-host"
+description = "S2 spike dummy host: exports patchable symbols, applies the tip dylib, asserts the routed frame, measures save→frame (§11.3)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "dummy-host"
+path = "src/main.rs"
+
+[dependencies]
+lig-patch = { workspace = true }
+
+[lints]
+workspace = true
