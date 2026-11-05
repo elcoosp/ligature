@@ -43,10 +43,13 @@ jobs:
         run: cargo run -p lig-cli -- fixtures rules-sync
       - name: D-8 reproducibility (counter codegen byte-diff)
         run: cargo run -p lig-cli -- reproducibility
+      - name: D-9 digest-gated re-emit + LIG-E020 cycle recovery (M3)
+        run: cargo run -p lig-cli -- incremental
 
   patch-spike:
-    # S2 acceptance: save→frame < 1 s on Linux and macOS (§17).
-    name: S2 patch-spike (${{ matrix.os }})
+    # S2 acceptance, M3 extension: two chained generations with stub thunks,
+    # < 1 s per save, on Linux and macOS (§17, ADR-016).
+    name: S2/M3 patch-spike (${{ matrix.os }})
     strategy:
       fail-fast: false
       matrix:
