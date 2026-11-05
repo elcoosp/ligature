@@ -104,6 +104,7 @@ impl Reactions for NullReactions {
         &Schedule {
             order: &[0, 1],
             writes: &[0, 0],
+            writes_hi: &[],
         }
     }
     fn dirty(&mut self) -> &mut DirtySet {
