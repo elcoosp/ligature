@@ -1,0 +1,15 @@
+---
+source: crates/lig-core/src/diagnostic.rs
+expression: rendered
+---
+]8;;https://ligature.dev/e/LIG-E114\LIG-E114 (link)]8;;\
+
+  x LIG-E114: function call with callback not admitted in view expressions
+   ,-[src/todos.tsx:2:8]
+ 1 | export function App() {
+ 2 |   return <ul>{items.filter(i => i.active)}</ul>;
+   :        ^^^^^^^^^^^^^|^^^^^^^^^^^^
+   :                     `-- function call with callback not admitted in view expressions
+ 3 | }
+   `----
+  help: move filtering into a memo in the model section, then read it here

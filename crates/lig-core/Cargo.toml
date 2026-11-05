@@ -1,0 +1,19 @@
+[package]
+name = "lig-core"
+description = "Ligature core: ids, spans, interning, error-code registry, stable hashing"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+miette = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[lints]
+workspace = true
