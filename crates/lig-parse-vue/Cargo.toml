@@ -1,0 +1,28 @@
+[package]
+name = "lig-parse-vue"
+description = "Vue SFC frontend: <script setup> + <template> lowering to the canonical View IR (§6.2)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+lig-core = { workspace = true }
+lig-expr = { workspace = true }
+lig-ir = { workspace = true }
+lig-style = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "parse"
+harness = false
+
+[lints]
+workspace = true
