@@ -88,6 +88,7 @@ pub mod generated {
     static Counter_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8, 1u8, 2u8, 3u8, 4u8],
         writes: &[24u64, 5u64, 0u64, 0u64, 0u64],
+        writes_hi: &[0u64, 0u64, 0u64, 0u64, 0u64],
     };
     const Counter_READS_COUNT: u64 = 5u64;
     const Counter_READS_DOUBLED: u64 = 24u64;
