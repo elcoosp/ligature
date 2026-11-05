@@ -1,0 +1,1700 @@
+//! Solid TSX frontend: a Rust port of the dom-expressions passes over the
+//! oxc AST (§6.1, FR-1).
+//!
+//! Spike scope (M0, S1): the `counter` component surface — elements, static
+//! and dynamic attributes, class, static style objects, delegated events,
+//! `{expr}` children, `Show`, `For`, `.map` children, ternaries, destructured
+//! props, and `createSignal`/`createMemo`/`createEffect` declarations.
+//! Anything outside the spike subset is a fail-closed diagnostic (`LIG-E001`).
+//!
+//! Pass structure mirrors dom-expressions: `is_dynamic` (in lig-expr) decides
+//! static inlining; template extraction builds the `TemplateIr`; anchors are
+//! assigned in template order (§6.1 `anchor.rs::assign`).
+
+#![forbid(unsafe_code)]
+#![deny(missing_docs)]
+
+pub mod anchors;
+
+/// Shared test/bench fixture sources.
+pub mod tests_support;
+
+use anchors::assign_anchor_paths;
+use lig_core::diagnostic::LigDiagnostic;
+use lig_core::id::{ComponentId, ExprId, ReactionId, StrId};
+use lig_core::span::Span;
+use lig_expr::lower::to_span;
+use lig_expr::{Lowering, Scope};
+use lig_ir::expr::{Expr, Lit, Ty};
+use lig_ir::fragment::{
+    ComponentIr, DynamicIr, DynamicKind, EventName, ForIr, FragmentIr, IfIr, PropBinding, PropDecl,
+    SlotIr, StateDecl, StateKind,
+};
+use lig_ir::module::{ReactionDecl, ReactionKind, Tier, ViewModule};
+use lig_ir::template::{AttrValue, NodeIr, StaticAttr, TemplateIr};
+use lig_ir::{FileId, FragmentId, Frontend, StyleConstId, TemplateId};
+use oxc_allocator::Allocator;
+use oxc_ast::ast::{
+    ArrowFunctionBody, Declaration, Expression, Function, JSXAttributeItem, JSXAttributeName,
+    JSXAttributeValue, JSXChild, JSXElementName, ModuleDeclaration, Statement, VariableDeclarator,
+};
+use oxc_parser::Parser;
+use oxc_span::GetSpan;
+use std::collections::BTreeSet;
+
+/// Lower a Solid TSX source file into a canonical View IR module.
+///
+/// # Errors
+/// All diagnostics (parse + spike admission) are returned together;
+/// fail-closed — a module with any error diagnostic produces no output (BR-1).
+pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagnostic>> {
+    let mut module = ViewModule::new(Frontend::Solid);
+    module.source_files.push(lig_ir::SourceFile {
+        id: FileId::new(0),
+        path: path.to_string(),
+        hash: lig_core::hash::fnv1a64(source.as_bytes()),
+    });
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, oxc_span::SourceType::tsx()).parse();
+    let diags: Vec<LigDiagnostic> = parsed
+        .diagnostics
+        .iter()
+        .map(|d| {
+            let span = d.labels.first().map_or(Span::PLACEHOLDER, |l| {
+                Span::new(l.offset(), l.offset() + l.len())
+            });
+            LigDiagnostic::error("LIG-E001", format!("invalid syntax: {d}"), span)
+        })
+        .collect();
+
+    // Exported components in declaration order.
+    let component_fns: Vec<&Function<'_>> = parsed
+        .program
+        .body
+        .iter()
+        .filter_map(|stmt| match stmt {
+            _ if let Some(ModuleDeclaration::ExportDeclaration(export)) =
+                stmt.as_module_declaration() =>
+            {
+                match &export.declaration {
+                    Declaration::FunctionDeclaration(f) => Some(&**f),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .collect();
+
+    // Reserve component ids so JSX use-sites resolve before lowering.
+    for f in &component_fns {
+        let name =
+            f.id.as_ref()
+                .map_or("Anonymous", |i| i.name.as_str())
+                .to_string();
+        module.components.push(lig_ir::fragment::ComponentDecl {
+            name: module.strings.intern(name),
+            root: FragmentId::new(u32::MAX),
+            props: vec![],
+        });
+    }
+
+    let mut diags = diags;
+    for (idx, f) in component_fns.iter().enumerate() {
+        let root = lower_component(&mut module, f, &mut diags);
+        module.components[idx].root = root;
+        module.components[idx].props = props_of(&mut module, f);
+    }
+
+    if diags
+        .iter()
+        .any(|d| d.severity == lig_core::diagnostic::Severity::Error)
+    {
+        return Err(diags);
+    }
+    unify_prop_types(&mut module);
+    module.canonicalize();
+    Ok(module)
+}
+
+fn props_of(module: &mut ViewModule, f: &Function<'_>) -> Vec<PropDecl> {
+    let _ = module;
+    let Some(p) = f.params.items.first() else {
+        return vec![];
+    };
+    let oxc_ast::ast::BindingPattern::ObjectPattern(obj) = &p.pattern else {
+        return vec![];
+    };
+    obj.properties
+        .iter()
+        .filter_map(|prop| match &prop.key {
+            oxc_ast::ast::PropertyKey::StaticIdentifier(id) => {
+                let name = module.strings.intern(id.name.to_string());
+                Some(PropDecl {
+                    name,
+                    ty: Ty::Str,
+                    optional: false,
+                })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Names visible inside a component body (§2.3 spike substrate).
+struct ComponentScope {
+    /// Reactive state names.
+    state: BTreeSet<String>,
+    /// Non-reactive locals.
+    local: BTreeSet<String>,
+    /// Model fns (setters).
+    model_fns: BTreeSet<String>,
+    /// Setter → written state field (for `writes` masks).
+    setter_targets: Vec<(String, String)>,
+    /// Components visible in this module (declaration order — positions are
+    /// `ComponentId`s).
+    component_names: Vec<String>,
+    /// Destructured prop names (for `children` slot detection, §7.4).
+    prop_names: BTreeSet<String>,
+    /// Event-object parameter inside a handler body (§6.1).
+    event_param: Option<String>,
+}
+
+/// One open fragment during JSX lowering.
+struct Frame {
+    fragment: FragmentId,
+    dynamics: Vec<DynamicIr>,
+    anchors: Vec<Vec<u32>>,
+    children: Vec<FragmentId>,
+}
+
+struct ComponentLowering<'a, 'm> {
+    module: &'a mut ViewModule,
+    diags: &'a mut Vec<LigDiagnostic>,
+    scope: ComponentScope,
+    branch_counter: u32,
+    frames: Vec<Frame>,
+    _marker: std::marker::PhantomData<&'m ()>,
+}
+
+fn lower_component(
+    module: &mut ViewModule,
+    f: &Function<'_>,
+    diags: &mut Vec<LigDiagnostic>,
+) -> FragmentId {
+    let comp_name =
+        f.id.as_ref()
+            .map_or("Component", |i| i.name.as_str())
+            .to_string();
+    let comp_name_id = module.strings.intern(comp_name);
+    let root = module.push_fragment(FragmentIr {
+        name: comp_name_id,
+        template: TemplateId::new(0),
+        dynamics: vec![],
+        children: vec![],
+        props: vec![],
+        returns: vec![],
+    });
+
+    let scope = scan_scope(module, f, root);
+    let mut comp = ComponentLowering {
+        module,
+        diags,
+        scope,
+        branch_counter: 0,
+        frames: vec![Frame {
+            fragment: root,
+            dynamics: vec![],
+            anchors: vec![],
+            children: vec![],
+        }],
+        _marker: std::marker::PhantomData,
+    };
+
+    let mut jsx_root: Option<&Expression<'_>> = None;
+    if let Some(body) = &f.body {
+        for stmt in &body.statements {
+            match stmt {
+                Statement::VariableDeclaration(v) => {
+                    for d in &v.declarations {
+                        comp.lower_declarator(d);
+                    }
+                }
+                Statement::ExpressionStatement(es) => {
+                    // `model(() => { ... })` — the TSX-parseable spelling of
+                    // the model!{} escape hatch (§6.5): statements inside the
+                    // block get the model treatment (state + reactions).
+                    if let Expression::CallExpression(call) = unwrap_parens(&es.expression)
+                        && let Expression::Identifier(callee) = &call.callee
+                        && callee.name == "model"
+                    {
+                        for arg in &call.arguments {
+                            let Some(Expression::ArrowFunctionExpression(arrow)) =
+                                arg.as_expression()
+                            else {
+                                continue;
+                            };
+                            let ArrowFunctionBody::FunctionBody(fb) = &arrow.body else {
+                                continue;
+                            };
+                            for inner in &fb.statements {
+                                if let Statement::VariableDeclaration(v) = inner {
+                                    for d in &v.declarations {
+                                        comp.lower_declarator(d);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                Statement::ReturnStatement(r) => {
+                    if let Some(arg) = &r.argument {
+                        let arg = unwrap_parens(arg);
+                        if matches!(arg, Expression::JSXElement(_) | Expression::JSXFragment(_)) {
+                            jsx_root = Some(arg);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    match jsx_root {
+        Some(jsx) => {
+            let mut path = Vec::new();
+            let root_node = comp.jsx_to_node(jsx, &mut path);
+            let frame = comp.frames.last().expect("root frame");
+            let tpl = comp.module.intern_template(TemplateIr::new(root_node));
+            let fi = frame.fragment.get() as usize;
+            comp.module.fragments[fi].template = tpl;
+            comp.module.fragments[fi]
+                .dynamics
+                .clone_from(&frame.dynamics);
+            comp.module.fragments[fi]
+                .children
+                .clone_from(&frame.children);
+            assign_anchor_paths(comp.module, frame.fragment, &frame.anchors);
+        }
+        None => comp.diags.push(
+            LigDiagnostic::error(
+                "LIG-E001",
+                "component has no JSX return (spike subset)",
+                Span::new(f.span.start, f.span.end),
+            )
+            .with_help(
+                "return a JSX element — the spike lowers exactly one view tree per component",
+            ),
+        ),
+    }
+    root
+}
+
+fn scan_scope(module: &mut ViewModule, f: &Function<'_>, root: FragmentId) -> ComponentScope {
+    let mut scope = ComponentScope {
+        state: BTreeSet::new(),
+        local: BTreeSet::new(),
+        model_fns: BTreeSet::new(),
+        setter_targets: vec![],
+        component_names: module
+            .components
+            .iter()
+            .map(|c| module.strings.get(c.name).to_string())
+            .collect::<Vec<_>>(),
+        prop_names: BTreeSet::new(),
+        event_param: None,
+    };
+    // Destructured props become Prop state decls (§7.6).
+    if let Some(p) = f.params.items.first()
+        && let oxc_ast::ast::BindingPattern::ObjectPattern(obj) = &p.pattern
+    {
+        for prop in &obj.properties {
+            if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &prop.value {
+                let name = module.strings.intern(id.name.to_string());
+                scope.state.insert(id.name.to_string());
+                scope.prop_names.insert(id.name.to_string());
+                module.states.push(StateDecl {
+                    name,
+                    owner: root,
+                    kind: StateKind::Prop,
+                    ty: Ty::Str,
+                    init: None,
+                });
+            }
+        }
+    }
+    if let Some(body) = &f.body {
+        for stmt in &body.statements {
+            let Statement::VariableDeclaration(v) = stmt else {
+                continue;
+            };
+            for d in &v.declarations {
+                scan_declarator_scope(module, d, &mut scope, root);
+            }
+        }
+    }
+    scope
+}
+
+fn scan_declarator_scope(
+    _module: &mut ViewModule,
+    d: &VariableDeclarator<'_>,
+    scope: &mut ComponentScope,
+    _root: FragmentId,
+) {
+    let Some(init) = &d.init else {
+        if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
+            scope.local.insert(id.name.to_string());
+        }
+        return;
+    };
+    let Expression::CallExpression(call) = init else {
+        if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
+            scope.local.insert(id.name.to_string());
+        }
+        return;
+    };
+    let Expression::Identifier(callee) = &call.callee else {
+        return;
+    };
+    match callee.name.as_str() {
+        "createSignal" => {
+            if let oxc_ast::ast::BindingPattern::ArrayPattern(arr) = &d.id
+                && let (
+                    Some(Some(oxc_ast::ast::BindingPattern::BindingIdentifier(name))),
+                    Some(Some(oxc_ast::ast::BindingPattern::BindingIdentifier(setter))),
+                ) = (arr.elements.first(), arr.elements.get(1))
+            {
+                scope.state.insert(name.name.to_string());
+                scope.model_fns.insert(setter.name.to_string());
+                scope
+                    .setter_targets
+                    .push((setter.name.to_string(), name.name.to_string()));
+            }
+        }
+        "createMemo" | "computed" | "ref" => {
+            if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
+                scope.state.insert(id.name.to_string());
+            }
+        }
+        _ => {
+            if let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id {
+                scope.local.insert(id.name.to_string());
+            }
+        }
+    }
+}
+
+impl ComponentLowering<'_, '_> {
+    fn frame(&mut self) -> &mut Frame {
+        self.frames.last_mut().expect("open frame")
+    }
+
+    fn intern(&mut self, s: impl Into<String>) -> StrId {
+        self.module.strings.intern(s)
+    }
+
+    fn lower_expr(&mut self, e: &Expression<'_>) -> Result<ExprId, LigDiagnostic> {
+        let scope = Scope {
+            state: self.scope.state.clone(),
+            local: self.scope.local.clone(),
+            model_fns: self.scope.model_fns.clone(),
+            setter_targets: self.scope.setter_targets.iter().cloned().collect(),
+            event_param: self.scope.event_param.clone(),
+        };
+        Lowering::new(self.module).lower(e, &scope)
+    }
+
+    fn push_reaction(&mut self, rx: ReactionDecl) -> ReactionId {
+        let id = ReactionId::new(self.module.reactions.len() as u32);
+        self.module.reactions.push(rx);
+        id
+    }
+
+    fn push_dynamic(
+        &mut self,
+        kind: DynamicKind,
+        expr: ExprId,
+        reads: Vec<StrId>,
+        path: &[u32],
+        writes: Vec<StrId>,
+        reaction_kind: ReactionKind,
+        span: oxc_span::Span,
+    ) {
+        let dynamic_index = self.frame().dynamics.len() as u32;
+        let owner = self.frame().fragment;
+        let reaction_id = self.push_reaction(ReactionDecl {
+            kind: match reaction_kind {
+                ReactionKind::Bind { .. } => ReactionKind::Bind {
+                    dynamic: dynamic_index,
+                },
+                other => other,
+            },
+            reads,
+            writes,
+            body: expr,
+            owner,
+        });
+        let frame = self.frame();
+        frame.anchors.push(path.to_vec());
+        frame.dynamics.push(DynamicIr {
+            anchor: lig_ir::Anchor::root(),
+            kind,
+            expr,
+            reaction: Some(reaction_id),
+            span: (span.start, span.end),
+        });
+    }
+
+    fn new_fragment(&mut self, kind_name: &str) -> FragmentId {
+        let name = format!("{kind_name}_{}", self.branch_counter);
+        self.branch_counter += 1;
+        let name_id = self.intern(name);
+        self.module.push_fragment(FragmentIr {
+            name: name_id,
+            template: TemplateId::new(0),
+            dynamics: vec![],
+            children: vec![],
+            props: vec![],
+            returns: vec![],
+        })
+    }
+
+    fn enter_fragment(&mut self, kind_name: &str) {
+        let frag = self.new_fragment(kind_name);
+        self.frames.push(Frame {
+            fragment: frag,
+            dynamics: vec![],
+            anchors: vec![],
+            children: vec![],
+        });
+    }
+
+    fn exit_fragment(&mut self) -> FragmentId {
+        let frame = self.frames.pop().expect("open frame");
+        let fi = frame.fragment.get() as usize;
+        self.module.fragments[fi]
+            .dynamics
+            .clone_from(&frame.dynamics);
+        self.module.fragments[fi]
+            .children
+            .clone_from(&frame.children);
+        assign_anchor_paths(self.module, frame.fragment, &frame.anchors);
+        let frag = frame.fragment;
+        self.frame().children.push(frag);
+        frag
+    }
+
+    /// Build a fresh fragment from one JSX expression (branch/for bodies).
+    fn fragment_from_jsx(&mut self, jsx: &Expression<'_>, kind_name: &str) -> FragmentId {
+        // Cannot hold `jsx` across `enter_fragment` (module borrow), so copy
+        // the span-based dispatch through a builder closure instead.
+        let span = jsx.span();
+        self.fragment_from(kind_name, span, Self::jsx_to_node_via_copy(jsx))
+    }
+
+    fn fragment_from(
+        &mut self,
+        kind_name: &str,
+        _span: oxc_span::Span,
+        build: impl FnOnce(&mut Self, &mut Vec<u32>) -> NodeIr,
+    ) -> FragmentId {
+        self.enter_fragment(kind_name);
+        let mut path = Vec::new();
+        let root = build(self, &mut path);
+        let tpl = self.module.intern_template(TemplateIr::new(root));
+        let frag = self.frame().fragment;
+        let fi = frag.get() as usize;
+        self.module.fragments[fi].template = tpl;
+        self.exit_fragment()
+    }
+
+    /// Wrap jsx_to_node for deferred invocation.
+    fn jsx_to_node_via_copy<'b>(
+        jsx: &'b Expression<'b>,
+    ) -> impl FnOnce(&mut Self, &mut Vec<u32>) -> NodeIr + 'b {
+        move |comp, path| comp.jsx_to_node(jsx, path)
+    }
+
+    /// `createSignal(0)` / `createMemo(() => ...)` / `createEffect(() => ...)`
+    /// normalize to StateDecls + Reactions (§6.3).
+    // One arm per reactive declaration (§6.3 normalization table).
+    #[allow(clippy::too_many_lines)]
+    fn lower_declarator(&mut self, d: &VariableDeclarator<'_>) {
+        let Some(init) = &d.init else { return };
+        let Expression::CallExpression(call) = init else {
+            return;
+        };
+        let Expression::Identifier(callee) = &call.callee else {
+            return;
+        };
+        match callee.name.as_str() {
+            "createSignal" => {
+                let oxc_ast::ast::BindingPattern::ArrayPattern(arr) = &d.id else {
+                    return;
+                };
+                let Some(Some(oxc_ast::ast::BindingPattern::BindingIdentifier(name_id))) =
+                    arr.elements.first()
+                else {
+                    return;
+                };
+                let name = self.intern(name_id.name.as_str());
+                let init_expr = call
+                    .arguments
+                    .first()
+                    .and_then(|a| a.as_expression())
+                    .map(|e| self.lower_expr(e));
+                let ty = init_expr.as_ref().map_or(Ty::Int, |e| match e {
+                    Ok(id) => ty_of_expr(self.module, *id),
+                    Err(_) => Ty::Int,
+                });
+                let init_expr = match init_expr {
+                    Some(Ok(e)) => Some(e),
+                    Some(Err(diag)) => {
+                        self.diags.push(diag);
+                        None
+                    }
+                    None => None,
+                };
+                let root = self.frames[0].fragment;
+                self.module.states.push(StateDecl {
+                    name,
+                    owner: root,
+                    kind: StateKind::Signal,
+                    ty,
+                    init: init_expr,
+                });
+            }
+            "createMemo" | "computed" | "ref" => {
+                let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &d.id else {
+                    return;
+                };
+                let name = self.intern(id.name.as_str());
+                let kind = if callee.name.as_str() == "ref" {
+                    StateKind::Signal
+                } else {
+                    StateKind::Memo
+                };
+                let root = self.frames[0].fragment;
+                let mut memo_ty = Ty::Int;
+                self.module.states.push(StateDecl {
+                    name,
+                    owner: root,
+                    kind,
+                    ty: memo_ty,
+                    init: None,
+                });
+                if let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) {
+                    let body = match arg {
+                        Expression::ArrowFunctionExpression(arrow) => arrow_body_expr(&arrow.body),
+                        other => Some(other),
+                    };
+                    if let Some(body) = body {
+                        match self.lower_expr(body) {
+                            Ok(body_id) => {
+                                memo_ty = ty_of_expr(self.module, body_id);
+                                self.module.states.last_mut().expect("just pushed").ty = memo_ty;
+                                let reads = self.collect_reads(body_id);
+                                let owner = self.frames[0].fragment;
+                                self.push_reaction(ReactionDecl {
+                                    kind: ReactionKind::Memo { target: name },
+                                    reads: reads.clone(),
+                                    writes: vec![name],
+                                    body: body_id,
+                                    owner,
+                                });
+                            }
+                            Err(diag) => self.diags.push(diag),
+                        }
+                    }
+                }
+            }
+            "createEffect" | "watchEffect" => {
+                if let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) {
+                    let body = match arg {
+                        Expression::ArrowFunctionExpression(arrow) => arrow_body_expr(&arrow.body),
+                        other => Some(other),
+                    };
+                    if let Some(body) = body {
+                        match self.lower_expr(body) {
+                            Ok(body_id) => {
+                                let reads = self.collect_reads(body_id);
+                                let owner = self.frames[0].fragment;
+                                self.push_reaction(ReactionDecl {
+                                    kind: ReactionKind::Effect { tier: Tier::Post },
+                                    reads,
+                                    writes: vec![],
+                                    body: body_id,
+                                    owner,
+                                });
+                            }
+                            Err(diag) => self.diags.push(diag),
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// All `State` names an expr tree reads (dataflow edge extraction, D-3).
+    fn collect_reads(&self, id: ExprId) -> Vec<StrId> {
+        fn walk(e: &Expr, out: &mut Vec<StrId>) {
+            match e {
+                Expr::State(s) => out.push(*s),
+                Expr::Field(inner, _) | Expr::Unary(_, inner) => walk(inner, out),
+                Expr::Index(a, b) | Expr::Binary(_, a, b) => {
+                    walk(a, out);
+                    walk(b, out);
+                }
+                Expr::Array(items) => {
+                    for i in items {
+                        walk(i, out);
+                    }
+                }
+                Expr::Ternary(c, a, b) => {
+                    walk(c, out);
+                    walk(a, out);
+                    walk(b, out);
+                }
+                Expr::Tpl(parts) => {
+                    for p in parts {
+                        if let lig_ir::expr::TplPart::Hole(h) = p {
+                            walk(h, out);
+                        }
+                    }
+                }
+                Expr::Call(_, args) => {
+                    for a in args {
+                        walk(a, out);
+                    }
+                }
+                Expr::Event(_) | Expr::Lit(_) | Expr::Local(_) | Expr::Native(_) => {}
+            }
+        }
+        let mut out = Vec::new();
+        walk(self.module.exprs.get(id), &mut out);
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    fn jsx_to_node(&mut self, jsx: &Expression<'_>, path: &mut Vec<u32>) -> NodeIr {
+        match unwrap_parens(jsx) {
+            Expression::JSXElement(el) => self.jsx_element(el, path),
+            Expression::JSXFragment(frag) => {
+                let mut children: Vec<NodeIr> = Vec::new();
+                let mut inner = Vec::new();
+                for child in &frag.children {
+                    self.jsx_child(child, &mut inner, &mut children);
+                }
+                if children.len() == 1 {
+                    children.into_iter().next().expect("one child")
+                } else {
+                    self.diags.push(
+                        LigDiagnostic::error(
+                            "LIG-E001",
+                            "multi-root JSX returns are outside the spike subset",
+                            Span::new(frag.span.start, frag.span.end),
+                        )
+                        .with_help("wrap the roots in a single element"),
+                    );
+                    NodeIr::Marker
+                }
+            }
+            other => {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "expression in JSX root position is outside the spike subset",
+                    Span::new(other.span().start, other.span().end),
+                ));
+                NodeIr::Marker
+            }
+        }
+    }
+
+    fn jsx_element(&mut self, el: &oxc_ast::ast::JSXElement<'_>, path: &mut Vec<u32>) -> NodeIr {
+        let tag = match &el.opening_element.name {
+            JSXElementName::Identifier(i) => i.name.to_string(),
+            JSXElementName::IdentifierReference(i) => i.name.to_string(),
+            _ => {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "namespaced/member JSX tags are outside the spike subset",
+                    Span::new(el.opening_element.span.start, el.opening_element.span.end),
+                ));
+                return NodeIr::Marker;
+            }
+        };
+        let is_component = tag.chars().next().is_some_and(|c| c.is_ascii_uppercase());
+        if tag == "Show" && !self.scope.component_names.iter().any(|n| n == "Show") {
+            return self.lower_show(el, path);
+        }
+        if tag == "For" && !self.scope.component_names.iter().any(|n| n == "For") {
+            return self.lower_for_component(el, path);
+        }
+        if is_component {
+            return self.lower_component_use(&tag, el, path);
+        }
+
+        let mut static_attrs: Vec<StaticAttr> = Vec::new();
+        let mut style: Option<StyleConstId> = None;
+
+        for item in &el.opening_element.attributes {
+            match item {
+                JSXAttributeItem::Attribute(attr) => {
+                    let JSXAttributeName::Identifier(name_id) = &attr.name else {
+                        continue;
+                    };
+                    let name = name_id.name.to_string();
+                    let Some(value) = &attr.value else { continue };
+                    match value {
+                        JSXAttributeValue::StringLiteral(s) => {
+                            let key = self.intern(&name);
+                            let v = self.intern(s.value.as_str().unwrap_or(""));
+                            static_attrs.push(StaticAttr {
+                                key,
+                                value: AttrValue::Str(v),
+                            });
+                        }
+                        JSXAttributeValue::ExpressionContainer(c) => {
+                            let Some(e) = c.expression.as_expression() else {
+                                continue;
+                            };
+                            if name == "style"
+                                && let Expression::ObjectExpression(obj) = e
+                            {
+                                match self.static_style_object(obj) {
+                                    Ok(Some(id)) => {
+                                        style = Some(id);
+                                        continue;
+                                    }
+                                    Ok(None) => {
+                                        // Dynamic style object: per-property
+                                        // StyleProp dynamics (§8.2) + a Lint.
+                                        if let Some(folded) =
+                                            self.lower_dynamic_style_object(obj, path)
+                                        {
+                                            style = Some(folded);
+                                        }
+                                        continue;
+                                    }
+                                    Err(diag) => {
+                                        self.diags.push(diag);
+                                        continue;
+                                    }
+                                }
+                            }
+                            self.lower_attr_dynamic(&name, e, path);
+                        }
+                        _ => {
+                            self.diags.push(LigDiagnostic::error(
+                                "LIG-E001",
+                                "attribute form outside the admitted subset",
+                                Span::new(attr.span.start, attr.span.end),
+                            ));
+                        }
+                    }
+                }
+                JSXAttributeItem::SpreadAttribute(sp) => {
+                    self.lower_spread_attribute(sp, path, &mut static_attrs);
+                }
+            }
+        }
+
+        let mut children: Vec<NodeIr> = Vec::new();
+        for child in &el.children {
+            self.jsx_child(child, path, &mut children);
+        }
+
+        let tag_id = self.intern(&tag);
+        NodeIr::Element {
+            tag: tag_id,
+            static_attrs,
+            style,
+            children,
+        }
+    }
+
+    /// `style={{ display: "flex" }}` with all-literal values → const style.
+    /// `Ok(None)` means the object is dynamic (caller lowers a Style dynamic).
+    fn static_style_object(
+        &mut self,
+        obj: &oxc_ast::ast::ObjectExpression<'_>,
+    ) -> Result<Option<StyleConstId>, LigDiagnostic> {
+        let mut css = String::new();
+        for prop in &obj.properties {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop else {
+                return Ok(None);
+            };
+            let key = match &p.key {
+                oxc_ast::ast::PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+                oxc_ast::ast::PropertyKey::StringLiteral(s) => {
+                    s.value.as_str().unwrap_or("").to_string()
+                }
+                _ => return Ok(None),
+            };
+            let Expression::StringLiteral(v) = &p.value else {
+                return Ok(None);
+            };
+            css.push_str(&camel_to_kebab(&key));
+            css.push(':');
+            css.push_str(v.value.as_str().unwrap_or(""));
+            css.push(';');
+        }
+        let ir = lig_style::parse_declarations(&css, Span::PLACEHOLDER)?;
+        let mut strings = std::mem::take(&mut self.module.strings);
+        let style_const = lig_style::to_style_const(&ir, &mut strings);
+        self.module.strings = strings;
+        Ok(Some(self.module.intern_style(style_const)))
+    }
+
+    /// Dynamic style object: `style={{ color: c, "font-size": "14px" }}` —
+    /// static-valued keys fold into a const style (returned); dynamic-valued
+    /// keys lower to per-property `StyleProp` dynamics with a LIG-W102 Lint
+    /// (§8.2).
+    fn lower_dynamic_style_object(
+        &mut self,
+        obj: &oxc_ast::ast::ObjectExpression<'_>,
+        path: &[u32],
+    ) -> Option<StyleConstId> {
+        let span = obj.span;
+        self.module.lints.push(lig_ir::module::LintNote {
+            code: "LIG-W102".to_string(),
+            message:
+                "style object with dynamic values re-created per update — prefer static classes"
+                    .to_string(),
+            start: span.start,
+            end: span.end,
+        });
+        let mut static_css = String::new();
+        for prop in &obj.properties {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop else {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "spread/computed keys in style objects are outside the admitted subset",
+                    to_span(prop.span()),
+                ));
+                continue;
+            };
+            let key = match &p.key {
+                oxc_ast::ast::PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+                oxc_ast::ast::PropertyKey::StringLiteral(s) => {
+                    s.value.as_str().unwrap_or("").to_string()
+                }
+                _ => {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "computed style keys are outside the admitted subset",
+                        to_span(p.key.span()),
+                    ));
+                    continue;
+                }
+            };
+            let kebab = camel_to_kebab(&key);
+            let value = &p.value;
+            match value {
+                Expression::StringLiteral(s) => {
+                    static_css.push_str(&kebab);
+                    static_css.push(':');
+                    static_css.push_str(s.value.as_str().unwrap_or(""));
+                    static_css.push(';');
+                }
+                Expression::TemplateLiteral(t) if t.expressions.is_empty() => {
+                    static_css.push_str(&kebab);
+                    static_css.push(':');
+                    static_css.push_str(t.quasis.first().map_or("", |q| q.value.raw.as_str()));
+                    static_css.push(';');
+                }
+                _ => {
+                    let Ok(expr) = self.lower_expr(value) else {
+                        continue;
+                    };
+                    // v1: CSS values are strings (§8.1 longhand values).
+                    if value_kind_is_str(self.module, expr) {
+                        let prop_id = self.intern(kebab);
+                        let reads = self.collect_reads(expr);
+                        self.push_dynamic(
+                            DynamicKind::StyleProp { prop: prop_id },
+                            expr,
+                            reads,
+                            path,
+                            vec![],
+                            ReactionKind::Bind { dynamic: 0 },
+                            value.span(),
+                        );
+                    } else {
+                        self.diags.push(LigDiagnostic::error(
+                            "LIG-E001",
+                            "style property values must lower to strings in v1 (format with a template literal)",
+                            to_span(value.span()),
+                        ));
+                    }
+                }
+            }
+        }
+        if !static_css.is_empty()
+            && let Ok(ir) = lig_style::parse_declarations(&static_css, Span::PLACEHOLDER)
+        {
+            let mut strings = std::mem::take(&mut self.module.strings);
+            let style_const = lig_style::to_style_const(&ir, &mut strings);
+            self.module.strings = strings;
+            return Some(self.module.intern_style(style_const));
+        }
+        None
+    }
+
+    /// `{...attrs}`: object-literal spreads only (§6.1 spread row). Static
+    /// values inline as template attrs; dynamic values lower as per-key
+    /// dynamics; a dynamic-valued spread carries a LIG-W101 Lint.
+    fn lower_spread_attribute(
+        &mut self,
+        sp: &oxc_ast::ast::JSXSpreadAttribute<'_>,
+        path: &[u32],
+        static_attrs: &mut Vec<StaticAttr>,
+    ) {
+        let Expression::ObjectExpression(obj) = unwrap_parens(&sp.argument) else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "spread of a non-literal object is outside the admitted subset (keys must be statically visible)",
+                Span::new(sp.span.start, sp.span.end),
+            )
+            .with_help("write the attributes out, or spread an object literal"));
+            return;
+        };
+        let mut dynamic = false;
+        for prop in &obj.properties {
+            let oxc_ast::ast::ObjectPropertyKind::ObjectProperty(p) = prop else {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "spread objects with spread/computed keys are outside the admitted subset",
+                    to_span(prop.span()),
+                ));
+                continue;
+            };
+            let key = match &p.key {
+                oxc_ast::ast::PropertyKey::StaticIdentifier(id) => id.name.to_string(),
+                oxc_ast::ast::PropertyKey::StringLiteral(s) => {
+                    s.value.as_str().unwrap_or("").to_string()
+                }
+                _ => {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "computed spread keys are outside the admitted subset",
+                        to_span(p.key.span()),
+                    ));
+                    continue;
+                }
+            };
+            let value = &p.value;
+            match value {
+                Expression::StringLiteral(s) => {
+                    let k = self.intern(&key);
+                    let v = self.intern(s.value.as_str().unwrap_or(""));
+                    static_attrs.push(StaticAttr {
+                        key: k,
+                        value: AttrValue::Str(v),
+                    });
+                }
+                Expression::BooleanLiteral(b) => {
+                    let k = self.intern(&key);
+                    static_attrs.push(StaticAttr {
+                        key: k,
+                        value: AttrValue::Bool(b.value),
+                    });
+                }
+                Expression::NumericLiteral(n) => {
+                    let k = self.intern(&key);
+                    static_attrs.push(StaticAttr {
+                        key: k,
+                        value: AttrValue::Num(n.value),
+                    });
+                }
+                _ => {
+                    dynamic = true;
+                    self.lower_attr_dynamic(&key, value, path);
+                }
+            }
+        }
+        if dynamic {
+            self.module.lints.push(lig_ir::module::LintNote {
+                code: "LIG-W101".to_string(),
+                message: "dynamic spread on an element lowers to per-key update dynamics — prefer explicit attributes on hot elements".to_string(),
+                start: sp.span.start,
+                end: sp.span.end,
+            });
+        }
+    }
+
+    fn lower_attr_dynamic(&mut self, name: &str, e: &Expression<'_>, path: &[u32]) {
+        if let Some(event) = name.strip_prefix("on").and_then(event_from_jsx_name) {
+            self.lower_event(event, e, path);
+            return;
+        }
+        let expr = match self.lower_expr(e) {
+            Ok(x) => x,
+            Err(d) => {
+                self.diags.push(d);
+                return;
+            }
+        };
+        let kind = match name {
+            "class" | "className" => DynamicKind::Class,
+            "ref" => DynamicKind::Ref,
+            "style" => DynamicKind::Style,
+            "innerHTML" => DynamicKind::Html,
+            other => DynamicKind::Attr {
+                key: self.intern(other),
+            },
+        };
+        let reads = self.collect_reads(expr);
+        self.push_dynamic(
+            kind,
+            expr,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            e.span(),
+        );
+    }
+
+    fn lower_event(&mut self, event: EventName, e: &Expression<'_>, path: &[u32]) {
+        let body: Option<&Expression<'_>> = match e {
+            Expression::ArrowFunctionExpression(arrow) => match &arrow.body {
+                ArrowFunctionBody::FunctionBody(fb) => match fb.statements.first() {
+                    Some(Statement::ExpressionStatement(es)) => Some(&es.expression),
+                    Some(Statement::ReturnStatement(r)) => r.argument.as_ref().map(unwrap_parens),
+                    _ => None,
+                },
+                other => other.as_expression(),
+            },
+            other => Some(other),
+        };
+        let Some(body) = body else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "block-bodied event handlers are outside the admitted subset (use a single expression, or a model fn call)",
+                Span::new(e.span().start, e.span().end),
+            ));
+            return;
+        };
+        // The handler's event parameter makes event-field reads visible
+        // (§6.1: handlers compile to model fns with `&mut Ctx, Ev`).
+        let mut event_param = None;
+        if let Expression::ArrowFunctionExpression(arrow) = e
+            && let Some(p) = arrow.params.items.first()
+            && let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &p.pattern
+        {
+            event_param = Some(id.name.to_string());
+        }
+        self.scope.event_param = event_param;
+        let lowered = self.lower_expr(body);
+        self.scope.event_param = None;
+        let expr = match lowered {
+            Ok(x) => x,
+            Err(d) => {
+                self.diags.push(d);
+                return;
+            }
+        };
+        let mut writes = Vec::new();
+        let targets = self.scope.setter_targets.clone();
+        for (setter, target) in &targets {
+            if self.references_setter(expr, setter) {
+                writes.push(self.intern(target));
+            }
+        }
+        self.push_dynamic(
+            DynamicKind::Event {
+                event,
+                delegate: true,
+            },
+            expr,
+            vec![], // dispatch-driven: never scheduled by reads (§7.1)
+            path,
+            writes,
+            ReactionKind::Effect { tier: Tier::Post },
+            e.span(),
+        );
+    }
+
+    fn references_setter(&self, expr: ExprId, setter: &str) -> bool {
+        let Expr::Call(fid, _) = self.module.exprs.get(expr) else {
+            return false;
+        };
+        let Some(decl) = self.module.pure_fns.get(fid.get() as usize) else {
+            return false;
+        };
+        self.module.strings.get(decl.name) == setter
+    }
+
+    fn lower_show(&mut self, el: &oxc_ast::ast::JSXElement<'_>, path: &[u32]) -> NodeIr {
+        let cond_src = el.opening_element.attributes.iter().find_map(|item| {
+            let JSXAttributeItem::Attribute(attr) = item else {
+                return None;
+            };
+            let JSXAttributeName::Identifier(id) = &attr.name else {
+                return None;
+            };
+            if id.name != "when" {
+                return None;
+            }
+            match &attr.value {
+                Some(JSXAttributeValue::ExpressionContainer(c)) => c.expression.as_expression(),
+                _ => None,
+            }
+        });
+        let Some(cond_src) = cond_src else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "<Show> without `when` is not lowerable",
+                Span::new(el.opening_element.span.start, el.opening_element.span.end),
+            ));
+            return NodeIr::Marker;
+        };
+        let Ok(cond) = self.lower_expr(cond_src) else {
+            return NodeIr::Marker;
+        };
+        // Branch fragment: a single element child becomes the branch template
+        // root; anchors inside it are root-relative (fresh path space).
+        let element_child = el.children.iter().find_map(|c| match c {
+            JSXChild::Element(e) => Some(&**e),
+            _ => None,
+        });
+        let then_frag = if let Some(e) = element_child {
+            let jsx_el = e;
+            self.fragment_from("branch", el.span(), move |comp, path| {
+                comp.jsx_element(jsx_el, path)
+            })
+        } else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "multi-element branch bodies are outside the spike subset",
+                Span::new(el.span().start, el.span().end),
+            ));
+            self.enter_fragment("branch");
+            self.exit_fragment()
+        };
+        let reads = self.collect_reads(cond);
+        self.push_dynamic(
+            DynamicKind::If(IfIr {
+                cond,
+                then: then_frag,
+                else_: None,
+            }),
+            cond,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            el.span(),
+        );
+        NodeIr::Marker
+    }
+
+    fn lower_for_component(&mut self, el: &oxc_ast::ast::JSXElement<'_>, path: &[u32]) -> NodeIr {
+        let each = el.opening_element.attributes.iter().find_map(|item| {
+            let JSXAttributeItem::Attribute(attr) = item else {
+                return None;
+            };
+            let JSXAttributeName::Identifier(id) = &attr.name else {
+                return None;
+            };
+            if id.name != "each" {
+                return None;
+            }
+            match &attr.value {
+                Some(JSXAttributeValue::ExpressionContainer(c)) => c.expression.as_expression(),
+                _ => None,
+            }
+        });
+        let Some(each_src) = each else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "<For> without `each` is not lowerable",
+                Span::new(el.opening_element.span.start, el.opening_element.span.end),
+            ));
+            return NodeIr::Marker;
+        };
+        let Ok(source) = self.lower_expr(each_src) else {
+            return NodeIr::Marker;
+        };
+        let mut item_name: Option<String> = None;
+        let mut index_name: Option<String> = None;
+        let mut body_jsx: Option<&Expression<'_>> = None;
+        for child in &el.children {
+            let JSXChild::ExpressionContainer(c) = child else {
+                continue;
+            };
+            let Some(Expression::ArrowFunctionExpression(arrow)) = c.expression.as_expression()
+            else {
+                continue;
+            };
+            if let Some(p) = arrow.params.items.first()
+                && let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &p.pattern
+            {
+                item_name = Some(id.name.to_string());
+            }
+            if let Some(p) = arrow.params.items.get(1)
+                && let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &p.pattern
+            {
+                index_name = Some(id.name.to_string());
+            }
+            body_jsx = arrow_body_expr(&arrow.body);
+        }
+        let (Some(item), Some(body_src)) = (item_name, body_jsx) else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "<For> requires a function child `(item) => jsx`",
+                Span::new(el.opening_element.span.start, el.opening_element.span.end),
+            ));
+            return NodeIr::Marker;
+        };
+        let item_id = self.intern(&item);
+        self.scope.local.insert(item);
+        if let Some(i) = &index_name {
+            self.scope.local.insert(i.clone());
+        }
+        let body_frag = self.fragment_from_jsx(body_src, "items");
+        let index_id = index_name.as_ref().map(|i| self.intern(i));
+        let reads = self.collect_reads(source);
+        self.push_dynamic(
+            DynamicKind::For(ForIr {
+                source,
+                item: item_id,
+                index: index_id,
+                key: None, // Solid <For> keys by item reference (§6.1)
+                body: body_frag,
+            }),
+            source,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            el.span(),
+        );
+        NodeIr::Marker
+    }
+
+    fn lower_component_use(
+        &mut self,
+        tag: &str,
+        el: &oxc_ast::ast::JSXElement<'_>,
+        path: &[u32],
+    ) -> NodeIr {
+        let Some(component_idx) = self.scope.component_names.iter().position(|n| n == tag) else {
+            self.diags.push(
+                LigDiagnostic::error(
+                    "LIG-E100",
+                    format!("unknown component `{tag}`"),
+                    Span::new(el.span().start, el.span().end),
+                )
+                .with_help("export the component from this module"),
+            );
+            return NodeIr::Marker;
+        };
+        let mut props: Vec<PropBinding> = Vec::new();
+        for item in &el.opening_element.attributes {
+            let JSXAttributeItem::Attribute(attr) = item else {
+                continue;
+            };
+            let JSXAttributeName::Identifier(name) = &attr.name else {
+                continue;
+            };
+            let value = match &attr.value {
+                Some(JSXAttributeValue::ExpressionContainer(c)) => {
+                    let Some(e) = c.expression.as_expression() else {
+                        continue;
+                    };
+                    match self.lower_expr(e) {
+                        Ok(v) => v,
+                        Err(d) => {
+                            self.diags.push(d);
+                            continue;
+                        }
+                    }
+                }
+                // Static string props: `title="Status"` (§7.6 — plain fields).
+                Some(JSXAttributeValue::StringLiteral(s)) => {
+                    let v = self.intern(s.value.as_str().unwrap_or(""));
+                    self.module.insert_expr(Expr::Lit(Lit::Str(v)))
+                }
+                _ => continue,
+            };
+            props.push(PropBinding {
+                prop: self.intern(name.name.to_string()),
+                value,
+            });
+        }
+        let mut reads: Vec<StrId> = props
+            .iter()
+            .flat_map(|p| self.collect_reads(p.value))
+            .collect();
+        reads.sort();
+        reads.dedup();
+        let prop_expr = props.first().map_or_else(
+            || self.module.insert_expr(Expr::Lit(Lit::Null)),
+            |p| p.value,
+        );
+        let mut slots: Vec<SlotIr> = Vec::new();
+        let element_children: Vec<&oxc_ast::ast::JSXElement<'_>> = el
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                JSXChild::Element(e) => Some(&**e),
+                _ => None,
+            })
+            .collect();
+        if !element_children.is_empty() {
+            if element_children.len() > 1 {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "multi-element slot fills are outside the admitted subset (wrap them in one element)",
+                    Span::new(el.span().start, el.span().end),
+                ));
+            } else if let Some(child_el) = element_children.first() {
+                let jsx_el = *child_el;
+                let fill = self.fragment_from("slotfill", el.span(), move |comp, path| {
+                    comp.jsx_element(jsx_el, path)
+                });
+                slots.push(SlotIr {
+                    name: self.intern("default"),
+                    fallback: Some(fill),
+                });
+            }
+        }
+        let component = ComponentIr {
+            component: ComponentId::new(component_idx as u32),
+            props,
+            slots,
+        };
+        self.push_dynamic(
+            DynamicKind::Component(component),
+            prop_expr,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            el.span(),
+        );
+        NodeIr::Marker
+    }
+
+    fn jsx_child(&mut self, child: &JSXChild<'_>, path: &mut Vec<u32>, out: &mut Vec<NodeIr>) {
+        match child {
+            JSXChild::Element(el) => {
+                path.push(out.len() as u32);
+                let node = self.jsx_element(el, path);
+                path.pop();
+                out.push(node);
+            }
+            JSXChild::ExpressionContainer(c) => {
+                let Some(e) = c.expression.as_expression() else {
+                    return;
+                };
+                path.push(out.len() as u32);
+                let node = self.jsx_child_expr(e, path);
+                path.pop();
+                out.push(node);
+            }
+            JSXChild::Text(t) => {
+                let raw = t.value.as_str();
+                if raw.trim().is_empty() {
+                    return; // Solid drops whitespace-only text with a newline
+                }
+                let id = self.intern(raw.trim());
+                out.push(NodeIr::Text { value: id });
+            }
+            JSXChild::Spread(_) => {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "JSX spread children are outside the spike subset",
+                    Span::new(child.span().start, child.span().end),
+                ));
+            }
+            JSXChild::Fragment(_) => {}
+        }
+    }
+
+    fn jsx_child_expr(&mut self, e: &Expression<'_>, path: &[u32]) -> NodeIr {
+        if let Expression::CallExpression(call) = e
+            && let Expression::StaticMemberExpression(m) = &call.callee
+            && m.property.name == "map"
+        {
+            return self.lower_map_call(&m.object, call, path);
+        }
+        if let Expression::ConditionalExpression(c) = e {
+            // jsx_child_expr receives a shared path; ternary lowering does not
+            // mutate it (branch fragments use fresh path spaces).
+            let mut path_copy = path.to_vec();
+            return self.lower_ternary(c, &mut path_copy);
+        }
+        // `children` (a destructured prop read) in child position is the
+        // slot outlet (§7.4): the parent fills it at build time.
+        if let Expression::Identifier(id) = unwrap_parens(e)
+            && id.name == "children"
+            && self.scope.prop_names.contains("children")
+        {
+            let null = self.module.insert_expr(Expr::Lit(Lit::Null));
+            let slot_name = self.intern("default");
+            self.push_dynamic(
+                DynamicKind::Slot { name: slot_name },
+                null,
+                vec![],
+                path,
+                vec![],
+                ReactionKind::Bind { dynamic: 0 },
+                e.span(),
+            );
+            return NodeIr::Marker;
+        }
+        let expr = match self.lower_expr(e) {
+            Ok(x) => x,
+            Err(d) => {
+                self.diags.push(d);
+                return NodeIr::Marker;
+            }
+        };
+        let reads = self.collect_reads(expr);
+        self.push_dynamic(
+            DynamicKind::Text,
+            expr,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            e.span(),
+        );
+        NodeIr::Marker
+    }
+
+    fn lower_map_call(
+        &mut self,
+        source_expr: &Expression<'_>,
+        call: &oxc_ast::ast::CallExpression<'_>,
+        path: &[u32],
+    ) -> NodeIr {
+        let Ok(source) = self.lower_expr(source_expr) else {
+            return NodeIr::Marker;
+        };
+        let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) else {
+            return NodeIr::Marker;
+        };
+        let Expression::ArrowFunctionExpression(arrow) = arg else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E114",
+                "calls with callbacks are admitted only as `.map` in child position",
+                Span::new(call.span.start, call.span.end),
+            ));
+            return NodeIr::Marker;
+        };
+        let mut item_name: Option<String> = None;
+        if let Some(p) = arrow.params.items.first()
+            && let oxc_ast::ast::BindingPattern::BindingIdentifier(id) = &p.pattern
+        {
+            item_name = Some(id.name.to_string());
+        }
+        let body_src = arrow_body_expr(&arrow.body);
+        let (Some(item), Some(body_src)) = (item_name, body_src) else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "`.map` callbacks must return JSX directly (spike subset)",
+                Span::new(call.span.start, call.span.end),
+            ));
+            return NodeIr::Marker;
+        };
+        let item_id = self.intern(&item);
+        self.scope.local.insert(item);
+        let body_frag = self.fragment_from_jsx(body_src, "items");
+        let reads = self.collect_reads(source);
+        self.push_dynamic(
+            DynamicKind::For(ForIr {
+                source,
+                item: item_id,
+                index: None,
+                key: None,
+                body: body_frag,
+            }),
+            source,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            call.span,
+        );
+        NodeIr::Marker
+    }
+
+    fn lower_ternary(
+        &mut self,
+        c: &oxc_ast::ast::ConditionalExpression<'_>,
+        path: &mut Vec<u32>,
+    ) -> NodeIr {
+        let path = &*path;
+        let Ok(cond) = self.lower_expr(&c.test) else {
+            return NodeIr::Marker;
+        };
+        let then_frag = self.fragment_from_jsx(&c.consequent, "then");
+        let else_frag = self.fragment_from_jsx(&c.alternate, "els");
+        let reads = self.collect_reads(cond);
+        self.push_dynamic(
+            DynamicKind::If(IfIr {
+                cond,
+                then: then_frag,
+                else_: Some(else_frag),
+            }),
+            cond,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            c.span(),
+        );
+        NodeIr::Marker
+    }
+}
+
+fn arrow_body_expr<'a, 'b>(body: &'a ArrowFunctionBody<'b>) -> Option<&'a Expression<'b>> {
+    match body {
+        ArrowFunctionBody::FunctionBody(fb) => match fb.statements.first() {
+            Some(Statement::ReturnStatement(r)) => r.argument.as_ref().map(unwrap_parens),
+            Some(Statement::ExpressionStatement(es)) => Some(&es.expression),
+            _ => None,
+        },
+        other => other.as_expression(),
+    }
+}
+
+fn unwrap_parens<'a, 'b>(e: &'a Expression<'b>) -> &'a Expression<'b> {
+    match e {
+        Expression::ParenthesizedExpression(p) => &p.expression,
+        other => other,
+    }
+}
+
+/// Infer the small-lattice type of a lowered expression (§5.5; unknown ⇒
+/// `Int` — the numeric default for the spike's arithmetic-first subset).
+fn ty_of(module: &ViewModule, e: &Expr) -> Ty {
+    match e {
+        Expr::Lit(Lit::Float(_)) => Ty::Float,
+        Expr::Lit(Lit::Bool(_)) | Expr::Unary(lig_ir::expr::UnOp::Not, _) => Ty::Bool,
+        // For-item/index locals type by use; strings dominate fixtures (v1).
+        Expr::Lit(Lit::Str(_))
+        | Expr::Local(_)
+        | Expr::Event(_)
+        | Expr::Tpl(_)
+        | Expr::Native(_) => Ty::Str,
+        Expr::State(s) => module.state_by_name(*s).map_or(Ty::Int, |d| d.ty.clone()),
+        Expr::Field(obj, f) => {
+            if module.strings.get(*f) == "length" {
+                Ty::Int
+            } else {
+                ty_of(module, obj)
+            }
+        }
+        Expr::Array(items) => Ty::List(Box::new(
+            items.first().map_or(Ty::Int, |i| ty_of(module, i)),
+        )),
+        Expr::Ternary(_, a, _) => ty_of(module, a),
+        Expr::Binary(op, _, _) if is_bool_binop(*op) => Ty::Bool,
+        // Int/Null literals and everything unlisted fall to the numeric
+        // default (§5.5: unknown ⇒ Int).
+        _ => Ty::Int,
+    }
+}
+
+fn ty_of_expr(module: &ViewModule, id: ExprId) -> Ty {
+    ty_of(module, module.exprs.get(id))
+}
+
+fn value_kind_is_str(module: &ViewModule, id: ExprId) -> bool {
+    matches!(
+        ty_of(module, module.exprs.get(id)),
+        Ty::Str | Ty::List(_) | Ty::Bool
+    )
+}
+
+fn is_bool_binop(op: lig_ir::expr::BinOp) -> bool {
+    use lig_ir::expr::BinOp as B;
+    matches!(
+        op,
+        B::Eq | B::Neq | B::Lt | B::Lte | B::Gt | B::Gte | B::And | B::Or
+    )
+}
+
+/// Post-pass: unify each component's prop types with the types its callers
+/// bind (§7.6 — props are plain struct fields, typed once). String wins over
+/// numeric (rendering is the dominant use; arithmetic props keep `Int` only
+/// when every binder is numeric).
+fn unify_prop_types(module: &mut ViewModule) {
+    let uses: Vec<(usize, StrId, ExprId)> = module
+        .fragments
+        .iter()
+        .flat_map(|f| f.dynamics.iter())
+        .filter_map(|d| match &d.kind {
+            DynamicKind::Component(c) => Some(c.clone()),
+            _ => None,
+        })
+        .flat_map(|c| {
+            c.props
+                .into_iter()
+                .map(move |p| (c.component.get() as usize, p.prop, p.value))
+        })
+        .collect();
+    for (comp_idx, prop_name, value) in uses {
+        let ty = ty_of_expr(module, value);
+        let Some(decl) = module.components.get_mut(comp_idx) else {
+            continue;
+        };
+        if let Some(p) = decl.props.iter_mut().find(|p| p.name == prop_name) {
+            p.ty = ty;
+        }
+    }
+}
+
+fn camel_to_kebab(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+fn event_from_jsx_name(rest: &str) -> Option<EventName> {
+    match rest.to_ascii_lowercase().as_str() {
+        "click" => Some(EventName::Click),
+        "input" => Some(EventName::Input),
+        "keydown" => Some(EventName::Keydown),
+        "keyup" => Some(EventName::Keyup),
+        "dblclick" => Some(EventName::Dblclick),
+        "contextmenu" => Some(EventName::Contextmenu),
+        "focusin" => Some(EventName::Focusin),
+        "focusout" => Some(EventName::Focusout),
+        "beforeinput" => Some(EventName::Beforeinput),
+        "mousedown" => Some(EventName::Mousedown),
+        "mouseenter" => Some(EventName::Mouseenter),
+        "mouseleave" => Some(EventName::Mouseleave),
+        "mousemove" => Some(EventName::Mousemove),
+        "mouseout" => Some(EventName::Mouseout),
+        "mouseover" => Some(EventName::Mouseover),
+        "mouseup" => Some(EventName::Mouseup),
+        "pointerdown" => Some(EventName::Pointerdown),
+        "pointermove" => Some(EventName::Pointermove),
+        "pointerout" => Some(EventName::Pointerout),
+        "pointerover" => Some(EventName::Pointerover),
+        "pointerup" => Some(EventName::Pointerup),
+        "touchcancel" => Some(EventName::Touchcancel),
+        "touchend" => Some(EventName::Touchend),
+        "touchmove" => Some(EventName::Touchmove),
+        "touchstart" => Some(EventName::Touchstart),
+        _ => None,
+    }
+}

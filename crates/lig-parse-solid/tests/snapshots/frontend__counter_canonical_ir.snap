@@ -1,0 +1,432 @@
+---
+source: crates/lig-parse-solid/tests/frontend.rs
+expression: m.canonical_json_pretty()
+---
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "counter.tsx",
+      "hash": 5454720753409208766
+    }
+  ],
+  "strings": {
+    "entries": [
+      "Add",
+      "Big:",
+      "Counter",
+      "branch_0",
+      "button",
+      "class",
+      "count",
+      "counter p-4",
+      "div",
+      "doubled",
+      "flex",
+      "hot",
+      "p",
+      "setCount",
+      "span"
+    ]
+  },
+  "components": [
+    {
+      "name": 2,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 8,
+          "static_attrs": [
+            {
+              "key": 5,
+              "value": {
+                "Str": 7
+              }
+            }
+          ],
+          "style": 0,
+          "children": [
+            {
+              "Element": {
+                "tag": 4,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  {
+                    "Text": {
+                      "value": 0
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "Element": {
+                "tag": 14,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  "Marker"
+                ]
+              }
+            },
+            "Marker"
+          ]
+        }
+      },
+      "hash": 2083385812114833707
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 12,
+          "static_attrs": [
+            {
+              "key": 5,
+              "value": {
+                "Str": 11
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            {
+              "Text": {
+                "value": 1
+              }
+            },
+            "Marker"
+          ]
+        }
+      },
+      "hash": 11148001762120906696
+    }
+  ],
+  "fragments": [
+    {
+      "name": 2,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Event": {
+              "event": "click",
+              "delegate": true
+            }
+          },
+          "expr": 0,
+          "reaction": 1,
+          "span": [
+            231,
+            258
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 1
+            },
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 1,
+          "reaction": 2,
+          "span": [
+            286,
+            293
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 2
+            }
+          ],
+          "kind": {
+            "If": {
+              "cond": 2,
+              "then": 1,
+              "else_": null
+            }
+          },
+          "expr": 2,
+          "reaction": 3,
+          "span": [
+            308,
+            394
+          ]
+        }
+      ],
+      "children": [
+        1
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 3,
+      "template": 1,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 1
+            }
+          ],
+          "kind": "Text",
+          "expr": 3,
+          "reaction": 4,
+          "span": [
+            366,
+            375
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "Call": [
+          0,
+          [
+            {
+              "Binary": [
+                "Add",
+                {
+                  "State": 6
+                },
+                {
+                  "Lit": {
+                    "Int": 1
+                  }
+                }
+              ]
+            }
+          ]
+        ]
+      },
+      {
+        "State": 6
+      },
+      {
+        "Binary": [
+          "Gt",
+          {
+            "State": 9
+          },
+          {
+            "Lit": {
+              "Int": 10
+            }
+          }
+        ]
+      },
+      {
+        "State": 9
+      },
+      {
+        "Binary": [
+          "Mul",
+          {
+            "State": 6
+          },
+          {
+            "Lit": {
+              "Int": 2
+            }
+          }
+        ]
+      },
+      {
+        "Lit": {
+          "Int": 0
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 237,
+        "end": 258
+      },
+      {
+        "start": 286,
+        "end": 293
+      },
+      {
+        "start": 320,
+        "end": 334
+      },
+      {
+        "start": 366,
+        "end": 375
+      },
+      {
+        "start": 108,
+        "end": 119
+      },
+      {
+        "start": 69,
+        "end": 70
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 6,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Int",
+      "init": 5
+    },
+    {
+      "name": 9,
+      "owner": 0,
+      "kind": "memo",
+      "ty": "Int",
+      "init": null
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "memo": {
+          "target": 9
+        }
+      },
+      "reads": [
+        6
+      ],
+      "writes": [
+        9
+      ],
+      "body": 4,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "effect": {
+          "tier": "post"
+        }
+      },
+      "reads": [],
+      "writes": [
+        6
+      ],
+      "body": 0,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 1
+        }
+      },
+      "reads": [
+        6
+      ],
+      "writes": [],
+      "body": 1,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 2
+        }
+      },
+      "reads": [
+        9
+      ],
+      "writes": [],
+      "body": 2,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        9
+      ],
+      "writes": [],
+      "body": 3,
+      "owner": 1
+    }
+  ],
+  "styles": [
+    {
+      "hash": 13365335262437190313,
+      "css": "display:flex;padding:16px",
+      "longhands": [
+        {
+          "prop": 0,
+          "value": {
+            "Keyword": 10
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 16.0
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 16.0
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 16.0
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 16.0
+          }
+        }
+      ]
+    }
+  ],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [
+    {
+      "name": 13,
+      "kind": {
+        "ModelFn": {
+          "target": 6
+        }
+      }
+    }
+  ],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

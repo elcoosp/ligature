@@ -1,0 +1,43 @@
+[package]
+name = "lig-parse-solid"
+description = "Solid TSX frontend: dom-expressions lowering passes ported to Rust over the oxc AST (§6.1)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+lig-core = { workspace = true }
+lig-expr = { workspace = true }
+lig-ir = { workspace = true }
+lig-style = { workspace = true }
+oxc_allocator = { workspace = true }
+oxc_ast = { workspace = true }
+oxc_parser = { workspace = true }
+oxc_span = { workspace = true }
+
+# M0 spike only: Oxc vs SWC re-benchmark on our own workload (§2.5, §14.2)
+swc_common = { version = "27.0.0", optional = true }
+swc_ecma_ast = { version = "30.0.1", optional = true }
+swc_ecma_parser = { version = "47.0.0", optional = true }
+
+[features]
+bench-swc = ["dep:swc_common", "dep:swc_ecma_ast", "dep:swc_ecma_parser"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+insta = { workspace = true }
+
+[[bench]]
+name = "parse"
+harness = false
+required-features = []
+
+[[bench]]
+name = "swc_compare"
+harness = false
+required-features = ["bench-swc"]
+
+[lints]
+workspace = true
