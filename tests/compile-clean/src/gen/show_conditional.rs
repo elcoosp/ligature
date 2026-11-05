@@ -19,9 +19,21 @@ pub mod generated {
     pub struct GateProps {}
     const Gate_N_REACTIONS: usize = 1usize;
     pub static Gate_TPL_T0: &[::lig_runtime::TplNode] = &[
-        ::lig_runtime::TplNode::Marker,
+        ::lig_runtime::TplNode::Element {
+            tag: "p",
+            attrs: &[],
+            style: None,
+            children: &[
+                ::lig_runtime::TplNode::Text {
+                    value: "Closed",
+                },
+            ],
+        },
     ];
     pub static Gate_TPL_T1: &[::lig_runtime::TplNode] = &[
+        ::lig_runtime::TplNode::Marker,
+    ];
+    pub static Gate_TPL_T2: &[::lig_runtime::TplNode] = &[
         ::lig_runtime::TplNode::Element {
             tag: "p",
             attrs: &[],
@@ -37,6 +49,8 @@ pub mod generated {
     static Gate_BRANCH_ANCHORS_F0: &[&[::lig_runtime::AnchorStep]] = &[&[]];
     static Gate_HOLE_ANCHORS_F1: &[&[::lig_runtime::AnchorStep]] = &[];
     static Gate_BRANCH_ANCHORS_F1: &[&[::lig_runtime::AnchorStep]] = &[];
+    static Gate_HOLE_ANCHORS_F2: &[&[::lig_runtime::AnchorStep]] = &[];
+    static Gate_BRANCH_ANCHORS_F2: &[&[::lig_runtime::AnchorStep]] = &[];
     static Gate_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8],
         writes: &[0u64],
@@ -57,7 +71,7 @@ pub mod generated {
                 ev: ::lig_runtime::EvData::new(),
                 frag: ::lig_runtime::Fragment::new(
                     h,
-                    Gate_TPL_T0,
+                    Gate_TPL_T1,
                     Gate_HOLE_ANCHORS_F0,
                     Gate_BRANCH_ANCHORS_F0,
                 ),
@@ -84,9 +98,9 @@ pub mod generated {
                                 .mount_branch(
                                     h,
                                     0usize,
-                                    Gate_TPL_T1,
-                                    Gate_HOLE_ANCHORS_F1,
-                                    Gate_BRANCH_ANCHORS_F1,
+                                    Gate_TPL_T2,
+                                    Gate_HOLE_ANCHORS_F2,
+                                    Gate_BRANCH_ANCHORS_F2,
                                 );
                         } else {
                             self.frag.unmount_branch(h, 0usize);
