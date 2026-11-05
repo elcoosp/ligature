@@ -1,0 +1,201 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "map-children.tsx",
+      "hash": 5977130477312828613
+    }
+  ],
+  "strings": {
+    "entries": [
+      "List",
+      "alpha",
+      "beta",
+      "item",
+      "items",
+      "items_0",
+      "li",
+      "ul"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 6,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 5576865117657793870
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 7,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 9429975676334313697
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 1,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "For": {
+              "source": 0,
+              "item": 3,
+              "index": null,
+              "key": null,
+              "body": 1
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            155,
+            193
+          ]
+        }
+      ],
+      "children": [
+        1
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 5,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 1,
+          "reaction": 1,
+          "span": [
+            182,
+            186
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "State": 4
+      },
+      {
+        "Local": 3
+      },
+      {
+        "Array": [
+          {
+            "Lit": {
+              "Str": 1
+            }
+          },
+          {
+            "Lit": {
+              "Str": 2
+            }
+          }
+        ]
+      }
+    ],
+    "spans": [
+      {
+        "start": 155,
+        "end": 162
+      },
+      {
+        "start": 182,
+        "end": 186
+      },
+      {
+        "start": 108,
+        "end": 125
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 4,
+      "owner": 0,
+      "kind": "signal",
+      "ty": {
+        "List": "Str"
+      },
+      "init": 2
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        4
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 1,
+      "owner": 1
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

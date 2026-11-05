@@ -1,0 +1,114 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "style-object.tsx",
+      "hash": 623082725437746084
+    }
+  ],
+  "strings": {
+    "entries": [
+      "P",
+      "Panel",
+      "div",
+      "grid"
+    ]
+  },
+  "components": [
+    {
+      "name": 1,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 2,
+          "static_attrs": [],
+          "style": 0,
+          "children": [
+            {
+              "Text": {
+                "value": 0
+              }
+            }
+          ]
+        }
+      },
+      "hash": 15647650848161947861
+    }
+  ],
+  "fragments": [
+    {
+      "name": 1,
+      "template": 0,
+      "dynamics": [],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [],
+    "spans": []
+  },
+  "states": [],
+  "reactions": [],
+  "styles": [
+    {
+      "hash": 12354371517425425145,
+      "css": "display:grid;padding:12px;gap:8px",
+      "longhands": [
+        {
+          "prop": 0,
+          "value": {
+            "Keyword": 3
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 12.0
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 12.0
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 12.0
+          }
+        },
+        {
+          "prop": 14,
+          "value": {
+            "Len": 12.0
+          }
+        },
+        {
+          "prop": 20,
+          "value": {
+            "Len": 8.0
+          }
+        }
+      ]
+    }
+  ],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

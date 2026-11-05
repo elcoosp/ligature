@@ -1,0 +1,140 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "dynamic-style.tsx",
+      "hash": 13527699140725753157
+    }
+  ],
+  "strings": {
+    "entries": [
+      "Swatch",
+      "color",
+      "crimson",
+      "div",
+      "swatch"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 3,
+          "static_attrs": [],
+          "style": 0,
+          "children": [
+            {
+              "Text": {
+                "value": 4
+              }
+            }
+          ]
+        }
+      },
+      "hash": 7226062970549600406
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "StyleProp": {
+              "prop": 1
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            152,
+            159
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "State": 1
+      },
+      {
+        "Lit": {
+          "Str": 2
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 152,
+        "end": 159
+      },
+      {
+        "start": 110,
+        "end": 119
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 1,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Str",
+      "init": 1
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        1
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    }
+  ],
+  "styles": [
+    {
+      "hash": 7396380595929463097,
+      "css": "font-size:14px",
+      "longhands": []
+    }
+  ],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [
+    {
+      "code": "LIG-W102",
+      "message": "style object with dynamic values re-created per update — prefer static classes",
+      "start": 143,
+      "end": 182
+    }
+  ],
+  "spans": {
+    "entries": []
+  }
+}

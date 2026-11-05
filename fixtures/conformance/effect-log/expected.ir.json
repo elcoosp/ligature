@@ -1,0 +1,121 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "effect-log.tsx",
+      "hash": 3082277309343039643
+    }
+  ],
+  "strings": {
+    "entries": [
+      "Watcher",
+      "em",
+      "tick"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 1,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 12236967484597065671
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            128,
+            134
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "State": 2
+      },
+      {
+        "Lit": {
+          "Int": 0
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 128,
+        "end": 134
+      },
+      {
+        "start": 67,
+        "end": 68
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 2,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Int",
+      "init": 1
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        2
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

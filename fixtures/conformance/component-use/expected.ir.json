@@ -1,0 +1,287 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "component-use.tsx",
+      "hash": 269456342253334066
+    }
+  ],
+  "strings": {
+    "entries": [
+      "App",
+      "Panel",
+      "Status",
+      "all green",
+      "children",
+      "class",
+      "default",
+      "h1",
+      "p",
+      "panel",
+      "section",
+      "slotfill_0",
+      "title"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    },
+    {
+      "name": 1,
+      "root": 2,
+      "props": [
+        {
+          "name": 12,
+          "ty": "Str",
+          "optional": false
+        },
+        {
+          "name": 4,
+          "ty": "Str",
+          "optional": false
+        }
+      ]
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 8,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            {
+              "Text": {
+                "value": 3
+              }
+            }
+          ]
+        }
+      },
+      "hash": 3611897001453874676
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 10,
+          "static_attrs": [
+            {
+              "key": 5,
+              "value": {
+                "Str": 9
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            {
+              "Element": {
+                "tag": 7,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  "Marker"
+                ]
+              }
+            },
+            "Marker"
+          ]
+        }
+      },
+      "hash": 3805046317201351767
+    },
+    {
+      "root": "Marker",
+      "hash": 12638226782974257592
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "Component": {
+              "component": 1,
+              "props": [
+                {
+                  "prop": 12,
+                  "value": 0
+                }
+              ],
+              "slots": [
+                {
+                  "name": 6,
+                  "fallback": 1
+                }
+              ]
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            186,
+            244
+          ]
+        }
+      ],
+      "children": [
+        1
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 11,
+      "template": 0,
+      "dynamics": [],
+      "children": [],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 1,
+      "template": 1,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            },
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 1,
+          "reaction": 1,
+          "span": [
+            95,
+            100
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 1
+            }
+          ],
+          "kind": {
+            "Slot": {
+              "name": 6
+            }
+          },
+          "expr": 2,
+          "reaction": 2,
+          "span": [
+            114,
+            122
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "Lit": {
+          "Str": 2
+        }
+      },
+      {
+        "State": 12
+      },
+      {
+        "Lit": "Null"
+      }
+    ],
+    "spans": [
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 95,
+        "end": 100
+      },
+      {
+        "start": 0,
+        "end": 0
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 12,
+      "owner": 2,
+      "kind": "prop",
+      "ty": "Str",
+      "init": null
+    },
+    {
+      "name": 4,
+      "owner": 2,
+      "kind": "prop",
+      "ty": "Str",
+      "init": null
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        12
+      ],
+      "writes": [],
+      "body": 1,
+      "owner": 2
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 1
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 2,
+      "owner": 2
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

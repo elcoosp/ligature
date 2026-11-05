@@ -1,0 +1,143 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "show-conditional.tsx",
+      "hash": 4855986085030205275
+    }
+  ],
+  "strings": {
+    "entries": [
+      "Gate",
+      "Open",
+      "branch_0",
+      "open",
+      "p"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": "Marker",
+      "hash": 12638226782974257592
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 4,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            {
+              "Text": {
+                "value": 1
+              }
+            }
+          ]
+        }
+      },
+      "hash": 16622221913466070898
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "If": {
+              "cond": 0,
+              "then": 1,
+              "else_": null
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            86,
+            161
+          ]
+        }
+      ],
+      "children": [
+        1
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 2,
+      "template": 1,
+      "dynamics": [],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "State": 3
+      },
+      {
+        "Lit": {
+          "Bool": true
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 98,
+        "end": 104
+      },
+      {
+        "start": 64,
+        "end": 68
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 3,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Bool",
+      "init": 1
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        3
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

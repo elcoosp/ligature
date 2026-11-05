@@ -1,0 +1,177 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "memo-derived.tsx",
+      "hash": 651040062152419127
+    }
+  ],
+  "strings": {
+    "entries": [
+      "Sum",
+      "a",
+      "b",
+      "output",
+      "total"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 3,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 5152391789303973037
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 0,
+          "reaction": 1,
+          "span": [
+            161,
+            168
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "State": 4
+      },
+      {
+        "Binary": [
+          "Add",
+          {
+            "State": 1
+          },
+          {
+            "State": 2
+          }
+        ]
+      },
+      {
+        "Lit": {
+          "Int": 2
+        }
+      },
+      {
+        "Lit": {
+          "Int": 3
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 161,
+        "end": 168
+      },
+      {
+        "start": 131,
+        "end": 140
+      },
+      {
+        "start": 57,
+        "end": 58
+      },
+      {
+        "start": 94,
+        "end": 95
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 1,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Int",
+      "init": 2
+    },
+    {
+      "name": 2,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Int",
+      "init": 3
+    },
+    {
+      "name": 4,
+      "owner": 0,
+      "kind": "memo",
+      "ty": "Int",
+      "init": null
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "memo": {
+          "target": 4
+        }
+      },
+      "reads": [
+        1,
+        2
+      ],
+      "writes": [
+        4
+      ],
+      "body": 1,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        4
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

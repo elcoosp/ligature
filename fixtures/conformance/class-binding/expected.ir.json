@@ -1,0 +1,138 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "class-binding.tsx",
+      "hash": 9562286634216891866
+    }
+  ],
+  "strings": {
+    "entries": [
+      "B",
+      "Badge",
+      "active",
+      "badge",
+      "badge on",
+      "span"
+    ]
+  },
+  "components": [
+    {
+      "name": 1,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 5,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            {
+              "Text": {
+                "value": 0
+              }
+            }
+          ]
+        }
+      },
+      "hash": 10510976139229974912
+    }
+  ],
+  "fragments": [
+    {
+      "name": 1,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": "Class",
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            99,
+            130
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "Ternary": [
+          {
+            "State": 2
+          },
+          {
+            "Lit": {
+              "Str": 4
+            }
+          },
+          {
+            "Lit": {
+              "Str": 3
+            }
+          }
+        ]
+      },
+      {
+        "Lit": {
+          "Bool": false
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 99,
+        "end": 130
+      },
+      {
+        "start": 69,
+        "end": 74
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 2,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Bool",
+      "init": 1
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        2
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}

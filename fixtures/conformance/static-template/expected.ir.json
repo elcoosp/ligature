@@ -1,0 +1,105 @@
+{
+  "version": 4,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "static-template.tsx",
+      "hash": 18371261445843731815
+    }
+  ],
+  "strings": {
+    "entries": [
+      "Immutable body text.",
+      "StaticCard",
+      "Title",
+      "card",
+      "class",
+      "h2",
+      "p",
+      "section"
+    ]
+  },
+  "components": [
+    {
+      "name": 1,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 7,
+          "static_attrs": [
+            {
+              "key": 4,
+              "value": {
+                "Str": 3
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            {
+              "Element": {
+                "tag": 5,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  {
+                    "Text": {
+                      "value": 2
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "Element": {
+                "tag": 6,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  {
+                    "Text": {
+                      "value": 0
+                    }
+                  }
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "hash": 2730179157291921393
+    }
+  ],
+  "fragments": [
+    {
+      "name": 1,
+      "template": 0,
+      "dynamics": [],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [],
+    "spans": []
+  },
+  "states": [],
+  "reactions": [],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}
