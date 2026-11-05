@@ -34,6 +34,7 @@ pub mod generated {
     static Panel_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[],
         writes: &[],
+        writes_hi: &[],
     };
     impl Panel {
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
