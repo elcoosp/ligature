@@ -1216,7 +1216,29 @@ fn emit_item_method(
         match &d.kind {
             DynamicKind::Text => {
                 let v = gen_item_expr(module, d.expr, for_ir, item_ty)?;
-                commits.push(quote! { f.set_text(h, #di, &(#v)); });
+                // The item binding is the apply fn's `String` param (deref
+                // coerces at `&str`); the index binding is `i64` and must
+                // stringify; parent-state reads follow their declared type.
+                let is_str = match module.exprs.get(d.expr) {
+                    lig_ir::expr::Expr::Local(l) if *l == for_ir.item => true,
+                    lig_ir::expr::Expr::Local(l) if for_ir.index.is_some_and(|ix| ix == *l) => {
+                        false
+                    }
+                    other => matches!(
+                        codegen_ty_of(module, other),
+                        Ty::Str | Ty::List(_) | Ty::Bool
+                    ),
+                };
+                if is_str {
+                    commits.push(quote! { f.set_text(h, #di, &(#v)); });
+                } else {
+                    commits.push(quote! {
+                        {
+                            let mut buf = [0u8; 20];
+                            f.set_text(h, #di, ::lig_runtime::format_i64(&mut buf, #v));
+                        }
+                    });
+                }
             }
             DynamicKind::Class => {
                 let v = gen_item_expr(module, d.expr, for_ir, item_ty)?;
