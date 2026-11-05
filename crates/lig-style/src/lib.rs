@@ -404,3 +404,34 @@ mod tests {
         );
     }
 }
+
+/// `fontSize` → `font-size` — CSS property spelling for style-object keys
+/// (§8.1). Shared by both frontends so object-literal styles canonicalize
+/// identically.
+#[must_use]
+pub fn camel_to_kebab(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 4);
+    for (i, c) in s.chars().enumerate() {
+        if c.is_ascii_uppercase() {
+            if i > 0 {
+                out.push('-');
+            }
+            out.push(c.to_ascii_lowercase());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod kebab_tests {
+    use super::camel_to_kebab;
+
+    #[test]
+    fn camel_case_becomes_kebab() {
+        assert_eq!(camel_to_kebab("fontSize"), "font-size");
+        assert_eq!(camel_to_kebab("display"), "display");
+        assert_eq!(camel_to_kebab("font-size"), "font-size");
+    }
+}
