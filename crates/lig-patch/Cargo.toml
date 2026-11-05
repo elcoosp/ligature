@@ -1,0 +1,22 @@
+[package]
+name = "lig-patch"
+description = "Subsecond-derived hot-patch protocol: jump table, patch dylib apply, manifest, save→frame budget (D-10, §11.3)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+libc = { workspace = true }
+libloading = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "save_to_frame"
+harness = false
+
+[lints]
+workspace = true
