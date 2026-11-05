@@ -1068,8 +1068,10 @@ dependencies = [
  "lig-core",
  "lig-ir",
  "lig-parse-solid",
+ "lig-parse-vue",
  "lig-sourcemap",
  "oxc_sourcemap",
+ "serde_json",
  "toml",
 ]
 
@@ -1139,6 +1141,21 @@ dependencies = [
  "swc_common",
  "swc_ecma_ast",
  "swc_ecma_parser",
+]
+
+[[package]]
+name = "lig-parse-vue"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "lig-core",
+ "lig-expr",
+ "lig-ir",
+ "lig-style",
+ "oxc_allocator",
+ "oxc_ast",
+ "oxc_parser",
+ "oxc_span",
 ]
 
 [[package]]
@@ -2875,18 +2892,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "05f360fc0b24296329c78fda852a1e9ae82de9cf7b27dae4b7f62f118f77b9ed"
 dependencies = [
  "tap",
-]
-
-[[package]]
-name = "xtask"
-version = "0.1.0"
-dependencies = [
- "lig-admission",
- "lig-codegen",
- "lig-core",
- "lig-ir",
- "lig-parse-solid",
- "serde_json",
 ]
 
 [[package]]
