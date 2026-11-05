@@ -73,3 +73,70 @@ fn snapshot_counter_generated_code() {
     let text = counter_code();
     insta::assert_snapshot!("counter_generated", text);
 }
+#[test]
+fn spill_path_emits_exact_per_bit_masks_and_writes_hi() {
+    // A synthetic 70-reaction component: one signal read by 70 effects. The
+    // init masks must be exact per bit (low word full, spill word 0b111111),
+    // and the schedule carries a (zeroed) writes_hi row — the M3 dispatch
+    // refinement over the former mark-everything spill path.
+    use lig_ir::expr::{Expr, Lit};
+    use lig_ir::fragment::{ComponentDecl, FragmentIr, StateDecl, StateKind};
+    use lig_ir::module::{ReactionDecl, ReactionKind, Tier};
+
+    let mut m = lig_ir::ViewModule::new(lig_ir::Frontend::Solid);
+    let tpl = m.intern_template(lig_ir::template::TemplateIr::new(
+        lig_ir::template::NodeIr::Marker,
+    ));
+    let name = m.strings.intern("Big");
+    let root = m.push_fragment(FragmentIr {
+        name,
+        template: tpl,
+        dynamics: vec![],
+        children: vec![],
+        props: vec![],
+        returns: vec![],
+    });
+    m.components.push(ComponentDecl {
+        name,
+        root,
+        props: vec![],
+    });
+    let count = m.strings.intern("count");
+    let init = m.insert_expr(Expr::Lit(Lit::Int(0)));
+    m.states.push(StateDecl {
+        name: count,
+        owner: root,
+        kind: StateKind::Signal,
+        ty: lig_ir::Ty::Int,
+        init: Some(init),
+    });
+    for i in 0..70 {
+        let body = m.insert_expr(Expr::Lit(Lit::Int(i)));
+        m.reactions.push(ReactionDecl {
+            kind: ReactionKind::Effect { tier: Tier::Post },
+            reads: vec![count],
+            writes: vec![],
+            body,
+            owner: root,
+        });
+    }
+    let unit = generate_component(&m, lig_core::id::ComponentId::new(0)).expect("codegen");
+    let text = unit.text;
+    assert!(
+        text.contains("const Big_N_REACTIONS: usize = 70usize;"),
+        "{text}"
+    );
+    assert!(
+        text.contains("writes_hi: &["),
+        "schedule carries the spill row: {text}"
+    );
+    assert!(
+        text.contains("mark_mask(0xffffffffffffffff)"),
+        "low init word is exact: {text}"
+    );
+    assert!(
+        text.contains("mark_spill_word(0, 0x3f)"),
+        "spill init word is exact (70 − 64 bits): {text}"
+    );
+    assert!(text.contains("const Big_R69_FX: u8 = 69u8;"), "{text}");
+}
