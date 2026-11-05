@@ -1,0 +1,17 @@
+[package]
+name = "compile-clean"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+lig-runtime = { workspace = true }
+
+[dev-dependencies]
+mock-host = { workspace = true }
+
+[lints]
+workspace = true
