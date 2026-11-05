@@ -232,6 +232,10 @@ fn gen_builtin(name: &str, argv: &[proc_macro2::TokenStream]) -> proc_macro2::To
             let second = argv.get(1).cloned().unwrap_or_default();
             quote!(::lig_runtime::pure::join(&(#first), &(#second)))
         }
+        "arr.concat" => {
+            let second = argv.get(1).cloned().unwrap_or_default();
+            quote!(::lig_runtime::pure::concat(&(#first), &(#second)))
+        }
         "str.toUpperCase" | "str.toLowerCase" | "str.trim" => {
             let method = syn::Ident::new(
                 match name {
