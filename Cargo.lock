@@ -1066,6 +1066,7 @@ dependencies = [
  "lig-admission",
  "lig-codegen",
  "lig-core",
+ "lig-incremental",
  "lig-ir",
  "lig-parse-solid",
  "lig-parse-vue",
@@ -1111,6 +1112,22 @@ dependencies = [
  "oxc_ast",
  "oxc_parser",
  "oxc_span",
+]
+
+[[package]]
+name = "lig-incremental"
+version = "0.1.0"
+dependencies = [
+ "lig-admission",
+ "lig-codegen",
+ "lig-core",
+ "lig-ir",
+ "lig-parse-solid",
+ "lig-parse-vue",
+ "lig-reactivity",
+ "lig-sourcemap",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
