@@ -12,12 +12,12 @@
     "entries": [
       "Flip",
       "b",
+      "branch_0",
+      "branch_1",
       "div",
-      "els_1",
       "i",
       "no",
       "on",
-      "then_0",
       "yes"
     ]
   },
@@ -32,15 +32,19 @@
     {
       "root": {
         "Element": {
-          "tag": 2,
+          "tag": 5,
           "static_attrs": [],
           "style": null,
           "children": [
-            "Marker"
+            {
+              "Text": {
+                "value": 6
+              }
+            }
           ]
         }
       },
-      "hash": 1299281230627453210
+      "hash": 5890291932477471974
     },
     {
       "root": {
@@ -49,15 +53,11 @@
           "static_attrs": [],
           "style": null,
           "children": [
-            {
-              "Text": {
-                "value": 5
-              }
-            }
+            "Marker"
           ]
         }
       },
-      "hash": 7392851084394551734
+      "hash": 12661440812950886504
     },
     {
       "root": {
@@ -80,7 +80,7 @@
   "fragments": [
     {
       "name": 0,
-      "template": 0,
+      "template": 1,
       "dynamics": [
         {
           "anchor": [
@@ -112,14 +112,14 @@
     },
     {
       "name": 3,
-      "template": 1,
+      "template": 0,
       "dynamics": [],
       "children": [],
       "props": [],
       "returns": []
     },
     {
-      "name": 7,
+      "name": 2,
       "template": 2,
       "dynamics": [],
       "children": [],
@@ -130,7 +130,7 @@
   "exprs": {
     "exprs": [
       {
-        "State": 6
+        "State": 7
       },
       {
         "Lit": {
@@ -151,7 +151,7 @@
   },
   "states": [
     {
-      "name": 6,
+      "name": 7,
       "owner": 0,
       "kind": "signal",
       "ty": "Bool",
@@ -166,7 +166,7 @@
         }
       },
       "reads": [
-        6
+        7
       ],
       "writes": [],
       "body": 0,
