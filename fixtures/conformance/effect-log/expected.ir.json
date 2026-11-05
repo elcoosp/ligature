@@ -5,19 +5,23 @@
     {
       "id": 0,
       "path": "effect-log.tsx",
-      "hash": 3082277309343039643
+      "hash": 5462357350826077082
     }
   ],
   "strings": {
     "entries": [
+      "",
       "Watcher",
       "em",
+      "log",
+      "num.toString",
+      "setLog",
       "tick"
     ]
   },
   "components": [
     {
-      "name": 0,
+      "name": 1,
       "root": 0,
       "props": []
     }
@@ -26,7 +30,7 @@
     {
       "root": {
         "Element": {
-          "tag": 1,
+          "tag": 2,
           "static_attrs": [],
           "style": null,
           "children": [
@@ -34,12 +38,12 @@
           ]
         }
       },
-      "hash": 12236967484597065671
+      "hash": 1299281230627453210
     }
   ],
   "fragments": [
     {
-      "name": 0,
+      "name": 1,
       "template": 0,
       "dynamics": [
         {
@@ -50,10 +54,10 @@
           ],
           "kind": "Text",
           "expr": 0,
-          "reaction": 0,
+          "reaction": 1,
           "span": [
-            128,
-            134
+            176,
+            181
           ]
         }
       ],
@@ -65,35 +69,85 @@
   "exprs": {
     "exprs": [
       {
-        "State": 2
+        "State": 3
+      },
+      {
+        "Call": [
+          1,
+          [
+            {
+              "Call": [
+                0,
+                [
+                  {
+                    "State": 6
+                  }
+                ]
+              ]
+            }
+          ]
+        ]
       },
       {
         "Lit": {
           "Int": 0
         }
+      },
+      {
+        "Lit": {
+          "Str": 0
+        }
       }
     ],
     "spans": [
       {
-        "start": 128,
-        "end": 134
+        "start": 176,
+        "end": 181
+      },
+      {
+        "start": 134,
+        "end": 159
       },
       {
         "start": 67,
         "end": 68
+      },
+      {
+        "start": 108,
+        "end": 110
       }
     ]
   },
   "states": [
     {
-      "name": 2,
+      "name": 6,
       "owner": 0,
       "kind": "signal",
       "ty": "Int",
-      "init": 1
+      "init": 2
+    },
+    {
+      "name": 3,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Str",
+      "init": 3
     }
   ],
   "reactions": [
+    {
+      "kind": {
+        "effect": {
+          "tier": "post"
+        }
+      },
+      "reads": [
+        6
+      ],
+      "writes": [],
+      "body": 1,
+      "owner": 0
+    },
     {
       "kind": {
         "bind": {
@@ -101,7 +155,7 @@
         }
       },
       "reads": [
-        2
+        3
       ],
       "writes": [],
       "body": 0,
@@ -112,7 +166,20 @@
   "shapes": {
     "shapes": []
   },
-  "pure_fns": [],
+  "pure_fns": [
+    {
+      "name": 4,
+      "kind": "Builtin"
+    },
+    {
+      "name": 5,
+      "kind": {
+        "ModelFn": {
+          "target": 3
+        }
+      }
+    }
+  ],
   "imports": [],
   "lints": [],
   "spans": {
