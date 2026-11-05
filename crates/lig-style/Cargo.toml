@@ -1,0 +1,19 @@
+[package]
+name = "lig-style"
+description = "StyleIR: property schema table, lightningcss-backed parsing, normalization, interning (D-12, §8)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+lig-core = { workspace = true }
+lig-ir = { workspace = true }
+lightningcss = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[lints]
+workspace = true
