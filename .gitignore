@@ -1,0 +1,9 @@
+/target
+Cargo.lock.bak
+**/*.rs.bk
+*.patch
+coverage
+.devcontainer
+
+# excluded (out-of-workspace) spike crates keep their own target dirs
+tests/*/target
