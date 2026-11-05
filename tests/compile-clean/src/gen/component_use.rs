@@ -38,6 +38,7 @@ pub mod generated {
     static App_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8],
         writes: &[0u64],
+        writes_hi: &[0u64],
     };
     const App_R0_BIND_D0: u8 = 0u8;
     impl App {
@@ -127,6 +128,7 @@ pub mod generated {
     static Panel_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[1u8, 2u8],
         writes: &[0u64, 0u64, 0u64],
+        writes_hi: &[0u64, 0u64, 0u64],
     };
     const Panel_READS_TITLE: u64 = 2u64;
     const Panel_R1_BIND_D0: u8 = 1u8;
