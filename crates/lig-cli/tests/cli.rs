@@ -88,3 +88,45 @@ fn explain_serves_the_generated_catalog() {
         "catalog URL: {stdout}"
     );
 }
+
+#[test]
+fn fixtures_verify_gate_runs_both_frontend_legs() {
+    let out = lig()
+        .current_dir(repo_root())
+        .args(["fixtures", "verify"])
+        .output()
+        .expect("spawn lig fixtures verify");
+    assert!(out.status.success(), "verify green: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("match the committed canonical IR"),
+        "summary present: {stdout}"
+    );
+    // M2: every fixture must have both legs verified.
+    assert!(stdout.contains("vue leg OK"), "vue legs verified: {stdout}");
+}
+
+#[test]
+fn fixtures_admission_gate_is_green() {
+    let out = lig()
+        .current_dir(repo_root())
+        .args(["fixtures", "admission"])
+        .output()
+        .expect("spawn lig fixtures admission");
+    assert!(out.status.success(), "admission green: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("22 case(s) green"), "NFR-5 cases: {stdout}");
+}
+
+#[test]
+fn rules_sync_and_reproducibility_gates_are_green() {
+    let runs: [&[&str]; 2] = [&["fixtures", "rules-sync"], &["reproducibility"]];
+    for args in runs {
+        let out = lig()
+            .current_dir(repo_root())
+            .args(args)
+            .output()
+            .unwrap_or_else(|e| panic!("spawn lig {args:?}: {e}"));
+        assert!(out.status.success(), "lig {args:?} green: {out:?}");
+    }
+}
