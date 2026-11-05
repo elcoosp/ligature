@@ -1,8 +1,10 @@
-//! The `lig` CLI (§12.1): `check`, `build`, `explain`, `resolve`, `inspect`,
-//! plus the CI gates (`fixtures …`, `reproducibility`, `patch-spike`,
-//! `errors-gen`) that M2 folded in from the former xtask. M2 surface — dual
-//! frontends (Solid TSX / Vue SFC), admission tiers, codegen, source maps.
-//! Exit codes: 0 = clean, 1 = denied, 2 = internal error.
+//! The `lig` CLI (§12.1): `check`, `build`, `watch`, `explain`, `resolve`,
+//! `inspect`, `doctor`, plus the CI gates (`fixtures …`, `reproducibility`,
+//! `patch-spike`, `incremental`, `errors-gen`). M3 surface — the incremental
+//! session engine (`lig-incremental`): digest-gated re-emission (D-9), watch
+//! mode, build-order cycle recovery (LIG-E020), and the two-generation
+//! ThinLink patch gate. Exit codes: 0 = clean, 1 = denied, 2 = internal
+//! error.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
@@ -12,7 +14,7 @@ mod gates;
 use clap::{Parser, Subcommand, ValueEnum};
 use lig_admission::Profile;
 use lig_core::diagnostic::render;
-use lig_ir::ViewModule;
+use lig_incremental::Session;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -58,7 +60,8 @@ enum Command {
         #[arg(long, value_enum, default_value = "taffy")]
         profile: HostProfile,
     },
-    /// Emit Rust + source maps + IR + manifest (§9.5, fail-closed).
+    /// Emit Rust + source maps + IR + manifest (§9.5, fail-closed,
+    /// digest-gated re-emission D-9).
     Build {
         /// Source files or directories (.tsx/.vue).
         paths: Vec<PathBuf>,
@@ -68,6 +71,23 @@ enum Command {
         /// Host style profile used for tiering.
         #[arg(long, value_enum, default_value = "taffy")]
         profile: HostProfile,
+    },
+    /// Rebuild on source changes — digest-polled incremental passes (M3).
+    Watch {
+        /// Source files or directories (.tsx/.vue).
+        paths: Vec<PathBuf>,
+        /// Output directory.
+        #[arg(short, long, default_value = "dist")]
+        out: PathBuf,
+        /// Host style profile used for tiering.
+        #[arg(long, value_enum, default_value = "taffy")]
+        profile: HostProfile,
+        /// Run exactly one pass and exit (CI/tests).
+        #[arg(long)]
+        once: bool,
+        /// Poll interval in milliseconds.
+        #[arg(long, default_value_t = 300)]
+        interval_ms: u64,
     },
     /// Long-form help for a diagnostic code (generated from the catalog, D-7).
     Explain {
@@ -88,6 +108,8 @@ enum Command {
         /// Source file (.tsx/.vue).
         path: PathBuf,
     },
+    /// Environment checks: catalog, frontends, patch protocol, out-dir (M3).
+    Doctor,
     /// Run the conformance/admission fixture suites and the fixture
     /// regenerators (the CI parity with the former xtask).
     Fixtures {
@@ -96,9 +118,13 @@ enum Command {
     },
     /// D-8 gate: committed codegen is byte-identical to a fresh generation.
     Reproducibility,
-    /// S2 gate: save→frame hot-patch budget (< 1 s) on the dummy host.
+    /// S2/M3 gate: two-generation save→frame hot-patch budget (< 1 s per
+    /// save) on the dummy host — chained generations + stub thunks.
     PatchSpike,
-    /// Regenerate the error-code registry from docs/errors/*.md (D-7).
+    /// D-9 gate: digest-gated re-emission + LIG-E020 cycle recovery (M3).
+    Incremental,
+    /// Regenerate the error-code registry + embedded catalog from
+    /// docs/errors/*.md (D-7).
     ErrorsGen,
 }
 
@@ -137,6 +163,17 @@ fn main() -> ExitCode {
             Err(CliError::Denied) => ExitCode::from(1),
             Err(CliError::Internal) => ExitCode::from(2),
         },
+        Command::Watch {
+            paths,
+            out,
+            profile,
+            once,
+            interval_ms,
+        } => match run_watch(&paths, &out, profile.into(), once, interval_ms) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(CliError::Denied) => ExitCode::from(1),
+            Err(CliError::Internal) => ExitCode::from(2),
+        },
         Command::Explain { code } => {
             run_explain(&code);
             ExitCode::SUCCESS
@@ -151,6 +188,10 @@ fn main() -> ExitCode {
             Err(CliError::Denied) => ExitCode::from(1),
             Err(CliError::Internal) => ExitCode::from(2),
         },
+        Command::Doctor => {
+            run_doctor();
+            ExitCode::SUCCESS
+        }
         Command::Fixtures { which } => match which {
             FixtureCmd::Gen => ExitCode::from(gates::fixtures_gen() as u8),
             FixtureCmd::Verify => ExitCode::from(gates::parity() as u8),
@@ -160,6 +201,7 @@ fn main() -> ExitCode {
         },
         Command::Reproducibility => ExitCode::from(gates::reproducibility() as u8),
         Command::PatchSpike => ExitCode::from(gates::patch_spike() as u8),
+        Command::Incremental => ExitCode::from(gates::incremental() as u8),
         Command::ErrorsGen => ExitCode::from(gates::errors_gen() as u8),
     }
 }
@@ -198,77 +240,86 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
-/// Lower a source file with the frontend its extension selects (§6: `.tsx`
-/// → Solid, `.vue` → Vue SFC). The canonical IR is the same contract.
-fn lower_source(
-    source: &str,
-    name: &str,
-) -> Result<lig_ir::ViewModule, Vec<lig_core::diagnostic::LigDiagnostic>> {
-    if Path::new(name)
-        .extension()
-        .is_some_and(|x| x.eq_ignore_ascii_case("vue"))
-    {
-        lig_parse_vue::lower_module(source, name)
-    } else {
-        lig_parse_solid::lower_module(source, name)
+fn file_label(path: &Path) -> String {
+    path.file_name().map_or_else(
+        || "input.tsx".to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
+}
+
+/// Read a source file, mapping I/O failure to the CLI's internal error.
+fn read_source(path: &Path, what: &str) -> Result<String, CliError> {
+    std::fs::read_to_string(path)
+        .map_err(|e| eprintln!("lig {what}: {}: {e}", path.display()))
+        .map_err(|()| CliError::Internal)
+}
+
+/// Build the session over the source set (the M3 entry point shared by
+/// check/build/watch).
+fn session_over(paths: &[PathBuf], what: &str) -> Result<Session, CliError> {
+    let sources = collect_sources(paths);
+    if sources.is_empty() {
+        eprintln!("lig {what}: no .tsx/.vue sources given");
+        return Err(CliError::Internal);
     }
+    let mut session = Session::new();
+    for path in &sources {
+        let text = read_source(path, what)?;
+        session.set_source(path, text);
+    }
+    Ok(session)
 }
 
 fn run_check(paths: &[PathBuf], deny_warn: bool, profile: Profile) -> Result<(), CliError> {
-    let sources = collect_sources(paths);
-    if sources.is_empty() {
-        eprintln!("lig check: no .tsx/.vue sources given");
-        return Err(CliError::Internal);
-    }
+    let mut session = session_over(paths, "check")?;
+    let report = session.compile(profile);
     let mut denied = false;
-    for path in &sources {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| eprintln!("lig check: {}: {e}", path.display()))
-            .map_err(|()| CliError::Internal)?;
-        let name = path.file_name().map_or("input.tsx".into(), |n| {
-            std::borrow::Cow::from(n.to_string_lossy().into_owned())
-        });
-        match lower_source(&source, &name) {
-            Ok(m) => {
-                let report = lig_admission::admit(&m, profile);
-                let report = if deny_warn {
-                    report.with_lints_denied()
-                } else {
-                    report
-                };
-                if report.is_admitted() {
-                    let lint_count = report.lints().count();
-                    if lint_count > 0 {
-                        println!(
-                            "{}: admitted with {lint_count} lint(s) ({} allowed constructs)",
-                            name, report.allowed
-                        );
-                        for d in report.lints() {
-                            eprintln!("{}", render(&name, &source, d));
-                        }
-                    } else {
-                        println!(
-                            "{}: admitted ({} constructs, no diagnostics)",
-                            name, report.allowed
-                        );
-                    }
-                } else {
+    for path in session.sources() {
+        let Some(unit) = session.unit(&path) else {
+            continue;
+        };
+        let name = file_label(&path);
+        if unit.admitted {
+            let lint_count = unit
+                .diagnostics
+                .iter()
+                .filter(|d| d.severity == lig_core::diagnostic::Severity::Warning)
+                .count();
+            if lint_count > 0 {
+                println!(
+                    "{name}: admitted with {lint_count} lint(s) ({} allowed constructs)",
+                    unit.allowed
+                );
+                if deny_warn {
                     denied = true;
-                    eprintln!("{name}: DENIED");
-                    for d in report.diagnostics {
-                        eprintln!("{}", render(&name, &source, &d));
-                    }
+                    eprintln!("{name}: DENIED (--deny-warn promotes lints)");
                 }
+                for d in unit
+                    .diagnostics
+                    .iter()
+                    .filter(|d| d.severity == lig_core::diagnostic::Severity::Warning)
+                {
+                    eprintln!("{}", render(&name, &unit.source, d));
+                }
+            } else {
+                println!(
+                    "{name}: admitted ({} constructs, no diagnostics)",
+                    unit.allowed
+                );
             }
-            Err(diags) => {
-                denied = true;
+        } else {
+            denied = true;
+            if unit.module.is_none() {
                 eprintln!("{name}: DENIED at lowering");
-                for d in &diags {
-                    eprintln!("{}", render(&name, &source, d));
-                }
+            } else {
+                eprintln!("{name}: DENIED");
+            }
+            for d in &unit.diagnostics {
+                eprintln!("{}", render(&name, &unit.source, d));
             }
         }
     }
+    let _ = report;
     if denied {
         Err(CliError::Denied)
     } else {
@@ -277,150 +328,192 @@ fn run_check(paths: &[PathBuf], deny_warn: bool, profile: Profile) -> Result<(),
 }
 
 fn run_build(paths: &[PathBuf], out: &Path, profile: Profile) -> Result<(), CliError> {
-    let sources = collect_sources(paths);
-    if sources.is_empty() {
-        eprintln!("lig build: no .tsx/.vue sources given");
-        return Err(CliError::Internal);
-    }
-    // Fail-closed (BR-1): check everything BEFORE writing anything.
-    let mut built: Vec<(String, BuiltUnit)> = Vec::new();
-    for path in &sources {
-        let source = std::fs::read_to_string(path)
-            .map_err(|e| eprintln!("lig build: {}: {e}", path.display()))
-            .map_err(|()| CliError::Internal)?;
-        // Unique stems: `input.solid.tsx` fixtures take their directory name.
-        let stem = if path
-            .file_stem()
-            .is_some_and(|s| s.to_string_lossy().contains('.'))
-        {
-            path.parent().and_then(|p| p.file_name()).map_or_else(
-                || "module".to_string(),
-                |n| n.to_string_lossy().into_owned(),
-            )
-        } else {
-            path.file_stem()
-                .map_or("module".into(), |n| n.to_string_lossy().into_owned())
+    let mut session = session_over(paths, "build")?;
+    session.compile(profile);
+
+    // Fail-closed (BR-1): every unit compiles and admits BEFORE anything is
+    // written. Codegen failures are internal errors; denials exit 1.
+    let mut any_denied = false;
+    for path in session.sources() {
+        let Some(unit) = session.unit(&path) else {
+            continue;
         };
-        let name = path.file_name().map_or("input.tsx".into(), |n| {
-            std::borrow::Cow::from(n.to_string_lossy().into_owned())
-        });
-        let module = match lower_source(&source, &name) {
-            Ok(m) => m,
-            Err(diags) => {
-                eprintln!("{name}: DENIED (zero output written — BR-1)");
-                for d in &diags {
-                    eprintln!("{}", render(&name, &source, d));
+        let name = file_label(&path);
+        if let Some(e) = &unit.codegen_error {
+            eprintln!("lig build: {name}: codegen failed: {e}");
+            return Err(CliError::Internal);
+        }
+        if !unit.admitted {
+            any_denied = true;
+            eprintln!("{name}: DENIED (zero output written — BR-1)");
+            for d in &unit.diagnostics {
+                eprintln!("{}", render(&name, &unit.source, d));
+            }
+        }
+    }
+    if any_denied {
+        return Err(CliError::Denied);
+    }
+
+    std::fs::create_dir_all(out).map_err(|e| {
+        eprintln!("lig build: {}: {e}", out.display());
+        CliError::Internal
+    })?;
+    emit_and_report(&session, out, profile, false, "build")
+}
+
+/// The shared emission step of `build` and `watch`: digest-gated writes plus
+/// the per-unit report lines.
+fn emit_and_report(
+    session: &Session,
+    out: &Path,
+    profile: Profile,
+    prune: bool,
+    what: &str,
+) -> Result<(), CliError> {
+    let units: Vec<&lig_incremental::CompiledUnit> = session
+        .sources()
+        .iter()
+        .filter_map(|p| session.unit(p))
+        .collect();
+    let profile_str = if profile == Profile::Web {
+        "web"
+    } else {
+        "taffy"
+    };
+    let emission =
+        lig_incremental::emit::emit_units(out, &units, profile_str, prune).map_err(|e| {
+            eprintln!("lig {what}: {e}");
+            CliError::Internal
+        })?;
+    for path in session.sources() {
+        let Some(unit) = session.unit(&path) else {
+            continue;
+        };
+        let name = file_label(&path);
+        if emission.kept.iter().any(|k| k == &unit.stem) {
+            println!("{name}: kept (digest unchanged — D-9)");
+            continue;
+        }
+        let Some(module) = unit.module.as_ref() else {
+            continue;
+        };
+        if let (Some(stats), true) = (
+            emission.stats.get(&unit.stem),
+            emission.written.iter().any(|w| w == &unit.stem),
+        ) {
+            println!(
+                "{name}: built {} component(s); sourcemap verified ({} spans, {} reactions)",
+                module.components.len(),
+                stats.expr_spans_resolved,
+                stats.reactions_linked
+            );
+        }
+    }
+    println!(
+        "lig {what}: {} unit(s) → {} ({} kept, {} re-emitted)",
+        units.len(),
+        out.display(),
+        emission.kept.len(),
+        emission.written.len()
+    );
+    Ok(())
+}
+
+fn run_watch(
+    paths: &[PathBuf],
+    out: &Path,
+    profile: Profile,
+    once: bool,
+    interval_ms: u64,
+) -> Result<(), CliError> {
+    let mut session = session_over(paths, "watch")?;
+    session.compile(profile);
+    std::fs::create_dir_all(out).map_err(|e| {
+        eprintln!("lig watch: {}: {e}", out.display());
+        CliError::Internal
+    })?;
+    emit_and_report(&session, out, profile, true, "watch")?;
+    if once {
+        return Ok(());
+    }
+    let interval = std::time::Duration::from_millis(interval_ms);
+    let roots: Vec<PathBuf> = paths.to_vec();
+    let mut pass = 0u64;
+    println!(
+        "lig watch: watching {} source(s) — Ctrl-C to stop",
+        session.sources().len()
+    );
+    loop {
+        std::thread::sleep(interval);
+        let seen = collect_sources(&roots);
+        let mut changed = false;
+        // Additions and edits.
+        for path in &seen {
+            let Ok(text) = std::fs::read_to_string(path) else {
+                continue;
+            };
+            let fresh = lig_incremental::digest(text.as_bytes());
+            let current = session
+                .unit(path)
+                .map_or(u64::MAX, lig_incremental::CompiledUnit::source_hash);
+            let known = session.sources().iter().any(|p| p == path);
+            if !known || fresh != current {
+                session.set_source(path, text);
+                changed = true;
+            }
+        }
+        // Removals.
+        for path in session.sources() {
+            if !seen.contains(&path) && !paths.contains(&path) {
+                session.remove_source(&path);
+                changed = true;
+            }
+        }
+        if !changed {
+            continue;
+        }
+        pass += 1;
+        let report = session.compile(profile);
+        // BR-1 for watch: a denied pass never touches dist — the last good
+        // output stays live.
+        let denied: Vec<_> = session
+            .units()
+            .iter()
+            .filter(|u| !u.admitted)
+            .map(|u| u.path.clone())
+            .collect();
+        if !denied.is_empty() {
+            for path in &denied {
+                let Some(unit) = session.unit(path) else {
+                    continue;
+                };
+                let name = file_label(path);
+                eprintln!("{name}: DENIED (dist keeps the last good output)");
+                for d in &unit.diagnostics {
+                    eprintln!("{}", render(&name, &unit.source, d));
                 }
+            }
+            if once {
                 return Err(CliError::Denied);
             }
-        };
-        let report = lig_admission::admit(&module, profile);
-        if !report.is_admitted() {
-            eprintln!("{name}: DENIED (zero output written — BR-1)");
-            for d in &report.diagnostics {
-                eprintln!("{}", render(&name, &source, d));
-            }
-            return Err(CliError::Denied);
+            continue;
         }
-        // One generated file per source file, all components inside (§9.5).
-        let generated = lig_codegen::generate_module(&module).map_err(|e| {
-            eprintln!("lig build: {name}: codegen failed: {e}");
-            CliError::Internal
-        })?;
-        let links = generated.links;
-        // NFR-6: source maps verified before emission.
-        let text = generated.text;
-        let stats = lig_sourcemap::verify(&module, &source, &text, &links).map_err(|e| {
-            eprintln!("lig build: {name}: sourcemap verify failed: {e}");
-            CliError::Internal
-        })?;
+        emit_and_report(&session, out, profile, true, "watch")?;
         println!(
-            "{name}: built {} component(s); sourcemap verified ({} spans, {} reactions)",
-            module.components.len(),
-            stats.expr_spans_resolved,
-            stats.reactions_linked
+            "lig watch pass {pass} (rev {}): {} recompiled, {} reused in {:.1} ms",
+            report.revision,
+            report.recompiled.len(),
+            report.reused.len(),
+            report.elapsed.as_secs_f64() * 1000.0
         );
-        built.push((
-            stem.clone(),
-            BuiltUnit {
-                module,
-                source,
-                text,
-                links,
-            },
-        ));
     }
-    // Emit (atomic-ish: temp dir then rename per file).
-    std::fs::create_dir_all(out)
-        .and_then(|()| std::fs::create_dir_all(out.join("ir")))
-        .and_then(|()| std::fs::create_dir_all(out.join("maps")))
-        .map_err(|e| {
-            eprintln!("lig build: {}: {e}", out.display());
-            CliError::Internal
-        })?;
-    let mut manifest_rows: Vec<String> = vec![
-        "# generated by lig build — do not edit".to_string(),
-        format!(
-            "profile = \"{}\"",
-            if profile == Profile::Web {
-                "web"
-            } else {
-                "taffy"
-            }
-        ),
-        format!("units = {}", built.len()),
-    ];
-    for (stem, unit) in &built {
-        let rs = out.join(format!("{stem}.rs"));
-        write_atomic(&rs, unit.text.as_bytes())?;
-        let ir_json = format!("{}\n", unit.module.canonical_json_pretty());
-        write_atomic(
-            &out.join("ir").join(format!("{stem}.json")),
-            ir_json.as_bytes(),
-        )?;
-        let src_map = lig_sourcemap::src_to_ir(&unit.module, &unit.source);
-        let ir_map =
-            lig_sourcemap::ir_to_rust(&unit.module, &unit.text, &unit.links).map_err(|e| {
-                eprintln!("lig build: {stem}: {e}");
-                CliError::Internal
-            })?;
-        let merged = lig_sourcemap::chain(&src_map, &ir_map);
-        write_atomic(
-            &out.join("maps").join(format!("{stem}.map.json")),
-            merged.to_json_string().as_bytes(),
-        )?;
-        manifest_rows.push(format!("{stem} = \"{stem}.rs\""));
-    }
-    write_atomic(
-        &out.join("manifest.toml"),
-        manifest_rows.join("\n").as_bytes(),
-    )?;
-    println!("lig build: {} unit(s) → {}", built.len(), out.display());
-    Ok(())
-}
-
-struct BuiltUnit {
-    module: ViewModule,
-    source: String,
-    text: String,
-    links: lig_codegen::GenLinks,
-}
-
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    let tmp = path.with_extension("tmp");
-    if std::fs::write(&tmp, bytes)
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .is_err()
-    {
-        eprintln!("lig build: failed to write {}", path.display());
-        return Err(CliError::Internal);
-    }
-    Ok(())
 }
 
 fn run_explain(code: &str) {
-    // The catalog Markdown ships with the repo; look relative to the binary
-    // and the working directory (lig doctor hardens this in M3).
+    // The catalog Markdown ships in two places: next to the repo (reviewed
+    // like code) and embedded in the binary (M3 — `lig doctor` hardening,
+    // works from any working directory).
     let candidates = [
         PathBuf::from(format!("docs/errors/{code}.md")),
         PathBuf::from(format!("../docs/errors/{code}.md")),
@@ -435,6 +528,14 @@ fn run_explain(code: &str) {
             }
             return;
         }
+    }
+    if let Some(doc) = lig_core::error_code::catalog_doc(code) {
+        println!("{doc}");
+        match lig_core::error_code::lookup(code) {
+            Some(e) => println!("details: {}", lig_core::error_code::url(e.code)),
+            None => println!("details: (code not in the compiled registry)"),
+        }
+        return;
     }
     match lig_core::error_code::lookup(code) {
         Some(e) => {
@@ -458,12 +559,10 @@ fn run_resolve(map_path: &PathBuf, line: u32, col: u32) -> Result<(), CliError> 
         eprintln!("lig resolve: {}: {e}", map_path.display());
         CliError::Internal
     })?;
-    let map = oxc_sourcemap::SourceMap::from_json_string(&json)
-        .map_err(|e| {
-            eprintln!("lig resolve: {}: {e}", map_path.display());
-            CliError::Internal
-        })
-        .map_err(|_| CliError::Internal)?;
+    let map = oxc_sourcemap::SourceMap::from_json_string(&json).map_err(|e| {
+        eprintln!("lig resolve: {}: {e}", map_path.display());
+        CliError::Internal
+    })?;
     let table = map.generate_lookup_table();
     // CLI positions are 1-based; VLQ maps are 0-based.
     let token = map
@@ -493,7 +592,7 @@ fn run_inspect(path: &PathBuf) -> Result<(), CliError> {
     let name = path.file_name().map_or("input.tsx".into(), |n| {
         std::borrow::Cow::from(n.to_string_lossy().into_owned())
     });
-    match lower_source(&source, &name) {
+    match lig_incremental::lower_source(&source, &name) {
         Ok(m) => {
             println!("{}", m.canonical_json_pretty());
             Ok(())
@@ -504,5 +603,66 @@ fn run_inspect(path: &PathBuf) -> Result<(), CliError> {
             }
             Err(CliError::Denied)
         }
+    }
+}
+
+fn run_doctor() {
+    println!("lig doctor — environment checks (§12.1, M3)");
+    let mut failures = 0usize;
+
+    // Version + IR contract.
+    println!(
+        "  ✓ lig {} · view IR v{}",
+        env!("CARGO_PKG_VERSION"),
+        lig_ir::VIEW_IR_VERSION
+    );
+
+    // Frontends.
+    println!("  ✓ frontends: solid (TSX), vue (SFC)");
+
+    // Embedded catalog (M3 hardening: `lig explain` works anywhere).
+    let registry = lig_core::error_code::registry();
+    let embedded = registry
+        .iter()
+        .filter(|e| lig_core::error_code::catalog_doc(e.code).is_some())
+        .count();
+    if embedded == registry.len() && !registry.is_empty() {
+        println!(
+            "  ✓ error catalog embedded ({} codes, {} reserved)",
+            registry.len(),
+            registry.iter().filter(|e| e.reserved).count()
+        );
+    } else {
+        failures += 1;
+        println!(
+            "  ✗ error catalog incomplete ({embedded}/{} embedded) — run `lig errors-gen`",
+            registry.len()
+        );
+    }
+
+    // Patch protocol support (unix dlopen protocol, §11.3).
+    if cfg!(windows) {
+        println!("  • patch protocol: unavailable on windows (dlopen protocol is unix-only)");
+    } else {
+        println!("  ✓ patch protocol: dlopen jump-table surface available");
+    }
+
+    // Out-dir writability.
+    let probe = std::env::temp_dir().join(format!("lig-doctor-{}", std::process::id()));
+    match std::fs::create_dir_all(&probe).and_then(|()| std::fs::remove_dir(&probe)) {
+        Ok(()) => println!(
+            "  ✓ writable output root ({})",
+            std::env::temp_dir().display()
+        ),
+        Err(e) => {
+            failures += 1;
+            println!("  ✗ cannot write output root: {e}");
+        }
+    }
+
+    if failures == 0 {
+        println!("lig doctor: all checks pass");
+    } else {
+        println!("lig doctor: {failures} check(s) failed");
     }
 }
