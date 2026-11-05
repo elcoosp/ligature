@@ -35,6 +35,7 @@ pub mod generated {
     static Badge_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8],
         writes: &[0u64],
+        writes_hi: &[0u64],
     };
     const Badge_READS_ACTIVE: u64 = 1u64;
     const Badge_R0_BIND_D0: u8 = 0u8;
