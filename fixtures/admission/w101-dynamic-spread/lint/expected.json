@@ -1,0 +1,9 @@
+{
+  "profile": "layout",
+  "expected": [
+    {
+      "code": "LIG-W101",
+      "line": 3
+    }
+  ]
+}

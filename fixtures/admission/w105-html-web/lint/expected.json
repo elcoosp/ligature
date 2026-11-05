@@ -1,0 +1,9 @@
+{
+  "profile": "web",
+  "expected": [
+    {
+      "code": "LIG-W105",
+      "line": 3
+    }
+  ]
+}
