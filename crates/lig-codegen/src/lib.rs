@@ -229,11 +229,15 @@ fn generate_component_pieces(
         let writes: Vec<u64> = (0..max_rx_id)
             .map(|i| schedule.reaction_writes.get(i).copied().unwrap_or(0))
             .collect();
+        let writes_hi: Vec<u64> = (0..max_rx_id)
+            .map(|i| schedule.reaction_writes_hi.get(i).copied().unwrap_or(0))
+            .collect();
         let sched_name = syn::Ident::new(&format!("{prefix}SCHEDULE"), Span::call_site());
         quote! {
             static #sched_name: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
                 order: &[ #(#order),* ],
                 writes: &[ #(#writes),* ],
+                writes_hi: &[ #(#writes_hi),* ],
             };
         }
     };
@@ -250,14 +254,16 @@ fn generate_component_pieces(
             .collect();
         fields.sort_by_key(|(k, _)| k.get());
         for (field, mask) in fields {
-            let name = syn::Ident::new(
-                &format!(
-                    "{prefix}READS_{}",
-                    sanitize(module.strings.get(field)).to_uppercase()
-                ),
-                Span::call_site(),
-            );
+            let base = sanitize(module.strings.get(field)).to_uppercase();
+            let name = syn::Ident::new(&format!("{prefix}READS_{base}"), Span::call_site());
             out.push(quote! { const #name: u64 = #mask; });
+            let hi = schedule.field_readers_hi.get(&field).copied().unwrap_or(0);
+            if hi != 0 {
+                // Spill-word readers (ids 64..128; bits are id − 64, M3).
+                let name_hi =
+                    syn::Ident::new(&format!("{prefix}READS_{base}_HI"), Span::call_site());
+                out.push(quote! { const #name_hi: u64 = #hi; });
+            }
         }
         out
     };
@@ -341,12 +347,19 @@ fn generate_component_pieces(
                     syn::Ident::new(&sanitize(module.strings.get(target)), Span::call_site());
                 let body = gen_expr(module, rx.decl.body)?;
                 let reads_mask = field_mask(&schedule, target);
+                let reads_mask_hi = schedule.field_readers_hi.get(&target).copied().unwrap_or(0);
+                let spill_mark = if reads_mask_hi != 0 {
+                    quote! { self.frag.dirty.mark_spill_word(0, #reads_mask_hi); }
+                } else {
+                    quote! {}
+                };
                 run_arms.push(quote! {
                     #cname => {
                         let next = #body;
                         if next != self.#tname {
                             self.#tname = next;
                             self.frag.mark_mask(#reads_mask);
+                            #spill_mark
                         }
                     }
                 });
@@ -580,13 +593,19 @@ fn generate_component_pieces(
 
     // --- attach list (event dynamics of ALL fragments in tree order) ----------
     let mut attaches: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut dispatch_bits: u64 = 0;
+    let mut dispatch_lo: u64 = 0;
+    let mut dispatch_hi: u64 = 0;
     for f in &frags {
         let frag = &module.fragments[f.id.get() as usize];
         for (di, d) in frag.dynamics.iter().enumerate() {
             if let DynamicKind::Event { event, delegate } = &d.kind {
                 let Some(rx_id) = d.reaction else { continue };
-                dispatch_bits |= 1u64 << rx_id.get();
+                let id = rx_id.get();
+                if id < 64 {
+                    dispatch_lo |= 1u64 << id;
+                } else {
+                    dispatch_hi |= 1u64 << (id - 64);
+                }
                 let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
                 let h = rx_id.get();
                 attaches.push(quote! {
@@ -610,11 +629,22 @@ fn generate_component_pieces(
         );
         let ty: syn::Type = syn::parse_str(&ty_name(&st.ty)).expect("valid type name");
         let mask = field_mask(&schedule, st.name);
+        let mask_hi = schedule
+            .field_readers_hi
+            .get(&st.name)
+            .copied()
+            .unwrap_or(0);
+        let spill_mark = if mask_hi != 0 {
+            quote! { self.frag.dirty.mark_spill_word(0, #mask_hi); }
+        } else {
+            quote! {}
+        };
         setters.push(quote! {
             /// Generated setter — the only write path for this signal (§9.2).
             pub fn #setter(&mut self, v: #ty) {
                 self.#fname = v;
                 self.frag.mark_mask(#mask);
+                #spill_mark
             }
         });
     }
@@ -638,15 +668,32 @@ fn generate_component_pieces(
     }
 
     // --- build ----------------------------------------------------------------------
+    // Exact per-bit init masks (M3 dispatch refinement): every non-event
+    // reaction runs once at build; the low word carries ids 0..64 and the
+    // spill word ids 64..128 (bits are id − 64).
+    if n_reactions > 128 {
+        return Err(CodegenError::Unsupported(
+            "more than 128 reactions in one component (spill-word dispatch cap)",
+        ));
+    }
     let init_mask: u64 = if n_reactions < 64 {
-        ((1u64 << n_reactions) - 1) & !dispatch_bits
+        ((1u64 << n_reactions) - 1) & !dispatch_lo
     } else {
-        // Spill path: mark everything (the 64-reaction fast path covers all
-        // v1 fixtures; spill + per-bit dispatch refinement is an M3 item).
-        u64::MAX
+        !dispatch_lo
+    };
+    let init_hi: u64 = if n_reactions <= 64 {
+        0
+    } else {
+        ((1u64 << (n_reactions - 64)) - 1) & !dispatch_hi
     };
     let init_mask_lit = format!("{init_mask:#x}").replace("0x", "0x");
     let init_mask_lit = syn::LitInt::new(&init_mask_lit, Span::call_site());
+    let init_spill = if init_hi != 0 {
+        let init_hi_lit = syn::LitInt::new(&format!("{init_hi:#x}"), Span::call_site());
+        quote! { s.frag.dirty.mark_spill_word(0, #init_hi_lit); }
+    } else {
+        quote! {}
+    };
     let root_tpl = tpl_ident(&prefix, root_info.template_id);
     let root_holes = hole_ident(&prefix, root_info.id.get() as usize);
     let root_branches = branch_ident(&prefix, root_info.id.get() as usize);
@@ -781,6 +828,7 @@ fn generate_component_pieces(
                 // Initial pass: memos + binds only — dispatch-driven handler
                 // reactions run on events, never at build (§9.2 run-once).
                 s.frag.mark_mask(#init_mask_lit);
+                #init_spill
                 ::lig_runtime::flush(&mut s, h);
                 s
             }
