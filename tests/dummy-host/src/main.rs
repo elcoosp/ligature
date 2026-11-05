@@ -1,7 +1,7 @@
 //! S2 spike dummy host (§11.3): the running "application" that gets hot-patched.
 //!
 //! The host exports the same well-known symbols as `patch-tip` (v0 bodies).
-//! The spike driver (`xtask patch-spike`) builds the tip crate as a cdylib
+//! The spike driver (`lig patch-spike`) builds the tip crate as a cdylib
 //! with `LIG_TIP_LABEL`/`LIG_TIP_COUNT` env-selected bodies, then runs this
 //! host with `LIG_PATCH_DYLIB` pointing at the fresh dylib. The host:
 //!
@@ -14,7 +14,7 @@
 //!    (`apply_ns`, `frame_ns`) and exits non-zero on any violation.
 //!
 //! The end-to-end budget (tip recompile + relink + apply + first frame < 1 s)
-//! is enforced by the xtask gate, which owns the wall clock.
+//! is enforced by the `lig patch-spike` gate, which owns the wall clock.
 
 #![deny(missing_docs)]
 // The exported patchable symbols must carry stable names for the jump-table
@@ -74,7 +74,7 @@ fn main() {
     assert_eq!(parsed, manifest, "manifest serialization is lossless");
     assert_eq!(parsed.entries.len(), receipt.file_relative.len());
 
-    // 5. Report: machine-readable lines for the xtask gate.
+    // 5. Report: machine-readable lines for the patch-spike gate.
     println!("patch_mapped={}", receipt.mapped);
     println!("patch_dylib={}", receipt.dylib.display());
     println!("apply_ns={apply_ns}");
