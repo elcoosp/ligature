@@ -58,6 +58,7 @@ pub mod generated {
     static Search_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8, 1u8, 2u8],
         writes: &[0u64, 5u64, 0u64],
+        writes_hi: &[0u64, 0u64, 0u64],
     };
     const Search_READS_QUERY: u64 = 5u64;
     const Search_R0_BIND_D0: u8 = 0u8;
