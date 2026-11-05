@@ -5,18 +5,22 @@
 //!
 //! M0 spike scope: the protocol skeleton on a dummy host — jump table, patch
 //! application, manifest, safepoint call, and the save→frame budget
-//! measurement. The dx ThinLink machinery (rustc replay + stub thunks) lands
-//! with M3's patch engine; this spike proves the protocol shape and the <1 s
-//! budget on Linux/macOS.
+//! measurement. M3 ships the ThinLink engine on top ([`session`]): chained
+//! generations, stub thunks for new symbols, and the never-dlclose proof —
+//! the two-generation spike gate (`lig patch-spike`) exercises all of it.
 
 #![allow(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
 pub mod manifest;
+#[cfg(unix)]
+pub mod session;
 pub mod table;
 
 pub use manifest::PatchManifest;
+#[cfg(unix)]
+pub use session::{AppliedPatch, PatchSession, SymbolKind, call_captured, captured_address};
 pub use table::{
     FRAME_COUNT, FRAME_LABEL, JumpTable, PatchError, PatchReceipt, apply_patch, commit_table,
     current_table, hot_call,
