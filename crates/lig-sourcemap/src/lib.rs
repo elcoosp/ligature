@@ -303,7 +303,7 @@ pub fn verify(
     })
 }
 
-/// Verifier statistics (surfaced by `lig build` / `xtask`).
+/// Verifier statistics (surfaced by `lig build` / the CI gates).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct VerifyStats {
     /// Expression spans resolved exactly through `src→IR`.
