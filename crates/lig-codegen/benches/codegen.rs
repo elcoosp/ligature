@@ -1,6 +1,6 @@
 //! Codegen benchmark (§14.2 `codegen`): `quote!` → `syn::File` →
 //! `prettyplease` on the M0 reference workload. Byte-reproducibility (D-8) is
-//! gated separately by `xtask reproducibility`; this measures throughput.
+//! gated separately by `lig reproducibility`; this measures throughput.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use lig_codegen::generate_component;
