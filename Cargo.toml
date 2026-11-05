@@ -1,0 +1,120 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/lig-admission",
+    "crates/lig-core",
+    "crates/lig-ir",
+    "crates/lig-cli",
+    "crates/lig-expr",
+    "crates/lig-parse-solid",
+    "crates/lig-reactivity",
+    "crates/lig-sourcemap",
+    "crates/lig-style",
+    "crates/lig-taffy-profile",
+    "crates/lig-codegen",
+    "crates/lig-runtime",
+    "crates/lig-patch",
+    "adapters/mock-host",
+    "tests/compile-clean",
+    "tests/dummy-host",
+    "xtask",
+]
+exclude = ["tests/patch-tip"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.97"
+license = "MIT OR Apache-2.0"
+authors = ["Ligature contributors"]
+
+# ---------------------------------------------------------------------------
+# Dependency pins — verified latest on crates.io at M0 bootstrap (2026-11-05).
+# ADR-012 corollary: MSRV 1.97 (oxc 0.157.0 declares rust-version = 1.97.0).
+# ---------------------------------------------------------------------------
+[workspace.dependencies]
+# oxc stack (parse substrate; arena AST is never serialized — §2.5, D-1)
+oxc_allocator = "0.157.0"
+oxc_ast = "0.157.0"
+oxc_parser = "0.157.0"
+oxc_semantic = "0.157.0"
+oxc_span = "0.157.0"
+
+# codegen: quote! → syn::File → prettyplease, byte-reproducible (D-8)
+prettyplease = "0.3.0"
+proc-macro2 = "1.0.107"
+quote = "1.0.47"
+syn = { version = "3.0.9", features = ["full", "visit", "extra-traits"] }
+
+# serialization (owned View IR only — the only serialized artifact, §5.6)
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+
+# diagnostics rendering (D-7)
+miette = { version = "7.6.0", features = ["fancy"] }
+
+# style lowering (D-12); lightningcss is an MPL-2.0 *dependency boundary only* (§15)
+lightningcss = "=1.0.0-alpha.72"
+taffy = "0.15.1"
+
+# patch engine (S2; the single unsafe module, §15)
+libloading = "0.9.0"
+libc = "0.2.191"
+
+# M0 spike benchmark only: Oxc vs SWC re-benchmark on our own workload (§2.5, §14.2).
+# Feature-gated (`bench-swc`) in lig-parse-solid, never linked into compiler crates.
+# (Declared inline there — workspace deps cannot be optional.)
+
+# internal crates
+lig-admission = { path = "crates/lig-admission", version = "0.1.0" }
+lig-codegen = { path = "crates/lig-codegen", version = "0.1.0" }
+lig-cli = { path = "crates/lig-cli", version = "0.1.0" }
+lig-core = { path = "crates/lig-core", version = "0.1.0" }
+lig-expr = { path = "crates/lig-expr", version = "0.1.0" }
+lig-ir = { path = "crates/lig-ir", version = "0.1.0" }
+lig-parse-solid = { path = "crates/lig-parse-solid", version = "0.1.0" }
+lig-patch = { path = "crates/lig-patch", version = "0.1.0" }
+lig-reactivity = { path = "crates/lig-reactivity", version = "0.1.0" }
+lig-runtime = { path = "crates/lig-runtime", version = "0.1.0" }
+lig-sourcemap = { path = "crates/lig-sourcemap", version = "0.1.0" }
+lig-style = { path = "crates/lig-style", version = "0.1.0" }
+lig-taffy-profile = { path = "crates/lig-taffy-profile", version = "0.1.0" }
+
+# host adapters
+mock-host = { path = "adapters/mock-host", version = "0.1.0" }
+
+# M1 CLI (lig check/build): verified latest on crates.io 2026-11-05
+clap = { version = "4.6.7", features = ["derive"] }
+toml = "1.2.0"
+oxc_sourcemap = "9.0.0"
+
+# dev / benches (benched from day one, §14.2)
+criterion = "0.8.2"
+insta = { version = "1.49.0", features = ["yaml"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+missing_docs = "warn"
+
+[workspace.lints.clippy]
+# Pedantic from day one (CI gate: -D warnings).
+pedantic = { level = "deny", priority = -1 }
+# Documented allowlist — each with rationale:
+module_name_repetitions = "allow"     # crate-internal module paths repeat by design (lig_core::span::Span)
+missing_errors_doc = "allow"          # infallible compiler-internal APIs dominate; Result docs added where they exist
+missing_panics_doc = "allow"          # panics are contract violations (LIG-E401-style), documented in catalog instead
+must_use_candidate = "allow"          # noisy across compiler query APIs; #[must_use] added where load-bearing
+cast_possible_truncation = "allow"    # spans/ids are u32 by contract (§5: "All ids are u32 newtypes")
+cast_sign_loss = "allow"              # byte offsets are non-negative by construction
+cast_precision_loss = "allow"         # style lengths f32 by contract (taffy)
+too_many_arguments = "allow"          # push_dynamic takes the full dynamic+reaction descriptor (§5); every caller supplies all of it
+too_many_lines = "allow"              # codegen emitters are table-like token builders (§9.2/§9.3); splitting would scatter the IR→token mapping
+doc_markdown = "allow"                # CamelCase identifiers (TSX, LIS, dom-expressions) pervade docs
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+lto = "thin"
+codegen-units = 1
