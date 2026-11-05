@@ -34,6 +34,7 @@ pub mod generated {
     static Watcher_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8, 1u8],
         writes: &[0u64, 0u64],
+        writes_hi: &[0u64, 0u64],
     };
     const Watcher_READS_LOG: u64 = 2u64;
     const Watcher_READS_TICK: u64 = 1u64;
