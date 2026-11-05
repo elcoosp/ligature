@@ -60,6 +60,7 @@ pub mod generated {
     static Cart_SCHEDULE: ::lig_runtime::Schedule = ::lig_runtime::Schedule {
         order: &[0u8, 1u8, 2u8],
         writes: &[2u64, 0u64],
+        writes_hi: &[0u64, 0u64],
     };
     const Cart_READS_TAGS: u64 = 2u64;
     const Cart_R0_FX: u8 = 0u8;
