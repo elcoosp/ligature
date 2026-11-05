@@ -2,7 +2,7 @@
 
 A dual-frontend (Solid TSX / Vue SFC → shared canonical View IR → const-scheduled Rust) UI compiler with a subsecond-derived hot-patch protocol. This repository implements the architecture in `ligature-architecture-v1.0.md`.
 
-**Status: M2 milestone complete** — dual frontends (Solid TSX + Vue SFC) with two-leg fixture parity, list/array tier completion, and the CI gates folded into the `lig` CLI (see `docs/m0/REPORT.md`, `docs/m1/REPORT.md`, `docs/m2/REPORT.md`).
+**Status: M3 milestone complete** — the incremental pipeline: a salsa-style session engine (`lig-incremental`) with digest-gated re-emission (D-9), `lig watch`, build-order cycle recovery (LIG-E020), per-arm source-map attribution, the 128-reaction per-bit dispatch refinement, and the two-generation ThinLink patch engine with stub thunks (see `docs/m0/REPORT.md`, `docs/m1/REPORT.md`, `docs/m2/REPORT.md`, `docs/m3/REPORT.md`).
 
 ## Workspace
 
@@ -20,7 +20,8 @@ A dual-frontend (Solid TSX / Vue SFC → shared canonical View IR → const-sche
 | `lig-patch` | S2 spike: jump-table hot-patch protocol, manifest, save→frame budget |
 | `lig-sourcemap` | Chained standard-VLQ source maps, IR-node names in `names[]` (§9.4) |
 | `lig-admission` | Deny/Lint/Allow ladder, `model!`/`native!` escapes, rule table ↔ fixtures |
-| `lig-cli` | The `lig` binary: `check`, `build`, `explain`, `resolve`, `inspect` **+ the CI gates** (§12.1, §13) |
+| `lig-incremental` | Salsa-style sessions: digest-gated memos (D-9), LIG-E020 cycle recovery, digest-gated emission, watch passes |
+| `lig-cli` | The `lig` binary: `check`, `build`, `watch`, `explain`, `resolve`, `inspect`, `doctor` **+ the CI gates** (§12.1, §13) |
 
 ## Gates (all enforced in CI — they ship inside the `lig` CLI since M2)
 
@@ -33,11 +34,18 @@ cargo run -p lig-cli -- fixtures verify                  # 18 fixtures × both f
 cargo run -p lig-cli -- fixtures admission               # NFR-5: 22 diagnostic cases
 cargo run -p lig-cli -- fixtures rules-sync              # rule table ↔ fixtures 1:1
 cargo run -p lig-cli -- reproducibility                  # D-8: byte-identical codegen
-cargo run -p lig-cli -- patch-spike                      # S2: save→frame < 1 s
+cargo run -p lig-cli -- incremental                      # D-9: digest-gated re-emit + LIG-E020 (M3)
+cargo run -p lig-cli -- patch-spike                      # S2/M3: two generations, < 1 s per save
 ```
 
 Fixture regenerators (review diffs like code): `lig fixtures gen` and
-`lig fixtures parity-gen`; the error-catalog regenerator is `lig errors-gen`.
+`lig fixtures parity-gen`; the error-catalog regenerator is `lig errors-gen`
+(registry **and** the embedded catalog `lig explain` serves offline).
+
+Incremental development: `lig build` re-emits only digest-changed units
+(D-9, `dist/build-state.json`), `lig watch` re-runs digest-gated passes on
+save, and `lig doctor` checks the environment (embedded catalog, patch
+protocol, out-dir).
 
 Benchmarks (`cargo bench`): parse/lowering (both frontends), canonical IR, codegen, runtime reconcile, patch protocol. The Oxc-vs-SWC re-benchmark is feature-gated: `cargo bench -p lig-parse-solid --features bench-swc --bench swc_compare`.
 
