@@ -1,0 +1,18 @@
+[package]
+name = "lig-runtime"
+description = "Published, semver-stable runtime core: node slab, Host commit stream, scheduler, reconcile (D-4/D-5, §10)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "runtime"
+harness = false
+
+[lints]
+workspace = true
