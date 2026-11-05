@@ -1,9 +1,13 @@
 //! The `lig` CLI (§12.1): `check`, `build`, `explain`, `resolve`, `inspect`,
-//! `fixtures verify`. M1 surface — Solid frontend, admission tiers, codegen,
-//! source maps. Exit codes: 0 = clean, 1 = denied, 2 = internal error.
+//! plus the CI gates (`fixtures …`, `reproducibility`, `patch-spike`,
+//! `errors-gen`) that M2 folded in from the former xtask. M2 surface — dual
+//! frontends (Solid TSX / Vue SFC), admission tiers, codegen, source maps.
+//! Exit codes: 0 = clean, 1 = denied, 2 = internal error.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
+
+mod gates;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lig_admission::Profile;
@@ -45,7 +49,7 @@ impl From<HostProfile> for Profile {
 enum Command {
     /// Admission + parity over the sources; no codegen (§12.1).
     Check {
-        /// Source files or directories (.tsx).
+        /// Source files or directories (.tsx/.vue).
         paths: Vec<PathBuf>,
         /// Promote Lint-tier diagnostics to Deny (CI gate).
         #[arg(long)]
@@ -56,7 +60,7 @@ enum Command {
     },
     /// Emit Rust + source maps + IR + manifest (§9.5, fail-closed).
     Build {
-        /// Source files or directories (.tsx).
+        /// Source files or directories (.tsx/.vue).
         paths: Vec<PathBuf>,
         /// Output directory.
         #[arg(short, long, default_value = "dist")]
@@ -81,22 +85,35 @@ enum Command {
     },
     /// Print the canonical View IR JSON for a source file (§5.6).
     Inspect {
-        /// Source file (.tsx).
+        /// Source file (.tsx/.vue).
         path: PathBuf,
     },
-    /// Run the conformance/admission fixture suites (CI parity with xtask).
+    /// Run the conformance/admission fixture suites and the fixture
+    /// regenerators (the CI parity with the former xtask).
     Fixtures {
         #[command(subcommand)]
         which: FixtureCmd,
     },
+    /// D-8 gate: committed codegen is byte-identical to a fresh generation.
+    Reproducibility,
+    /// S2 gate: save→frame hot-patch budget (< 1 s) on the dummy host.
+    PatchSpike,
+    /// Regenerate the error-code registry from docs/errors/*.md (D-7).
+    ErrorsGen,
 }
 
 #[derive(Debug, Subcommand)]
 enum FixtureCmd {
-    /// Canonical-IR parity over fixtures/conformance/**.
+    /// Regenerate fixtures/generated/*.rs + the counter expected IR.
+    Gen,
+    /// Canonical-IR parity over fixtures/conformance/** (both frontend legs).
     Verify,
+    /// Regenerate expected.ir.json for every conformance fixture (golden files).
+    ParityGen,
     /// NFR-5 admission fixture harness over fixtures/admission/**.
     Admission,
+    /// Rule table ↔ fixtures 1:1 (V.7).
+    RulesSync,
 }
 
 fn main() -> ExitCode {
@@ -135,15 +152,15 @@ fn main() -> ExitCode {
             Err(CliError::Internal) => ExitCode::from(2),
         },
         Command::Fixtures { which } => match which {
-            FixtureCmd::Verify => match fixtures_verify() {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(_) => ExitCode::from(1),
-            },
-            FixtureCmd::Admission => match fixtures_admission() {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(_) => ExitCode::from(1),
-            },
+            FixtureCmd::Gen => ExitCode::from(gates::fixtures_gen() as u8),
+            FixtureCmd::Verify => ExitCode::from(gates::parity() as u8),
+            FixtureCmd::ParityGen => ExitCode::from(gates::parity_gen() as u8),
+            FixtureCmd::Admission => ExitCode::from(gates::admission() as u8),
+            FixtureCmd::RulesSync => ExitCode::from(gates::rules_sync() as u8),
         },
+        Command::Reproducibility => ExitCode::from(gates::reproducibility() as u8),
+        Command::PatchSpike => ExitCode::from(gates::patch_spike() as u8),
+        Command::ErrorsGen => ExitCode::from(gates::errors_gen() as u8),
     }
 }
 
@@ -173,7 +190,7 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
             let p = e.path();
             if p.is_dir() {
                 out.extend(walk(&p));
-            } else if p.extension().is_some_and(|x| x == "tsx") {
+            } else if p.extension().is_some_and(|x| x == "tsx" || x == "vue") {
                 out.push(p);
             }
         }
@@ -181,10 +198,26 @@ fn walk(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Lower a source file with the frontend its extension selects (§6: `.tsx`
+/// → Solid, `.vue` → Vue SFC). The canonical IR is the same contract.
+fn lower_source(
+    source: &str,
+    name: &str,
+) -> Result<lig_ir::ViewModule, Vec<lig_core::diagnostic::LigDiagnostic>> {
+    if Path::new(name)
+        .extension()
+        .is_some_and(|x| x.eq_ignore_ascii_case("vue"))
+    {
+        lig_parse_vue::lower_module(source, name)
+    } else {
+        lig_parse_solid::lower_module(source, name)
+    }
+}
+
 fn run_check(paths: &[PathBuf], deny_warn: bool, profile: Profile) -> Result<(), CliError> {
     let sources = collect_sources(paths);
     if sources.is_empty() {
-        eprintln!("lig check: no .tsx sources given");
+        eprintln!("lig check: no .tsx/.vue sources given");
         return Err(CliError::Internal);
     }
     let mut denied = false;
@@ -195,7 +228,7 @@ fn run_check(paths: &[PathBuf], deny_warn: bool, profile: Profile) -> Result<(),
         let name = path.file_name().map_or("input.tsx".into(), |n| {
             std::borrow::Cow::from(n.to_string_lossy().into_owned())
         });
-        match lig_parse_solid::lower_module(&source, &name) {
+        match lower_source(&source, &name) {
             Ok(m) => {
                 let report = lig_admission::admit(&m, profile);
                 let report = if deny_warn {
@@ -246,7 +279,7 @@ fn run_check(paths: &[PathBuf], deny_warn: bool, profile: Profile) -> Result<(),
 fn run_build(paths: &[PathBuf], out: &Path, profile: Profile) -> Result<(), CliError> {
     let sources = collect_sources(paths);
     if sources.is_empty() {
-        eprintln!("lig build: no .tsx sources given");
+        eprintln!("lig build: no .tsx/.vue sources given");
         return Err(CliError::Internal);
     }
     // Fail-closed (BR-1): check everything BEFORE writing anything.
@@ -271,7 +304,7 @@ fn run_build(paths: &[PathBuf], out: &Path, profile: Profile) -> Result<(), CliE
         let name = path.file_name().map_or("input.tsx".into(), |n| {
             std::borrow::Cow::from(n.to_string_lossy().into_owned())
         });
-        let module = match lig_parse_solid::lower_module(&source, &name) {
+        let module = match lower_source(&source, &name) {
             Ok(m) => m,
             Err(diags) => {
                 eprintln!("{name}: DENIED (zero output written — BR-1)");
@@ -460,7 +493,7 @@ fn run_inspect(path: &PathBuf) -> Result<(), CliError> {
     let name = path.file_name().map_or("input.tsx".into(), |n| {
         std::borrow::Cow::from(n.to_string_lossy().into_owned())
     });
-    match lig_parse_solid::lower_module(&source, &name) {
+    match lower_source(&source, &name) {
         Ok(m) => {
             println!("{}", m.canonical_json_pretty());
             Ok(())
@@ -471,117 +504,5 @@ fn run_inspect(path: &PathBuf) -> Result<(), CliError> {
             }
             Err(CliError::Denied)
         }
-    }
-}
-
-fn repo_root() -> PathBuf {
-    // The CLI ships inside the workspace; fixtures live at the root.
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
-}
-
-fn fixtures_verify() -> Result<(), CliError> {
-    let root = repo_root();
-    let base = root.join("fixtures/conformance");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&base)
-        .map_err(|_| CliError::Internal)?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    let mut failed = 0usize;
-    for dir in &dirs {
-        let name = dir.file_name().unwrap().to_string_lossy().into_owned();
-        let input = dir.join("input.solid.tsx");
-        if !input.exists() {
-            continue;
-        }
-        let source = std::fs::read_to_string(&input).map_err(|_| CliError::Internal)?;
-        let expected = std::fs::read_to_string(dir.join("expected.ir.json")).map_err(|e| {
-            eprintln!("fixtures verify: {name}: {e}");
-            CliError::Internal
-        })?;
-        match lig_parse_solid::lower_module(&source, &format!("{name}.tsx")) {
-            Ok(m) => {
-                let actual = format!("{}\n", m.canonical_json_pretty());
-                if actual == expected {
-                    println!("fixtures verify: {name} OK");
-                } else {
-                    eprintln!("fixtures verify: {name} DRIFT");
-                    failed += 1;
-                }
-            }
-            Err(diags) => {
-                eprintln!("fixtures verify: {name}: lowering failed: {diags:?}");
-                failed += 1;
-            }
-        }
-    }
-    if failed == 0 {
-        Ok(())
-    } else {
-        Err(CliError::Denied)
-    }
-}
-
-fn fixtures_admission() -> Result<(), CliError> {
-    let root = repo_root();
-    let base = root.join("fixtures/admission");
-    let mut dirs: Vec<PathBuf> = std::fs::read_dir(&base)
-        .map_err(|_| CliError::Internal)?
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .collect();
-    dirs.sort();
-    let mut failed = 0usize;
-    let mut cases = 0usize;
-    for rule_dir in &dirs {
-        for tier in ["allow", "deny", "lint"] {
-            let case = rule_dir.join(tier);
-            if !case.exists() {
-                continue;
-            }
-            cases += 1;
-            let input = case.join("input.solid.tsx");
-            let source = std::fs::read_to_string(&input).unwrap_or_default();
-            let expected_path = case.join("expected.json");
-            let name = rule_dir.file_name().map_or("case".into(), |n| {
-                std::borrow::Cow::from(n.to_string_lossy().into_owned())
-            });
-            let got: Vec<(String, usize)> =
-                match lig_parse_solid::lower_module(&source, "input.solid.tsx") {
-                    Ok(m) => lig_admission::admit(&m, Profile::Layout)
-                        .diagnostics
-                        .iter()
-                        .map(|d| (d.code.clone(), 0))
-                        .collect(),
-                    Err(errs) => errs.iter().map(|d| (d.code.clone(), 0)).collect(),
-                };
-            if expected_path.exists() {
-                let raw = std::fs::read_to_string(&expected_path).unwrap_or_default();
-                let code = raw
-                    .lines()
-                    .find_map(|l| {
-                        let t = l.trim();
-                        t.starts_with("\"code\"")
-                            .then(|| t.split('"').nth(3).unwrap_or("").to_string())
-                    })
-                    .unwrap_or_default();
-                if !got.iter().any(|(c, _)| *c == code) {
-                    eprintln!("fixtures admission: {name}/{tier}: expected {code}, got {got:?}");
-                    failed += 1;
-                }
-            } else if !got.is_empty() {
-                eprintln!("fixtures admission: {name}/{tier}: expected clean, got {got:?}");
-                failed += 1;
-            }
-        }
-    }
-    if failed == 0 {
-        println!("fixtures admission: {cases} case(s) green");
-        Ok(())
-    } else {
-        Err(CliError::Denied)
     }
 }
