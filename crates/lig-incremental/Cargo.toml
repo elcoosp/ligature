@@ -1,0 +1,23 @@
+[package]
+name = "lig-incremental"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Salsa-style incremental sessions: digest-gated memoization, cycle recovery (LIG-E020), watch passes, and digest-gated emission (D-9)"
+
+[dependencies]
+lig-admission = { workspace = true }
+lig-codegen = { workspace = true }
+lig-core = { workspace = true }
+lig-ir = { workspace = true }
+lig-parse-solid = { workspace = true }
+lig-parse-vue = { workspace = true }
+lig-reactivity = { workspace = true }
+lig-sourcemap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
