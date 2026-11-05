@@ -1,0 +1,19 @@
+[package]
+name = "lig-taffy-profile"
+description = "First host style profile: StyleIR → const-constructible taffy Style (profile v1, §8.2)"
+edition.workspace = true
+rust-version.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+lig-core = { workspace = true }
+lig-style = { workspace = true }
+taffy = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[lints]
+workspace = true

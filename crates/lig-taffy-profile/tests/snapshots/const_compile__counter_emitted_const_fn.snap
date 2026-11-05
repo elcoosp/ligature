@@ -1,0 +1,11 @@
+---
+source: crates/lig-taffy-profile/tests/const_compile.rs
+expression: out.const_fn_text
+---
+pub const fn counter_style() -> taffy::Style {
+    let mut s = taffy::Style::DEFAULT;
+    s.display = taffy::style::Display::Flex;
+    s.size.width = taffy::Dimension::length(100.0);
+    s.align_items = taffy::style::AlignItems::CENTER;
+    s
+}

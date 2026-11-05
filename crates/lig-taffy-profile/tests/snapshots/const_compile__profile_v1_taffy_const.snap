@@ -1,0 +1,14 @@
+---
+source: crates/lig-taffy-profile/tests/const_compile.rs
+expression: out.const_fn_text
+---
+pub const fn s0() -> taffy::Style {
+    let mut s = taffy::Style::DEFAULT;
+    s.padding = taffy::Rect { top: taffy::LengthPercentage::length(16.0), right: taffy::LengthPercentage::length(16.0), bottom: taffy::LengthPercentage::length(16.0), left: taffy::LengthPercentage::length(16.0) };
+    s.gap = taffy::Size { width: taffy::LengthPercentage::length(8.0), height: taffy::LengthPercentage::length(16.0) };
+    s.display = taffy::style::Display::Flex;
+    s.flex_direction = taffy::style::FlexDirection::Column;
+    s.align_items = taffy::style::AlignItems::CENTER;
+    s.justify_content = taffy::style::JustifyContent::SPACE_BETWEEN;
+    s
+}
