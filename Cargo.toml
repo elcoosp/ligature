@@ -2,6 +2,7 @@
 resolver = "3"
 members = [
     "crates/lig-admission",
+    "crates/lig-incremental",
     "crates/lig-core",
     "crates/lig-ir",
     "crates/lig-cli",
@@ -71,6 +72,7 @@ lig-codegen = { path = "crates/lig-codegen", version = "0.1.0" }
 lig-cli = { path = "crates/lig-cli", version = "0.1.0" }
 lig-core = { path = "crates/lig-core", version = "0.1.0" }
 lig-expr = { path = "crates/lig-expr", version = "0.1.0" }
+lig-incremental = { path = "crates/lig-incremental", version = "0.1.0" }
 lig-ir = { path = "crates/lig-ir", version = "0.1.0" }
 lig-parse-solid = { path = "crates/lig-parse-solid", version = "0.1.0" }
 lig-parse-vue = { path = "crates/lig-parse-vue", version = "0.1.0" }
