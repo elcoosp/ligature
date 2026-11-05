@@ -15,13 +15,19 @@ pub trait Reactions {
 }
 
 /// The const schedule: topological reaction order plus per-reaction write
-/// masks (`WRITES[r]` re-enters the flush as dirty bits, §7.2).
+/// masks (`WRITES[r]` re-enters the flush as dirty bits, §7.2). `writes_hi`
+/// is the spill word for reactions 64..128 (per-bit dispatch refinement,
+/// M3): parallel to `order`, indexed by reaction id minus the fast path.
 pub struct Schedule {
     /// Reaction indices in topological order (declaration-order ties).
     pub order: &'static [u8],
     /// Per reaction (indexed by reaction id): mask of reactions to re-dirty
-    /// after it runs.
+    /// after it runs (low word, ids 0..64).
     pub writes: &'static [u64],
+    /// Per reaction (indexed by reaction id): spill mask of reactions to
+    /// re-dirty after it runs (ids 64..128). Empty for components within the
+    /// fast path.
+    pub writes_hi: &'static [u64],
 }
 
 /// Pass cap before the runtime declares a reactive cycle (LIG-E401).
@@ -44,11 +50,21 @@ pub fn flush<R: Reactions>(rx: &mut R, host: &mut dyn Host) {
         let schedule = rx.schedule();
         let low = pending.low();
         for &r in schedule.order {
-            // pending bits are REACTION IDS (§7.2: `pending & bit(r)`).
-            if low & (1u64 << r) != 0 {
+            // Per-bit dispatch: the fast path tests the pending low word
+            // directly; spill reactions (id ≥ 64) read through the
+            // `DirtySet` spill words (§7.2, M3 refinement).
+            let due = if usize::from(r) < crate::dirty::REACTION_LIMIT {
+                low & (1u64 << r) != 0
+            } else {
+                pending.get(usize::from(r))
+            };
+            if due {
                 rx.run(host, r);
                 if let Some(&w) = schedule.writes.get(r as usize) {
                     produced.set_mask(w);
+                }
+                if let Some(&w_hi) = schedule.writes_hi.get(r as usize) {
+                    produced.mark_spill_word(0, w_hi);
                 }
                 produced.union(&rx.dirty().take());
             }
@@ -107,6 +123,7 @@ mod tests {
             &Schedule {
                 order: &[1, 0],
                 writes: &[0, 1 << 0],
+                writes_hi: &[],
             }
         }
         fn dirty(&mut self) -> &mut DirtySet {
@@ -143,6 +160,7 @@ mod tests {
                 &Schedule {
                     order: &[0, 1],
                     writes: &[1 << 1, 1 << 0],
+                    writes_hi: &[],
                 }
             }
             fn dirty(&mut self) -> &mut DirtySet {
@@ -175,5 +193,56 @@ mod tests {
     #[test]
     fn max_passes_is_the_documented_cap() {
         assert_eq!(MAX_PASSES, 32);
+    }
+
+    /// A component whose reactions live in the spill word: r70 (id 70) is
+    /// event-driven; a low memo r5 writes r70 through `writes_hi`.
+    struct SpillDown {
+        dirty: DirtySet,
+        ran: alloc::vec::Vec<u8>,
+    }
+
+    impl Reactions for SpillDown {
+        fn schedule(&self) -> &'static Schedule {
+            &Schedule {
+                order: &[5, 70],
+                writes: &[0, 0],
+                // indexed by reaction id: r5's spill write is bit (70-64).
+                writes_hi: &[0, 0, 0, 0, 0, 1 << (70 - 64)],
+            }
+        }
+        fn dirty(&mut self) -> &mut DirtySet {
+            &mut self.dirty
+        }
+        fn run(&mut self, _host: &mut dyn Host, r: u8) {
+            self.ran.push(r);
+        }
+    }
+
+    #[test]
+    fn spill_reactions_dispatch_per_bit() {
+        let mut c = SpillDown {
+            dirty: DirtySet::new(),
+            ran: alloc::vec![],
+        };
+        c.dirty.set(5); // a low reaction with a spill write mask
+        flush(&mut c, &mut NullHost);
+        assert_eq!(
+            c.ran,
+            alloc::vec![5, 70],
+            "the low reaction's writes_hi re-dirties reaction 70"
+        );
+        assert!(c.dirty.is_empty(), "converged");
+    }
+
+    #[test]
+    fn spill_reactions_run_from_their_own_word() {
+        let mut c = SpillDown {
+            dirty: DirtySet::new(),
+            ran: alloc::vec![],
+        };
+        c.dirty.set(70); // only the spill bit is set
+        flush(&mut c, &mut NullHost);
+        assert_eq!(c.ran, alloc::vec![70], "reaction 70 dispatches from spill");
     }
 }
