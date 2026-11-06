@@ -68,6 +68,19 @@ pub struct ListItem {
     pub frag: Box<Fragment>,
 }
 
+/// Who authored the content mounted on a slot outlet (M7): a use-site fill
+/// (parent-owned reactions) or the outlet's own fallback (child-owned
+/// reactions). The distinction is what makes slot-scoped run arms exact — a
+/// fallback reaction must never write into a fill and vice versa.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SlotOrigin {
+    /// Parent-authored fill content (mounted by the parent's build).
+    Fill,
+    /// Child-authored fallback content (mounted by the parent's build when
+    /// the use site provides no fill).
+    Fallback,
+}
+
 /// A mounted list (§7.5 `For`): keyed items hanging on one anchor marker, in
 /// visual order. Reconciliation is driven by `plan_keyed` (keyed lists,
 /// since M5) / the index diff (unkeyed lists).
@@ -76,6 +89,21 @@ pub struct ListSlot {
     anchor: NodeId,
     /// Items in visual order.
     items: Vec<ListItem>,
+}
+
+/// A mounted slot content: its origin (fill vs fallback), the parent-side
+/// anchor node it hangs on, its root node, and its own fragment (M7 —
+/// dynamic slot content carries live holes addressed by slot-scoped run
+/// arms).
+pub struct SlotInstance {
+    /// Whether the content is a fill or the outlet's fallback.
+    pub origin: SlotOrigin,
+    /// The parent-side anchor node.
+    pub anchor: NodeId,
+    /// The content's root node.
+    pub root: NodeId,
+    /// The content's own fragment.
+    pub frag: Box<Fragment>,
 }
 
 /// A fragment instance: slab + holes + branch slots + handlers + dirty mask.
@@ -87,7 +115,7 @@ pub struct Fragment {
     branch_holes: Vec<NodeId>,
     branches: Vec<Option<BranchInstance>>,
     lists: Vec<Option<ListSlot>>,
-    slots: Vec<Option<BranchInstance>>,
+    slots: Vec<Option<SlotInstance>>,
     handlers: Vec<(NodeId, EventKind, HandlerId)>,
     /// Dirty reaction bits (the scheduler's storage, §7.2).
     pub dirty: DirtySet,
@@ -545,13 +573,16 @@ impl Fragment {
         }
     }
 
-    /// Mount a slot fill (parent-supplied children, §7.4) at slot outlet
-    /// `slot`. The fill is owned by this fragment and disposed with it; v1
-    /// fills are static-by-construction (no dynamic binds inside).
+    /// Mount slot content (§7.4) at slot outlet `slot`. The content is owned
+    /// by this fragment and disposed with it; since M7 it may carry dynamic
+    /// binds addressed through the [`Fragment::slot_fill_mut`] /
+    /// [`Fragment::slot_fallback_mut`] accessors (the origin keeps fill and
+    /// fallback run arms from ever crossing).
     pub fn mount_slot(
         &mut self,
         host: &mut dyn Host,
         slot: usize,
+        origin: SlotOrigin,
         tpl: Template,
         hole_anchors: &[&[AnchorStep]],
         branch_anchors: &[&[AnchorStep]],
@@ -566,7 +597,8 @@ impl Fragment {
         let sub = Fragment::new(host, tpl, hole_anchors, branch_anchors);
         let root = *sub.roots().first().unwrap_or(&self.ids[0]);
         host.insert(anchor, root, 0);
-        self.slots[slot] = Some(BranchInstance {
+        self.slots[slot] = Some(SlotInstance {
+            origin,
             anchor,
             root,
             frag: Box::new(sub),
@@ -574,10 +606,70 @@ impl Fragment {
         true
     }
 
-    /// Whether a slot fill is mounted.
+    /// Whether any slot content is mounted.
     #[must_use]
     pub fn slot_is(&self, slot: usize) -> bool {
         self.slots.get(slot).is_some_and(Option::is_some)
+    }
+
+    /// The mounted content's origin, if any (M7).
+    #[must_use]
+    pub fn slot_origin(&self, slot: usize) -> Option<SlotOrigin> {
+        self.slots
+            .get(slot)
+            .and_then(Option::as_ref)
+            .map(|s| s.origin)
+    }
+
+    /// The mounted fill fragment (origin [`SlotOrigin::Fill`], M7).
+    #[must_use]
+    pub fn slot_fill(&self, slot: usize) -> Option<&Fragment> {
+        match self.slots.get(slot).and_then(Option::as_ref) {
+            Some(s) if s.origin == SlotOrigin::Fill => Some(&s.frag),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the mounted fill fragment (fill bind run arms, M7).
+    pub fn slot_fill_mut(&mut self, slot: usize) -> Option<&mut Fragment> {
+        match self.slots.get_mut(slot).and_then(Option::as_mut) {
+            Some(s) if s.origin == SlotOrigin::Fill => Some(&mut s.frag),
+            _ => None,
+        }
+    }
+
+    /// The mounted fallback fragment (origin [`SlotOrigin::Fallback`], M7).
+    #[must_use]
+    pub fn slot_fallback(&self, slot: usize) -> Option<&Fragment> {
+        match self.slots.get(slot).and_then(Option::as_ref) {
+            Some(s) if s.origin == SlotOrigin::Fallback => Some(&s.frag),
+            _ => None,
+        }
+    }
+
+    /// Mutable access to the mounted fallback fragment (fallback bind run
+    /// arms, M7). `None` while a fill occupies the outlet — a fallback
+    /// reaction must never write into a fill.
+    pub fn slot_fallback_mut(&mut self, slot: usize) -> Option<&mut Fragment> {
+        match self.slots.get_mut(slot).and_then(Option::as_mut) {
+            Some(s) if s.origin == SlotOrigin::Fallback => Some(&mut s.frag),
+            _ => None,
+        }
+    }
+
+    /// Record an event handler for a node that lives in another fragment's
+    /// slab (slot content, M7): the handler id marks THIS fragment's dirty
+    /// set on dispatch, so the owning component's flush runs the reaction.
+    pub fn attach_foreign(
+        &mut self,
+        node: NodeId,
+        ev: EventKind,
+        handler: HandlerId,
+        delegate: bool,
+        host: &mut dyn Host,
+    ) {
+        self.handlers.push((node, ev, handler));
+        host.attach(node, ev, handler, delegate);
     }
 
     /// The anchor node of a branch/list slot (host tests, slot wiring).
@@ -631,8 +723,8 @@ impl Fragment {
 
 #[cfg(test)]
 mod tests {
-    use super::{AnchorStep, Fragment, TplNode};
-    use crate::host::{EvData, Host, NodeId, PropVal, TemplateDesc};
+    use super::{AnchorStep, Fragment, SlotOrigin, TplNode};
+    use crate::host::{EvData, EventKind, HandlerId, Host, NodeId, PropVal, TemplateDesc};
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;
@@ -646,6 +738,7 @@ mod tests {
         destroyed: Vec<NodeId>,
         htmls: Vec<(NodeId, alloc::string::String)>,
         styles_dyn: Vec<usize>,
+        attaches: Vec<(NodeId, crate::EventKind, crate::HandlerId)>,
     }
 
     impl Host for RecHost {
@@ -674,11 +767,12 @@ mod tests {
         }
         fn attach(
             &mut self,
-            _node: NodeId,
-            _ev: crate::EventKind,
-            _handler: crate::HandlerId,
+            node: NodeId,
+            ev: crate::EventKind,
+            handler: crate::HandlerId,
             _delegate: bool,
         ) {
+            self.attaches.push((node, ev, handler));
         }
         fn detach(&mut self, _node: NodeId, _ev: crate::EventKind, _handler: crate::HandlerId) {}
         fn on_mount(&mut self, _node: NodeId, _hook: crate::HookId) {}
@@ -789,15 +883,60 @@ mod tests {
             children: &[TplNode::Marker],
         }];
         let mut f = Fragment::new(&mut h, child_tpl, &[&[AnchorStep::MarkerDown(0)]], &[]);
-        assert!(f.mount_slot(&mut h, 0, item_tpl(), ITEM_HOLES, &[]));
+        assert!(f.mount_slot(&mut h, 0, SlotOrigin::Fill, item_tpl(), ITEM_HOLES, &[]));
         assert!(
-            !f.mount_slot(&mut h, 0, item_tpl(), ITEM_HOLES, &[]),
+            !f.mount_slot(&mut h, 0, SlotOrigin::Fill, item_tpl(), ITEM_HOLES, &[]),
             "once only"
         );
         assert!(f.slot_is(0));
         let before = h.destroyed.len();
         f.teardown(&mut h);
         assert!(h.destroyed.len() > before, "slot fill disposed with owner");
+    }
+
+    #[test]
+    fn slot_origin_gates_fill_and_fallback_accessors() {
+        let mut h = RecHost::default();
+        let child_tpl: crate::Template = &[TplNode::Element {
+            tag: "section",
+            attrs: &[],
+            style: None,
+            children: &[TplNode::Marker, TplNode::Marker],
+        }];
+        let mut f = Fragment::new(
+            &mut h,
+            child_tpl,
+            &[&[AnchorStep::MarkerDown(0)], &[AnchorStep::MarkerDown(1)]],
+            &[],
+        );
+        // Outlet 0 carries a fill; outlet 1 carries the child's fallback.
+        assert!(f.mount_slot(&mut h, 0, SlotOrigin::Fill, item_tpl(), ITEM_HOLES, &[]));
+        assert!(f.mount_slot(&mut h, 1, SlotOrigin::Fallback, item_tpl(), ITEM_HOLES, &[]));
+        assert_eq!(f.slot_origin(0), Some(SlotOrigin::Fill));
+        assert_eq!(f.slot_origin(1), Some(SlotOrigin::Fallback));
+        assert!(f.slot_fill(0).is_some() && f.slot_fill_mut(0).is_some());
+        assert!(f.slot_fallback(0).is_none() && f.slot_fallback_mut(0).is_none());
+        assert!(f.slot_fallback(1).is_some() && f.slot_fallback_mut(1).is_some());
+        assert!(f.slot_fill(1).is_none() && f.slot_fill_mut(1).is_none());
+        assert_eq!(f.slot_origin(2), None, "unmounted outlet");
+    }
+
+    #[test]
+    fn attach_foreign_records_on_the_recording_fragment() {
+        let mut h = RecHost::default();
+        let mut f = Fragment::new(&mut h, list_tpl(), &[], &[]);
+        let mut g = Fragment::new(&mut h, item_tpl(), ITEM_HOLES, &[]);
+        let node = g.hole(0);
+        f.attach_foreign(node, EventKind::Click, HandlerId(3), true, &mut h);
+        // Dispatch on the RECORDING fragment marks its dirty set (handler id
+        // = reaction id, §10.1) — the node lives in another slab.
+        assert!(f.dispatch(node, EventKind::Click));
+        assert!(f.dirty.get(3), "handler 3 marked on the recording fragment");
+        assert_eq!(h.attaches.len(), 1, "one host attach commit");
+        assert!(
+            !g.dispatch(node, EventKind::Click),
+            "content fragment has no record"
+        );
     }
 
     #[test]
