@@ -21,7 +21,7 @@ use lig_parse_solid::tests_support::COUNTER_TSX;
 use lig_runtime::host::{
     AttrVal, EventKind, HandlerId, HookId, Host, NodeId, PropVal, StyleConstId, TemplateDesc,
 };
-use lig_runtime::{AnchorStep, DirtySet, Fragment, Reactions, Schedule, TplNode, keyed_diff};
+use lig_runtime::{AnchorStep, DirtySet, Fragment, Reactions, Schedule, TplNode, plan_keyed};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -280,13 +280,14 @@ fn measure(name: &str, root: &Path) -> f64 {
         }),
         "runtime_list_diff_keyed" => {
             // 64-item list, one swap + one replace — the bench's mid-size
-            // reorder case.
+            // reorder case, measured through the shipped sequential planner
+            // (the plan the generated reconcile executes).
             let old: Vec<u64> = (0..64).map(|i| 100 + i).collect();
             let mut new = old.clone();
             new.swap(10, 40);
             new[60] = 999;
             median_us(samples_for(name), || {
-                black_box(keyed_diff(&old, &new));
+                black_box(plan_keyed(&old, &new));
             })
         }
         "patch_apply_1" => median_us(samples_for(name), || {
