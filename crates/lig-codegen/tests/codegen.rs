@@ -216,3 +216,103 @@ export function App() {
         "sentinel init: {text}"
     );
 }
+
+#[test]
+fn composed_contexts_address_content_branches_and_lists() {
+    // M8: structural slot content composes the addressing walk. An If on a
+    // fill mounts its branch ON the content (`slot_fill_mut` → the content
+    // receiver), the branch's own binds walk through the composed chain
+    // (`slot_fill_mut` → `branch_mut`), a For on the fill reconciles the
+    // content's own list table through the associated receiver-param
+    // reconcile, and the mount marks the fresh branch's binds (the flush
+    // re-enters and initializes them).
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [label, setLabel] = createSignal("live");
+  const [rows, setRows] = createSignal(["alpha"]);
+  return (
+    <Panel
+      title="Status"
+      header={
+        <div>
+          <Show when={on()}>
+            <b>{label}</b>
+          </Show>
+          <For each={rows()} key={(t) => t}>{(t) => <li>{t}</li>}</For>
+        </div>
+      }
+    />
+  );
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "structural.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The If mount rides the content receiver, then flags the mount.
+    assert!(
+        text.contains("if let Some(c) = self.panel.frag.slot_fill_mut(")
+            && text.contains("c.mount_branch("),
+        "content If mounts through the fill content: {text}"
+    );
+    assert!(
+        text.contains("let mut did_mount = false;") && text.contains("did_mount = true;"),
+        "the mount is flagged for the init marking: {text}"
+    );
+    // The fresh branch's binds are marked on the component's dirty set —
+    // the flush re-enters and initializes them.
+    assert!(
+        text.contains("if did_mount {") && text.contains("self.frag.mark_mask(0x"),
+        "mount-time marking initializes the fresh branch's binds: {text}"
+    );
+    // The branch's own bind walks the composed chain.
+    assert!(
+        text.contains("if let Some(c) = self.panel.frag.slot_fill_mut(")
+            && text.contains("if let Some(b) = c.branch_mut(")
+            && text.contains("b.set_text(h,"),
+        "branch bind addresses content → branch: {text}"
+    );
+    // The For reconciles the content's list table through the receiver
+    // param (the associated fn takes no self).
+    assert!(
+        text.contains("Self::reconcile_f"),
+        "composed reconcile is a receiver-param associated fn: {text}"
+    );
+    assert!(
+        text.contains("recv: &mut ::lig_runtime::Fragment"),
+        "the composed reconcile addresses its own receiver fragment: {text}"
+    );
+}
+
+#[test]
+fn branch_nested_branches_compose_the_walk() {
+    // M8: nested Ifs compose (Branch { base: Branch { base: Direct } }) —
+    // the inner bind walks branch → branch, not self.frag → branch.
+    let src = r#"export function App() {
+  const [a, setA] = createSignal(true);
+  const [b, setB] = createSignal(true);
+  const [label, setLabel] = createSignal("in");
+  return (
+    <div>
+      <Show when={a()}>
+        <span>
+          <Show when={b()}>
+            <em>{label}</em>
+          </Show>
+        </span>
+      </Show>
+    </div>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "nested.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The inner bind unwraps the OUTER branch first, then the inner one.
+    assert!(
+        text.contains("if let Some(b) = self.frag.branch_mut(")
+            && text.contains("if let Some(b) = b.branch_mut("),
+        "nested branch binds walk branch → branch: {text}"
+    );
+}
