@@ -260,3 +260,111 @@ fn props_from_destructured_params() {
         .collect();
     assert_eq!(props, vec!["name"]);
 }
+
+/// The M7 slot-content contract (Solid leg): scalar binds, events, and refs
+/// directly on fill/fallback fragments are admitted — the runtime addresses
+/// them through the mounted content.
+#[test]
+fn slot_content_admits_scalar_binds_events_and_refs() {
+    let src = r#"export function Panel({ title }) {
+  let foot;
+  return (
+    <section>
+      <Slot name="header">
+        <em class={title}>{title}</em>
+      </Slot>
+      <Slot name="foot">
+        <i ref={foot}>{title}</i>
+      </Slot>
+    </section>
+  );
+}
+
+export function App() {
+  const [label, setLabel] = createSignal("live");
+  return (
+    <Panel
+      title="Status"
+      header={<button onClick={() => setLabel("next")}>{label}</button>}
+    />
+  );
+}
+"#;
+    let m = expect_ok(src, "slots_dynamic.tsx");
+    let v = lig_ir::validate::validate(&m);
+    assert!(v.is_empty(), "invariants must hold: {v:?}");
+    // The fill (button) carries the event + text; the fallbacks carry their
+    // own binds; the foot fallback carries the ref.
+    let dynamic_frags: Vec<String> = m
+        .fragments
+        .iter()
+        .filter(|f| !f.dynamics.is_empty())
+        .map(|f| m.strings.get(f.name).to_string())
+        .collect();
+    assert!(
+        dynamic_frags.iter().any(|n| n.starts_with("slotfill")),
+        "fill fragment with dynamics: {dynamic_frags:?}"
+    );
+    assert!(
+        dynamic_frags.iter().any(|n| n.starts_with("slotfallback")),
+        "fallback fragment with dynamics: {dynamic_frags:?}"
+    );
+}
+
+/// The M7 fail-closed boundary (Solid leg): structural constructs inside
+/// slot content are denied with LIG-E001 — branch/list tables hang on
+/// `self.frag`, prop-pass crosses into a grandchild, nested outlets need
+/// composed contexts.
+#[test]
+fn slot_content_stays_fail_closed_on_structural_constructs() {
+    let cases: [(&str, &str); 3] = [
+        // If inside a fill
+        (
+            r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  return (
+    <Panel title="x" header={<Show when={on()}><b>hi</b></Show>} />
+  );
+}
+"#,
+            "If in fill",
+        ),
+        // For inside a fallback
+        (
+            r#"export function Panel({ title }) {
+  return (
+    <section>
+      <Slot name="foot">
+        <For each={["a"]}>{(item) => <i>{item}</i>}</For>
+      </Slot>
+    </section>
+  );
+}
+"#,
+            "For in fallback",
+        ),
+        // Component use inside a fill
+        (
+            r#"export function App() {
+  return (
+    <Panel title="x" header={<Panel title="y" />} />
+  );
+}
+"#,
+            "Component in fill",
+        ),
+    ];
+    for (body, what) in cases {
+        let src = format!(
+            "{body}\nexport function Panel({{ title }}) {{\n  return <section><Slot name=\"foot\" /></section>;\n}}\n"
+        );
+        let src = src.replace("\\n", "\n");
+        match lig_parse_solid::lower_module(&src, "bad.tsx") {
+            Ok(_) => panic!("{what}: expected LIG-E001, got success"),
+            Err(diags) => assert!(
+                diags.iter().any(|d| d.code == "LIG-E001"),
+                "{what}: expected LIG-E001, got {diags:?}"
+            ),
+        }
+    }
+}
