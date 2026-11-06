@@ -2062,6 +2062,7 @@ impl ComponentLowering<'_> {
                     ));
                     continue;
                 }
+                self.deny_structural_content_root(fill_root[0]);
                 let fill = self.fragment_from_elem(fill_root[0], "slotfill");
                 self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
                 slots.push(SlotIr {
@@ -2082,6 +2083,7 @@ impl ComponentLowering<'_> {
             }
         }
         if let Some(child_el) = plain_element {
+            self.deny_structural_content_root(child_el);
             let fill = self.fragment_from_elem(child_el, "slotfill");
             self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
             slots.push(SlotIr {
@@ -2194,21 +2196,87 @@ impl ComponentLowering<'_> {
             ));
             return None;
         }
+        self.deny_structural_content_root(element_children[0]);
         let fill = self.fragment_from_elem(element_children[0], "slotfallback");
         self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
         Some(fill)
     }
 
-    /// The v1 slot-content contract: fills and fallbacks mount as static
-    /// subtrees — the runtime has no run arms addressing a slot instance's
-    /// holes, so dynamic binds inside slot content would write nowhere.
-    /// Fail-closed here rather than emit a broken unit.
-    fn ensure_static_slot_content(&mut self, frag: FragmentId, span: (u32, u32)) {
-        let f = &self.module.fragments[frag.get() as usize];
-        if !f.dynamics.is_empty() || !f.children.is_empty() {
+    /// Structural constructs on a slot-content ROOT are fail-closed (M7):
+    /// the parent mounts content unconditionally, branch/list tables would
+    /// hang on the wrong fragment, and a component use needs grandchild
+    /// prop-pass through the content. `fragment_from_elem` strips the
+    /// directives (its branch/for-body call sites rely on that) and lowers
+    /// component tags as plain elements, which would silently DROP the
+    /// construct — M6-era fail-opens this milestone closes. Descendants
+    /// keep the full lowering: their v-if/v-for produce dynamics, which
+    /// `ensure_static_slot_content` denies.
+    fn deny_structural_content_root(&mut self, el: &TplElement) {
+        if el.attrs.iter().any(|a| {
+            matches!(
+                a,
+                TplAttr::If { .. } | TplAttr::ElseIf { .. } | TplAttr::Else | TplAttr::For { .. }
+            )
+        }) {
             self.diags.push(LigDiagnostic::error(
                 "LIG-E001",
-                "slot fill/fallback content must be static in v1 — dynamic binds inside slot content are not addressed by the runtime",
+                "structural directives (v-if/v-for) on slot-content roots are not addressed by the runtime (M7 defers branch and list tables on content fragments)",
+                Span::new(el.span.0 as u32, el.span.1 as u32),
+            ));
+        }
+        if is_component_tag(&el.tag) {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "component uses on slot-content roots are not addressed by the runtime (M7 defers grandchild prop-pass through content)",
+                Span::new(el.span.0 as u32, el.span.1 as u32),
+            ));
+        }
+    }
+
+    /// The M7 slot-content contract: fills and fallbacks mount as live
+    /// fragments — scalar binds (text/class/attr/style-prop/html), events,
+    /// and refs on the content itself are addressed by slot-scoped run arms
+    /// (`slot_fill_mut`/`slot_fallback_mut` + `attach_foreign`). Structural
+    /// constructs stay fail-closed: branch/list tables hang on `self.frag`
+    /// (an If/For here would mount into the wrong fragment), prop-pass
+    /// crosses into a grandchild, and nested outlets need composed
+    /// contexts.
+    fn ensure_static_slot_content(&mut self, frag: FragmentId, span: (u32, u32)) {
+        let f = &self.module.fragments[frag.get() as usize];
+        for d in &f.dynamics {
+            let denied = match &d.kind {
+                DynamicKind::Text
+                | DynamicKind::Html
+                | DynamicKind::Attr { .. }
+                | DynamicKind::Class
+                | DynamicKind::StyleProp { .. }
+                | DynamicKind::Event { .. }
+                | DynamicKind::Ref => None,
+                DynamicKind::If(_) | DynamicKind::For(_) => Some(
+                    "If/For inside slot content is not addressed by the runtime (M7 defers branch and list tables on content fragments)",
+                ),
+                DynamicKind::Component(_) => Some(
+                    "component uses inside slot content are not addressed by the runtime (M7 defers grandchild prop-pass through content)",
+                ),
+                DynamicKind::Slot { .. } => Some(
+                    "nested slot outlets inside slot content are not addressed by the runtime (M7 defers composed addressing contexts)",
+                ),
+                DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
+                    "children/prop-pass/whole-style dynamics inside slot content are outside the admitted subset (M2)",
+                ),
+            };
+            if let Some(why) = denied {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    format!("slot fill/fallback content: {why}"),
+                    Span::new(span.0, span.1),
+                ));
+            }
+        }
+        if !f.children.is_empty() {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "slot fill/fallback content must be a single element — nested structural fragments (If/For bodies, nested fills) are not addressed by the runtime",
                 Span::new(span.0, span.1),
             ));
         }
@@ -2648,5 +2716,119 @@ const tags = ref(["alpha"]);
 "#;
         let err = lower_module(src, "tags.vue").expect_err("must fail");
         assert!(err.iter().any(|d| d.code == "LIG-E001"), "{err:?}");
+    }
+
+    /// The M7 slot-content contract (Vue leg): scalar binds and events
+    /// directly on fill/fallback fragments are admitted — the runtime
+    /// addresses them through the mounted content (`slot_fill_mut` /
+    /// `slot_fallback_mut` run arms + `attach_foreign`).
+    #[test]
+    fn slot_content_admits_scalar_binds_and_events() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "Panel" });
+const { title } = defineProps<{ title: string }>();
+</script>
+<template>
+  <section>
+    <slot name="header">
+      <em class="fb">{{ title }}</em>
+    </slot>
+    <slot name="foot"><i class="fb">{{ title }}</i></slot>
+  </section>
+</template>
+<script setup lang="ts">
+defineOptions({ name: "App" });
+const label = ref("live");
+</script>
+<template>
+  <Panel title="Status">
+    <template #header>
+      <button @click="label = 'next'">{{ label }}</button>
+    </template>
+  </Panel>
+</template>
+"#;
+        let m = lower_module(src, "slots_dynamic.vue").expect("lowers");
+        let v = lig_ir::validate::validate(&m);
+        assert!(v.is_empty(), "invariants must hold: {v:?}");
+        let dynamic_frags: Vec<String> = m
+            .fragments
+            .iter()
+            .filter(|f| !f.dynamics.is_empty())
+            .map(|f| m.strings.get(f.name).to_string())
+            .collect();
+        assert!(
+            dynamic_frags.iter().any(|n| n.starts_with("slotfill")),
+            "fill fragment with dynamics: {dynamic_frags:?}"
+        );
+        assert!(
+            dynamic_frags.iter().any(|n| n.starts_with("slotfallback")),
+            "fallback fragment with dynamics: {dynamic_frags:?}"
+        );
+    }
+
+    /// The M7 fail-closed boundary (Vue leg): structural constructs inside
+    /// slot content are denied with LIG-E001 — branch/list tables hang on
+    /// `self.frag`, prop-pass crosses into a grandchild.
+    #[test]
+    fn slot_content_stays_fail_closed_on_structural_constructs() {
+        let cases: [(&str, &str); 3] = [
+            // v-if inside a fill
+            (
+                r#"<script setup>
+defineOptions({ name: "App" });
+const on = ref(true);
+</script>
+<template>
+  <Panel title="x">
+    <template #header><p v-if="on">hi</p></template>
+  </Panel>
+</template>
+"#,
+                "If in fill",
+            ),
+            // v-for inside a fallback
+            (
+                r#"<script setup>
+defineOptions({ name: "Panel" });
+const rows = ref(["a"]);
+</script>
+<template>
+  <section>
+    <slot name="foot">
+      <i v-for="r in rows">{{ r }}</i>
+    </slot>
+  </section>
+</template>
+"#,
+                "For in fallback",
+            ),
+            // Component use inside a fill
+            (
+                r#"<script setup>
+defineOptions({ name: "App" });
+</script>
+<template>
+  <Panel title="x">
+    <template #header><Panel title="y" /></template>
+  </Panel>
+</template>
+"#,
+                "Component in fill",
+            ),
+        ];
+        for (body, what) in cases {
+            let src = format!(
+                "{body}\n<script setup>defineOptions({{ name: \"Panel\" }});</script>\n<template><section><slot name=\"foot\" /></section></template>\n"
+            );
+            let src = src.replace("\\n", "\n");
+            match lower_module(&src, "bad.vue") {
+                Ok(_) => panic!("{what}: expected LIG-E001, got success"),
+                Err(diags) => assert!(
+                    diags.iter().any(|d| d.code == "LIG-E001"),
+                    "{what}: expected LIG-E001, got {diags:?}"
+                ),
+            }
+        }
     }
 }
