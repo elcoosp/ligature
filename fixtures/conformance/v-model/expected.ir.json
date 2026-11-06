@@ -1,0 +1,254 @@
+{
+  "version": 5,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "v-model.tsx",
+      "hash": 7812352073249419071
+    }
+  ],
+  "strings": {
+    "entries": [
+      "",
+      "Signup",
+      "class",
+      "email",
+      "email:",
+      "form",
+      "input",
+      "p",
+      "setEmail",
+      "signup",
+      "value"
+    ]
+  },
+  "components": [
+    {
+      "name": 1,
+      "root": 0,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 5,
+          "static_attrs": [
+            {
+              "key": 2,
+              "value": {
+                "Str": 9
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            {
+              "Element": {
+                "tag": 6,
+                "static_attrs": [],
+                "style": null,
+                "children": []
+              }
+            },
+            {
+              "Element": {
+                "tag": 7,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  {
+                    "Text": {
+                      "value": 4
+                    }
+                  },
+                  "Marker"
+                ]
+              }
+            }
+          ]
+        }
+      },
+      "hash": 13357838458238623326
+    }
+  ],
+  "fragments": [
+    {
+      "name": 1,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Attr": {
+              "key": 10
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            172,
+            179
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Event": {
+              "event": "input",
+              "delegate": true
+            }
+          },
+          "expr": 1,
+          "reaction": 1,
+          "span": [
+            190,
+            228
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 1
+            },
+            {
+              "Down": 1
+            }
+          ],
+          "kind": "Text",
+          "expr": 2,
+          "reaction": 2,
+          "span": [
+            250,
+            257
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "State": 3
+      },
+      {
+        "Call": [
+          0,
+          [
+            {
+              "Event": "CurrentTargetValue"
+            }
+          ]
+        ]
+      },
+      {
+        "State": 3
+      },
+      {
+        "Lit": {
+          "Str": 0
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 172,
+        "end": 179
+      },
+      {
+        "start": 197,
+        "end": 228
+      },
+      {
+        "start": 250,
+        "end": 257
+      },
+      {
+        "start": 110,
+        "end": 112
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 3,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Str",
+      "init": 3
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        3
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "effect": {
+          "tier": "post"
+        }
+      },
+      "reads": [],
+      "writes": [
+        3
+      ],
+      "body": 1,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 2
+        }
+      },
+      "reads": [
+        3
+      ],
+      "writes": [],
+      "body": 2,
+      "owner": 0
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [
+    {
+      "name": 8,
+      "kind": {
+        "ModelFn": {
+          "target": 3
+        }
+      }
+    }
+  ],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}
