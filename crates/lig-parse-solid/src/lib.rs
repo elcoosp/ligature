@@ -1264,7 +1264,7 @@ impl ComponentLowering<'_, '_> {
             return NodeIr::Marker;
         };
         let item_id = self.intern(&item);
-        self.scope.local.insert(item);
+        self.scope.local.insert(item.clone());
         if let Some(i) = &index_name {
             // Solid's `<For>` index is an accessor: `i()` inside the body
             // reads the current index (§7.5).
@@ -1273,13 +1273,20 @@ impl ComponentLowering<'_, '_> {
         }
         let body_frag = self.fragment_from_jsx(body_src, "items");
         let index_id = index_name.as_ref().map(|i| self.intern(i));
+        let key = match self.for_key_expr(el, &item) {
+            Ok(k) => k,
+            Err(d) => {
+                self.diags.push(d);
+                return NodeIr::Marker;
+            }
+        };
         let reads = self.collect_reads(source);
         self.push_dynamic(
             DynamicKind::For(ForIr {
                 source,
                 item: item_id,
                 index: index_id,
-                key: None, // Solid <For> keys by item reference (§6.1)
+                key,
                 body: body_frag,
             }),
             source,
@@ -1290,6 +1297,89 @@ impl ComponentLowering<'_, '_> {
             el.span(),
         );
         NodeIr::Marker
+    }
+
+    /// The `<For>` key expression (§7.5): `key={(item) => expr}` — a pure
+    /// projection of the item (usually the identity). The arrow takes
+    /// exactly the body's item binding (the key and the body describe the
+    /// same item), and its body must not read component state: keys are
+    /// identities, and a state-dependent key re-identifies items on
+    /// unrelated writes. Absent `key` ⇒ index diff (unchanged v1 behavior).
+    fn for_key_expr(
+        &mut self,
+        el: &oxc_ast::ast::JSXElement<'_>,
+        item: &str,
+    ) -> Result<Option<ExprId>, LigDiagnostic> {
+        let el_span = Span::new(el.span().start, el.span().end);
+        let mut found: Option<(&oxc_span::Span, &Expression<'_>)> = None;
+        for attr_item in &el.opening_element.attributes {
+            let JSXAttributeItem::Attribute(attr) = attr_item else {
+                continue;
+            };
+            let JSXAttributeName::Identifier(id) = &attr.name else {
+                continue;
+            };
+            if id.name != "key" {
+                continue;
+            }
+            if found.is_some() {
+                return Err(LigDiagnostic::error(
+                    "LIG-E001",
+                    "<For> takes at most one `key`",
+                    el_span,
+                ));
+            }
+            let attr_span = Span::new(attr.span.start, attr.span.end);
+            let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value else {
+                return Err(LigDiagnostic::error(
+                    "LIG-E001",
+                    "<For> `key` must be an arrow over the item — key={(item) => expr}",
+                    attr_span,
+                ));
+            };
+            let Some(Expression::ArrowFunctionExpression(arrow)) = c.expression.as_expression()
+            else {
+                return Err(LigDiagnostic::error(
+                    "LIG-E001",
+                    "<For> `key` must be an arrow over the item — key={(item) => expr}",
+                    attr_span,
+                ));
+            };
+            let param_is_item = arrow.params.items.len() == 1
+                && matches!(
+                    arrow.params.items.first().map(|p| &p.pattern),
+                    Some(oxc_ast::ast::BindingPattern::BindingIdentifier(b))
+                        if b.name.as_str() == item
+                );
+            if !param_is_item {
+                return Err(LigDiagnostic::error(
+                    "LIG-E001",
+                    format!("<For> `key` arrow must take exactly the item binding `{item}`"),
+                    attr_span,
+                ));
+            }
+            let Some(body_expr) = arrow_body_expr(&arrow.body) else {
+                return Err(LigDiagnostic::error(
+                    "LIG-E001",
+                    "<For> `key` arrow body must be a single expression",
+                    attr_span,
+                ));
+            };
+            found = Some((&attr.span, body_expr));
+        }
+        let Some((attr_span, body_expr)) = found else {
+            return Ok(None);
+        };
+        let expr = self.lower_expr(body_expr)?;
+        if !self.collect_reads(expr).is_empty() {
+            return Err(LigDiagnostic::error(
+                "LIG-E001",
+                "<For> `key` must be a pure function of the item — state reads \
+                 re-identify items on unrelated writes",
+                Span::new(attr_span.start, attr_span.end),
+            ));
+        }
+        Ok(Some(expr))
     }
 
     fn lower_component_use(
