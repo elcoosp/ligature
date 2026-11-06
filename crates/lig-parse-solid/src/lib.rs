@@ -1559,16 +1559,50 @@ impl ComponentLowering<'_, '_> {
         Ok(Some(fill))
     }
 
-    /// The v1 slot-content contract: fills and fallbacks mount as static
-    /// subtrees — the runtime has no run arms addressing a slot instance's
-    /// holes, so dynamic binds inside slot content would write nowhere.
-    /// Fail-closed here rather than emit a broken unit.
+    /// The M7 slot-content contract: fills and fallbacks mount as live
+    /// fragments — scalar binds (text/class/attr/style-prop/html), events,
+    /// and refs on the content itself are addressed by slot-scoped run arms
+    /// (`slot_fill_mut`/`slot_fallback_mut` + `attach_foreign`). Structural
+    /// constructs stay fail-closed: branch/list tables hang on `self.frag`
+    /// (an If/For here would mount into the wrong fragment), prop-pass
+    /// crosses into a grandchild, and nested outlets need composed
+    /// contexts.
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: oxc_span::Span) {
         let f = &self.module.fragments[frag.get() as usize];
-        if !f.dynamics.is_empty() || !f.children.is_empty() {
+        for d in &f.dynamics {
+            let denied = match &d.kind {
+                DynamicKind::Text
+                | DynamicKind::Html
+                | DynamicKind::Attr { .. }
+                | DynamicKind::Class
+                | DynamicKind::StyleProp { .. }
+                | DynamicKind::Event { .. }
+                | DynamicKind::Ref => None,
+                DynamicKind::If(_) | DynamicKind::For(_) => Some(
+                    "If/For inside slot content is not addressed by the runtime (M7 defers branch and list tables on content fragments)",
+                ),
+                DynamicKind::Component(_) => Some(
+                    "component uses inside slot content are not addressed by the runtime (M7 defers grandchild prop-pass through content)",
+                ),
+                DynamicKind::Slot { .. } => Some(
+                    "nested slot outlets inside slot content are not addressed by the runtime (M7 defers composed addressing contexts)",
+                ),
+                DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
+                    "children/prop-pass/whole-style dynamics inside slot content are outside the admitted subset (M2)",
+                ),
+            };
+            if let Some(why) = denied {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    format!("slot fill/fallback content: {why}"),
+                    Span::new(span.start, span.end),
+                ));
+            }
+        }
+        if !f.children.is_empty() {
             self.diags.push(LigDiagnostic::error(
                 "LIG-E001",
-                "slot fill/fallback content must be static in v1 — dynamic binds inside slot content are not addressed by the runtime",
+                "slot fill/fallback content must be a single element — nested structural fragments (If/For bodies, nested fills) are not addressed by the runtime",
                 Span::new(span.start, span.end),
             ));
         }
