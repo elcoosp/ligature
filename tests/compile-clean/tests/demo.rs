@@ -4,10 +4,66 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    slots_named, v_model,
+    slots_dynamic, slots_named, v_model,
 };
-use lig_runtime::{EvData, key_hash};
+use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::MockHost;
+
+/// The M7 dynamic-slot-content contract, end to end: a fill carries a live
+/// text bind + a delegated event (the handler record lands on the parent's
+/// fragment across slabs), and the fallback mounts with its bind
+/// initialized by the parent-driven init-flush. One addressing discipline:
+/// every slot-content write goes through the mounted content.
+#[test]
+fn slots_dynamic_binds_and_events_address_their_content() {
+    let mut h = MockHost::new();
+    let mut app = slots_dynamic::App::build(&mut h, slots_dynamic::AppProps::default());
+    // Origins per outlet: use 1 fills the header; the foot outlet shows the
+    // child's own fallback.
+    assert_eq!(
+        app.panel.frag.slot_origin(1),
+        Some(SlotOrigin::Fill),
+        "header outlet carries the use-site fill"
+    );
+    assert_eq!(
+        app.panel.frag.slot_origin(2),
+        Some(SlotOrigin::Fallback),
+        "foot outlet carries the outlet fallback"
+    );
+    // The fallback bind ran at mount time (the parent's init-flush), not at
+    // the child's build — its text shows the prop through the content.
+    let fb = app
+        .panel
+        .frag
+        .slot_fallback(2)
+        .expect("fallback mounted by the parent's build");
+    assert_eq!(
+        h.text_of(fb.hole(0)),
+        Some("Status"),
+        "fallback bind initialized by the init-flush"
+    );
+    // The fill's text bind ran at the parent's build: content live, "live".
+    let fill = app
+        .panel
+        .frag
+        .slot_fill(1)
+        .expect("fill mounted by the parent's build");
+    assert_eq!(
+        h.text_of(fill.hole(1)),
+        Some("live"),
+        "fill text bind initialized at build"
+    );
+    // Dispatch the fill's click: the record lives on the parent's fragment
+    // (attach_foreign across slabs); the flush rewrites the content text.
+    let fill_text = fill.hole(1);
+    app.fire_1(&mut h, &EvData::new());
+    assert_eq!(app.label, "next", "handler wrote the setter");
+    assert_eq!(
+        h.text_of(fill_text),
+        Some("next"),
+        "slot-scoped bind rewrote the content after the event"
+    );
+}
 
 #[test]
 fn counter_renders_and_updates_through_the_schedule() {
