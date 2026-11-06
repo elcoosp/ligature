@@ -274,7 +274,7 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(out.status.success(), "budgets gate green: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
-    assert!(stdout.contains("7146"), "D-8-pinned byte count: {stdout}");
+    assert!(stdout.contains("7437"), "D-8-pinned byte count: {stdout}");
     assert!(
         stdout.contains("all 10 row(s) within budget"),
         "summary present: {stdout}"
