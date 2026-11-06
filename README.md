@@ -2,21 +2,26 @@
 
 A dual-frontend (Solid TSX / Vue SFC → shared canonical View IR → const-scheduled Rust) UI compiler with a subsecond-derived hot-patch protocol. This repository implements the architecture in `ligature-architecture-v1.0.md`.
 
-**Status: M5 milestone complete** — the keyed-`For` milestone: the §7.5
-keyed list reconciliation is live end to end (Solid `key={(t) => t}` /
-Vue `:key="t"` → the canonical `ForIr.key` → a `key_of` fn normalizing
-keys into the u64 identity space → `plan_keyed` sequential steps —
-LIS-stable moves without recreating items) on top of the M4 contract
-hardening (the §14.2 budget ledger gate `lig budgets`, the §10 no_std
-proof `lig no-std`, Appendix A) and the M3 incremental pipeline (a
-salsa-style session engine `lig-incremental` with digest-gated re-emission
-(D-9), `lig watch`, build-order cycle recovery (LIG-E020), per-arm
-source-map attribution, the 128-reaction per-bit dispatch refinement, and
-the two-generation ThinLink patch engine with stub thunks — see
-`docs/m0/REPORT.md` through `docs/m5/REPORT.md`, and `docs/appendix-a.md`).
-M5 also fixes a latent M0-era bug the milestone's permutation pins caught:
-`keyed_diff` anchored its LIS on key values instead of surviving old
-indices, freezing two-item swaps (`[2, 1] → [1, 2]` produced zero moves).
+**Status: M6 milestone complete** — the template-surface milestone: the
+four constructs deferred since M2 are live end to end (§7.4 named slots
+with `<slot>` fallback content — `<slot name>`/`<Slot name>` outlets,
+`<template #header>` / element-valued-prop fills, per-use-site mounting
+with fallback content, IR v5; §7.6 `v-model` sugar lowering byte-equal to
+the explicit `:value` + `@input` spelling; §7.1 multi-statement effect
+bodies — one post-tier reaction per statement; §7.5 `.map` children keys
+— `key={item}` on the mapped element) on top of the M5 keyed `For`
+(§7.5 LIS-stable keyed reconciliation), the M4 contract hardening (the
+§14.2 budget ledger gate `lig budgets`, the §10 no_std proof
+`lig no-std`, Appendix A) and the M3 incremental pipeline (a salsa-style
+session engine `lig-incremental` with digest-gated re-emission (D-9),
+`lig watch`, build-order cycle recovery (LIG-E020), per-arm source-map
+attribution, the 128-reaction per-bit dispatch refinement, and the
+two-generation ThinLink patch engine with stub thunks — see
+`docs/m0/REPORT.md` through `docs/m6/REPORT.md`, and
+`docs/appendix-a.md`). M6 also fixes two latent M0-era slot-mounting
+defects the milestone's multi-use fixture caught: the fill lookup
+matched the first component dynamic anywhere in the module, and multi-use
+parents collided on a single child struct field.
 
 ## Workspace
 
@@ -44,7 +49,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings   # pedantic, day one
 cargo test --workspace                                   # TDD, day one
 cargo bench --workspace --no-run                         # benched, day one
-cargo run -p lig-cli -- fixtures verify                  # 19 fixtures × both frontend legs (§4)
+cargo run -p lig-cli -- fixtures verify                  # 23 fixtures × both frontend legs (§4)
 cargo run -p lig-cli -- fixtures admission               # NFR-5: 22 diagnostic cases
 cargo run -p lig-cli -- fixtures rules-sync              # rule table ↔ fixtures 1:1
 cargo run -p lig-cli -- reproducibility                  # D-8: byte-identical codegen
