@@ -29,7 +29,9 @@ pub mod template;
 pub use dirty::DirtySet;
 pub use dirty::REACTION_LIMIT;
 pub use fmt::format_i64;
-pub use fragment::{BranchInstance, Fragment, ListItem, ListSlot, NodeKind, NodeRecord};
+pub use fragment::{
+    BranchInstance, Fragment, ListItem, ListSlot, NodeKind, NodeRecord, SlotInstance, SlotOrigin,
+};
 pub use host::{
     AttrVal, EvData, EventKind, HandlerId, HookId, Host, NodeId, PropVal, StyleConstId,
     TemplateDesc,
@@ -46,7 +48,7 @@ pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub mod prelude {
     pub use super::{
         AttrVal, DirtySet, EvData, EventKind, Fragment, HandlerId, Host, MAX_PASSES, NodeId,
-        PropVal, Reactions, Schedule, StyleConstId, Template, TemplateDesc, TplAttr, TplNode,
-        flush,
+        PropVal, Reactions, Schedule, SlotOrigin, StyleConstId, Template, TemplateDesc, TplAttr,
+        TplNode, flush,
     };
 }
