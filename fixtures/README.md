@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (18)
+## Behavior fixtures (19)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -50,6 +50,7 @@ table).
 | `effect-log` | `createEffect`/`watchEffect` reaction (post tier, read-masked) |
 | `event-object` | `$event.currentTarget.value` payload flow |
 | `for-index` | getter-only list signal + `<For>`/`v-for` index accessor |
+| `for-keyed` | keyed list reconciliation (M5): `<For key={(t) => t}>` / `v-for … :key="t"` — identity keys on both legs, `plan_keyed` LIS-stable moves in the generated unit |
 | `for-list` | `<For>` mount over a list signal |
 | `map-children` | `.map` child expression (unkeyed list; the Vue leg uses `v-for`) |
 | `memo-derived` | `createMemo`/`computed` read in a text hole |
