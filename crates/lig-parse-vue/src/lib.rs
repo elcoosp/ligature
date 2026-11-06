@@ -1245,7 +1245,10 @@ impl ComponentLowering<'_> {
     }
 
     /// `v-for` (§7.5): the element becomes the item fragment; the loop site
-    /// collapses to a marker + one `For` dynamic.
+    /// collapses to a marker + one `For` dynamic. A `:key` / `v-bind:key`
+    /// attribute turns on keyed reconciliation (LIS over the key, §7.5) and
+    /// is stripped from the item fragment — the key drives diffing, it is
+    /// not an attribute of the item template.
     fn lower_for(
         &mut self,
         el: &TplElement,
@@ -1264,14 +1267,27 @@ impl ComponentLowering<'_> {
             self.index_accessors.insert(i.to_string());
             self.intern(i.to_string())
         });
-        let body_frag = self.fragment_from_elem(el, "items");
+        let body_frag = {
+            let mut body_el = el.clone();
+            body_el
+                .attrs
+                .retain(|a| !matches!(a, TplAttr::Bind { name, .. } if name == "key"));
+            self.fragment_from_elem(&body_el, "items")
+        };
+        let key = match self.for_key_attr(el) {
+            Ok(k) => k,
+            Err(d) => {
+                self.diags.push(d);
+                return NodeIr::Marker;
+            }
+        };
         let reads = lig_ir::expr::collect_reads(self.module, source);
         self.push_dynamic(
             DynamicKind::For(ForIr {
                 source,
                 item: item_id,
                 index: index_id,
-                key: None, // v1: index diff (§7.5)
+                key,
                 body: body_frag,
             }),
             source,
@@ -1282,6 +1298,49 @@ impl ComponentLowering<'_> {
             (list.0 as u32, list.1 as u32),
         );
         NodeIr::Marker
+    }
+
+    /// The `v-for` key attribute (§7.5): `:key="expr"` / `v-bind:key="expr"`
+    /// — a pure projection of the item (or the index accessor). Keys are
+    /// identities: a state-dependent key re-identifies items on unrelated
+    /// writes, and a static `key="…"` gives every item the same identity —
+    /// both fail closed.
+    fn for_key_attr(&mut self, el: &TplElement) -> Result<Option<ExprId>, LigDiagnostic> {
+        let el_span = Span::new(el.span.0 as u32, el.span.1 as u32);
+        let mut found: Option<ExprId> = None;
+        for attr in &el.attrs {
+            match attr {
+                TplAttr::Static { name, .. } if name == "key" => {
+                    return Err(LigDiagnostic::error(
+                        "LIG-E001",
+                        "a static `key` gives every item the same identity — use `:key`",
+                        el_span,
+                    ));
+                }
+                TplAttr::Bind { name, expr } if name == "key" => {
+                    if found.is_some() {
+                        return Err(LigDiagnostic::error(
+                            "LIG-E001",
+                            "v-for takes at most one `:key`",
+                            el_span,
+                        ));
+                    }
+                    let span = (expr.0 as u32, expr.1 as u32);
+                    let e = self.lower_expr_at(span, None)?;
+                    if !lig_ir::expr::collect_reads(self.module, e).is_empty() {
+                        return Err(LigDiagnostic::error(
+                            "LIG-E001",
+                            "`:key` must be a pure function of the item — state reads \
+                             re-identify items on unrelated writes",
+                            Span::new(span.0, span.1),
+                        ));
+                    }
+                    found = Some(e);
+                }
+                _ => {}
+            }
+        }
+        Ok(found)
     }
 
     /// Text nodes: static segments trim like the Solid frontend (whitespace-
@@ -2164,5 +2223,120 @@ defineOptions({ name: "App" });
                 "expected rejection: {src}"
             );
         }
+    }
+
+    /// `:key` on a `v-for` element lowers to the For's key expression — a
+    /// `Local` read of the item binding — and is stripped from the item
+    /// fragment (no dynamic `key` attribute on the `li`).
+    #[test]
+    fn vfor_key_lowers_and_is_stripped_from_the_item_fragment() {
+        let src = r#"<script setup lang="ts">
+import { ref } from "vue";
+
+defineOptions({ name: "Tags" });
+
+const tags = ref(["alpha", "beta"]);
+</script>
+
+<template>
+  <ul>
+    <li v-for="t in tags" :key="t">{{ t }}</li>
+  </ul>
+</template>
+"#;
+        let m = lower_module(src, "tags.vue").expect("lowers");
+        let (key, item, body) = m
+            .fragments
+            .iter()
+            .flat_map(|f| f.dynamics.iter())
+            .find_map(|d| match &d.kind {
+                lig_ir::DynamicKind::For(f) => Some((f.key, f.item, f.body)),
+                _ => None,
+            })
+            .expect("one For dynamic");
+        let key = key.expect("keyed v-for carries a key");
+        assert_eq!(
+            m.exprs.get(key),
+            &lig_ir::expr::Expr::Local(item),
+            "identity key reads the item binding"
+        );
+        let body_dyns = m.fragments[body.get() as usize]
+            .dynamics
+            .iter()
+            .filter(|d| matches!(d.kind, lig_ir::DynamicKind::Attr { .. }))
+            .count();
+        assert_eq!(body_dyns, 0, "`:key` must not become an item attribute");
+        assert_eq!(
+            lig_ir::validate::validate(&m),
+            [] as [lig_ir::validate::Violation; 0]
+        );
+    }
+
+    /// `v-bind:key` is the same construct spelled longhand.
+    #[test]
+    fn vbind_key_is_the_same_construct() {
+        let src = r#"<script setup lang="ts">
+import { ref } from "vue";
+
+const tags = ref(["alpha"]);
+</script>
+
+<template>
+  <ul>
+    <li v-for="t in tags" v-bind:key="t">{{ t }}</li>
+  </ul>
+</template>
+"#;
+        let m = lower_module(src, "tags.vue").expect("lowers");
+        let key = m
+            .fragments
+            .iter()
+            .flat_map(|f| f.dynamics.iter())
+            .find_map(|d| match &d.kind {
+                lig_ir::DynamicKind::For(f) => f.key,
+                _ => None,
+            })
+            .expect("key expression present");
+        assert!(matches!(m.exprs.get(key), lig_ir::expr::Expr::Local(_)));
+    }
+
+    /// A key reading component state re-identifies items on unrelated
+    /// writes — fail-closed at admission.
+    #[test]
+    fn vfor_key_reading_state_is_e001() {
+        let src = r#"<script setup lang="ts">
+import { ref } from "vue";
+
+const tags = ref(["alpha"]);
+const salt = ref(1);
+</script>
+
+<template>
+  <ul>
+    <li v-for="t in tags" :key="salt">{{ t }}</li>
+  </ul>
+</template>
+"#;
+        let err = lower_module(src, "tags.vue").expect_err("must fail");
+        assert!(err.iter().any(|d| d.code == "LIG-E001"), "{err:?}");
+    }
+
+    /// A static `key="…"` gives every item the same identity — fail-closed.
+    #[test]
+    fn vfor_static_key_is_e001() {
+        let src = r#"<script setup lang="ts">
+import { ref } from "vue";
+
+const tags = ref(["alpha"]);
+</script>
+
+<template>
+  <ul>
+    <li v-for="t in tags" key="t">{{ t }}</li>
+  </ul>
+</template>
+"#;
+        let err = lower_module(src, "tags.vue").expect_err("must fail");
+        assert!(err.iter().any(|d| d.code == "LIG-E001"), "{err:?}");
     }
 }
