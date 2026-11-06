@@ -634,17 +634,43 @@ fn collect_decls(
                 {
                     // Consumed during section naming.
                 }
-                Expression::CallExpression(call) if matches!(&call.callee, Expression::Identifier(id) if id.name == "watchEffect") => {
+                Expression::CallExpression(call) if matches!(&call.callee, Expression::Identifier(id) if id.name == "watchEffect") =>
+                {
                     match call.arguments.first().and_then(|a| a.as_expression()) {
                         Some(Expression::ArrowFunctionExpression(arrow)) => {
-                            match arrow_body_expr(&arrow.body) {
-                                Some(body) => out
-                                    .push(ScriptDecl::Effect((body.span().start, body.span().end))),
-                                None => diags.push(LigDiagnostic::error(
-                                    "LIG-E001",
-                                    "watchEffect bodies must be a single expression",
-                                    to_span(arrow.span),
-                                )),
+                            if let Some(body) = arrow.body.as_expression() {
+                                out.push(ScriptDecl::Effect((body.span().start, body.span().end)));
+                            } else {
+                                // Block body (M6): one effect reaction per
+                                // expression statement — the Vue spelling of
+                                // the Solid multi-statement `createEffect`.
+                                let ArrowFunctionBody::FunctionBody(fb) = &arrow.body else {
+                                    unreachable!("a non-expression arrow body is a FunctionBody");
+                                };
+                                let mut admitted = 0usize;
+                                for stmt in &fb.statements {
+                                    match stmt {
+                                        Statement::ExpressionStatement(es) => {
+                                            out.push(ScriptDecl::Effect((
+                                                es.expression.span().start,
+                                                es.expression.span().end,
+                                            )));
+                                            admitted += 1;
+                                        }
+                                        _ => diags.push(LigDiagnostic::error(
+                                            "LIG-E001",
+                                            "watchEffect bodies admit expression statements only (declarations, `if`, and `return` are outside the subset)",
+                                            to_span(stmt.span()),
+                                        )),
+                                    }
+                                }
+                                if admitted == 0 {
+                                    diags.push(LigDiagnostic::error(
+                                        "LIG-E001",
+                                        "watchEffect bodies admit at least one expression statement",
+                                        to_span(arrow.span),
+                                    ));
+                                }
                             }
                         }
                         Some(other) => {
@@ -1385,6 +1411,16 @@ impl ComponentLowering<'_> {
 
     /// A plain element (no `v-if`/`v-for`): static shape + dynamics.
     fn lower_element(&mut self, el: &TplElement, path: &mut Vec<u32>) -> NodeIr {
+        // `<template>` is admitted only as a named slot fill inside a
+        // component use — anywhere else it is fail-closed (M6).
+        if el.tag == "template" {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "<template> elements are admitted only as named slot fills (`#name`) inside a component",
+                Span::new(el.span.0 as u32, el.span.1 as u32),
+            ));
+            return NodeIr::Marker;
+        }
         let mut static_attrs: Vec<StaticAttr> = Vec::new();
         let mut style: Option<StyleConstId> = None;
         let mut children_out: Vec<NodeIr> = Vec::new();
@@ -1404,6 +1440,16 @@ impl ComponentLowering<'_> {
                 }
                 TplAttr::On { event, stmt } => {
                     self.lower_event(event, *stmt, path);
+                }
+                TplAttr::Model { expr } => {
+                    self.lower_v_model(el, *expr, path);
+                }
+                TplAttr::SlotName { .. } => {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "`#name` slot fills are admitted only on a <template> child of a component",
+                        Span::new(el.span.0 as u32, el.span.1 as u32),
+                    ));
                 }
                 TplAttr::Html { expr } => {
                     let span = (expr.0 as u32, expr.1 as u32);
@@ -1700,6 +1746,94 @@ impl ComponentLowering<'_> {
         );
     }
 
+    /// `v-model="state"` (§7.6 sugar, M6): the two-way binding on an
+    /// `<input>` lowers to exactly the IR the explicit spelling produces —
+    /// a `value` Attr dynamic reading the state, plus an `input` Event
+    /// dynamic writing the synthesized setter (`$event.currentTarget.value`).
+    /// Admitted on `<input>` only; the bound expression must be a state ref.
+    fn lower_v_model(&mut self, el: &TplElement, expr: (usize, usize), path: &[u32]) {
+        let el_span = Span::new(el.span.0 as u32, el.span.1 as u32);
+        if el.tag != "input" {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                format!(
+                    "v-model is admitted on <input> only (found `<{}>`) — spell `:value` + `@input` explicitly elsewhere",
+                    el.tag
+                ),
+                el_span,
+            ));
+            return;
+        }
+        let span = (expr.0 as u32, expr.1 as u32);
+        let source = self.source;
+        let lowered: Result<String, LigDiagnostic> = with_parsed_expr(source, span, |parsed| {
+            match parsed {
+                Expression::Identifier(id) => Ok(id.name.as_str().to_string()),
+                _ => Err(LigDiagnostic::error(
+                    "LIG-E001",
+                    "v-model must bind a state ref (`v-model=\"state\"`)",
+                    to_span(parsed.span()),
+                )
+                .with_help("two-way bindings to projections are not admitted — bind `:value` and write the setter yourself")),
+            }
+        });
+        let name = match lowered {
+            Ok(n) => n,
+            Err(d) => {
+                self.diags.push(d);
+                return;
+            }
+        };
+        if !self.state.contains(&name) {
+            self.diags.push(
+                LigDiagnostic::error(
+                    "LIG-E100",
+                    format!("unknown identifier `{name}`"),
+                    Span::new(expr.0 as u32, expr.1 as u32),
+                )
+                .with_help("bind a ref declared in <script setup>"),
+            );
+            return;
+        }
+        let target_id = self.intern(name.clone());
+        // `:value="state"` half.
+        let value_key = self.intern("value");
+        let state_expr = self.module.insert_expr(Expr::State(target_id));
+        self.push_dynamic(
+            DynamicKind::Attr { key: value_key },
+            state_expr,
+            vec![target_id],
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            span,
+        );
+        // `@input="state = $event.currentTarget.value"` half — the same
+        // synthesized model-fn call the explicit spelling produces.
+        let setter = setter_name(&name);
+        let sid = self.intern(setter);
+        let fid = self
+            .module
+            .intern_pure_fn(sid, lig_ir::expr::PureFnKind::ModelFn { target: target_id });
+        let ev_arg = self
+            .module
+            .insert_expr(Expr::Event(lig_ir::expr::EvField::CurrentTargetValue));
+        let ev_arg_clone = self.module.exprs.get(ev_arg).clone();
+        let call = self.module.insert_expr(Expr::Call(fid, vec![ev_arg_clone]));
+        self.push_dynamic(
+            DynamicKind::Event {
+                event: EventName::Input,
+                delegate: true, // the IR-level contract (C7)
+            },
+            call,
+            vec![], // dispatch-driven: never scheduled by reads (§7.1)
+            path,
+            vec![target_id],
+            ReactionKind::Effect { tier: Tier::Post },
+            span,
+        );
+    }
+
     /// An effect body: a plain expression or a `state = expr` assignment
     /// (the Vue spelling of a setter call — `log.value = x` ≡ `setLog(x)`).
     fn lower_effect_body_at(&mut self, span: (u32, u32)) -> Result<ExprId, LigDiagnostic> {
@@ -1883,24 +2017,77 @@ impl ComponentLowering<'_> {
             || self.module.insert_expr(Expr::Lit(Lit::Null)),
             |p| p.value,
         );
-        // Default slot fill: a single element child (§7.4).
+        // Slot fills (§7.4): `<template #name>` children fill the named
+        // slots (multiple admitted, in child order); a single plain element
+        // child stays the default-slot fill.
         let mut slots: Vec<SlotIr> = Vec::new();
-        let element_children: Vec<&TplElement> =
-            el.children.iter().filter_map(|c| c.as_elem()).collect();
-        if !element_children.is_empty() {
-            if element_children.len() > 1 {
-                self.diags.push(LigDiagnostic::error(
-                    "LIG-E001",
-                    "multi-element slot fills are outside the admitted subset (wrap them in one element)",
-                    Span::new(el.span.0 as u32, el.span.1 as u32),
-                ));
-            } else if let Some(child_el) = element_children.first() {
-                let fill = self.fragment_from_elem(child_el, "slotfill");
+        let mut plain_element: Option<&TplElement> = None;
+        for child in el.children.iter().filter_map(|c| c.as_elem()) {
+            if child.tag == "template" {
+                let Some(TplAttr::SlotName { name }) = child
+                    .attrs
+                    .iter()
+                    .find(|a| matches!(a, TplAttr::SlotName { .. }))
+                else {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "a <template> slot fill requires a slot name (`#name` or `v-slot:name`)",
+                        Span::new(el.span.0 as u32, el.span.1 as u32),
+                    ));
+                    continue;
+                };
+                if name == "default" {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "the default slot fills from plain element children, not `<template #default>`",
+                        Span::new(el.span.0 as u32, el.span.1 as u32),
+                    ));
+                    continue;
+                }
+                // The `<template>` wrapper is the fill container, not the
+                // content: the fragment's root is the wrapper's single static
+                // element child — the same shape the Solid leg lowers from
+                // its element-valued prop.
+                let fill_root: Vec<&TplElement> =
+                    child.children.iter().filter_map(|c| c.as_elem()).collect();
+                let has_visible_text = child
+                    .children
+                    .iter()
+                    .any(|c| matches!(c, TplNode::Text(t) if !self.is_ws_text(t)));
+                if fill_root.len() != 1 || has_visible_text {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "a named slot fill must wrap exactly one static element (`<template #name><el/></template>`)",
+                        Span::new(el.span.0 as u32, el.span.1 as u32),
+                    ));
+                    continue;
+                }
+                let fill = self.fragment_from_elem(fill_root[0], "slotfill");
+                self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
                 slots.push(SlotIr {
-                    name: self.intern("default"),
+                    name: self.intern(name.clone()),
                     fallback: Some(fill),
                 });
+                continue;
             }
+            match plain_element {
+                None => plain_element = Some(child),
+                Some(_) => {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "multi-element slot fills are outside the admitted subset (wrap them in one element)",
+                        Span::new(el.span.0 as u32, el.span.1 as u32),
+                    ));
+                }
+            }
+        }
+        if let Some(child_el) = plain_element {
+            let fill = self.fragment_from_elem(child_el, "slotfill");
+            self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
+            slots.push(SlotIr {
+                name: self.intern("default"),
+                fallback: Some(fill),
+            });
         }
         let component = ComponentIr {
             component: lig_core::id::ComponentId::new(component_idx as u32),
@@ -1919,34 +2106,56 @@ impl ComponentLowering<'_> {
         NodeIr::Marker
     }
 
-    /// `<slot />` — the default outlet (§7.4). Named slots and outlet
-    /// fallbacks are outside the admitted subset.
+    /// `<slot />` / `<slot name="header">fallback</slot>` (§7.4, M6 — the
+    /// outlet gained its name and its fallback content this milestone). A
+    /// named outlet does not synthesize the `children` prop; only the
+    /// default outlet (`<slot />`) does.
     fn lower_slot(&mut self, el: &TplElement, path: &[u32]) -> NodeIr {
-        if el
-            .attrs
-            .iter()
-            .any(|a| matches!(a, TplAttr::Static { name, .. } if name == "name"))
-        {
-            self.diags.push(LigDiagnostic::error(
-                "LIG-E001",
-                "named slots are outside the admitted subset",
-                Span::new(el.span.0 as u32, el.span.1 as u32),
-            ));
-            return NodeIr::Marker;
+        let slot_name = match el.attrs.iter().find_map(|a| match a {
+            TplAttr::Static {
+                name,
+                value: Some(v),
+                ..
+            } if name == "name" => Some(v.clone()),
+            TplAttr::Bind { name, .. } if name == "name" => {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "slot names are identities — `<slot name=\"…\">` must be a static string",
+                    Span::new(el.span.0 as u32, el.span.1 as u32),
+                ));
+                None
+            }
+            _ => None,
+        }) {
+            Some(n) => n,
+            None => "default".to_string(),
+        };
+        // Any other directive on the outlet is fail-closed.
+        for attr in &el.attrs {
+            if matches!(attr, TplAttr::Static { name, .. } if name == "name") {
+                continue;
+            }
+            if !matches!(attr, TplAttr::Static { .. }) {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "directives on a <slot> outlet are outside the admitted subset",
+                    Span::new(el.span.0 as u32, el.span.1 as u32),
+                ));
+                return NodeIr::Marker;
+            }
         }
-        if !el.children.is_empty() {
-            self.diags.push(LigDiagnostic::error(
-                "LIG-E001",
-                "<slot> fallback content is outside the admitted subset",
-                Span::new(el.span.0 as u32, el.span.1 as u32),
-            ));
-            return NodeIr::Marker;
+        // Fallback content: one static element child, or none.
+        let fallback = self.slot_fallback_from_children(el);
+        if slot_name == "default" {
+            self.slot_seen = true;
         }
-        self.slot_seen = true;
         let null = self.module.insert_expr(Expr::Lit(Lit::Null));
-        let slot_name = self.intern("default");
+        let slot_name_id = self.intern(slot_name);
         self.push_dynamic(
-            DynamicKind::Slot { name: slot_name },
+            DynamicKind::Slot {
+                name: slot_name_id,
+                fallback,
+            },
             null,
             vec![],
             path,
@@ -1955,6 +2164,54 @@ impl ComponentLowering<'_> {
             (el.span.0 as u32, el.span.1 as u32),
         );
         NodeIr::Marker
+    }
+
+    /// The outlet-side fallback fragment: one element child of the outlet,
+    /// static-only (the v1 slot-content contract). Whitespace text is
+    /// ignored; visible text or multiple elements are fail-closed.
+    fn slot_fallback_from_children(&mut self, el: &TplElement) -> Option<FragmentId> {
+        let element_children: Vec<&TplElement> =
+            el.children.iter().filter_map(|c| c.as_elem()).collect();
+        let has_visible_text = el
+            .children
+            .iter()
+            .any(|c| matches!(c, TplNode::Text(t) if !self.is_ws_text(t)));
+        if element_children.is_empty() {
+            if has_visible_text {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "slot fallback content must be a single element (wrap the content in one element)",
+                    Span::new(el.span.0 as u32, el.span.1 as u32),
+                ));
+            }
+            return None;
+        }
+        if element_children.len() > 1 {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "multi-element slot fallbacks are outside the admitted subset (wrap them in one element)",
+                Span::new(el.span.0 as u32, el.span.1 as u32),
+            ));
+            return None;
+        }
+        let fill = self.fragment_from_elem(element_children[0], "slotfallback");
+        self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
+        Some(fill)
+    }
+
+    /// The v1 slot-content contract: fills and fallbacks mount as static
+    /// subtrees — the runtime has no run arms addressing a slot instance's
+    /// holes, so dynamic binds inside slot content would write nowhere.
+    /// Fail-closed here rather than emit a broken unit.
+    fn ensure_static_slot_content(&mut self, frag: FragmentId, span: (u32, u32)) {
+        let f = &self.module.fragments[frag.get() as usize];
+        if !f.dynamics.is_empty() || !f.children.is_empty() {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "slot fill/fallback content must be static in v1 — dynamic binds inside slot content are not addressed by the runtime",
+                Span::new(span.0, span.1),
+            ));
+        }
     }
 }
 
@@ -2210,8 +2467,12 @@ defineOptions({ name: "App" });
     #[test]
     fn outside_the_subset_fails_closed() {
         let bad = [
-            // v-model is not admitted
-            "<script setup>const a = ref(0);</script>\n<template><input v-model=\"a\" /></template>",
+            // v-model is admitted on <input> only
+            "<script setup>const a = ref(0);</script>\n<template><p v-model=\"a\"/></template>",
+            // v-model must bind a state ref
+            "<script setup>const a = ref(0);</script>\n<template><input v-model=\"b\" /></template>",
+            // v-model must bind a plain identifier
+            "<script setup>const a = ref(0);</script>\n<template><input v-model=\"a + 1\" /></template>",
             // script statements outside the subset
             "<script setup>let x = 1;</script>\n<template><p/></template>",
             // multi-root templates
@@ -2223,6 +2484,55 @@ defineOptions({ name: "App" });
                 "expected rejection: {src}"
             );
         }
+    }
+
+    /// `v-model` on an `<input>` lowers to exactly the IR the explicit
+    /// `:value` + `@input` spelling produces — one Attr dynamic reading the
+    /// state and one input Event dynamic writing the synthesized setter.
+    #[test]
+    fn v_model_sugar_matches_the_explicit_spelling() {
+        fn parity_view(m: &lig_ir::module::ViewModule) -> String {
+            fn strip(v: &mut serde_json::Value) {
+                match v {
+                    serde_json::Value::Object(map) => {
+                        map.remove("span");
+                        map.remove("spans");
+                        map.insert("frontend".into(), "x".into());
+                        map.insert("source_files".into(), serde_json::Value::Array(vec![]));
+                        for (_, child) in map.iter_mut() {
+                            strip(child);
+                        }
+                    }
+                    serde_json::Value::Array(items) => {
+                        for item in items {
+                            strip(item);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut val: serde_json::Value =
+                serde_json::from_str(&m.canonical_json()).expect("canonical json");
+            strip(&mut val);
+            val.to_string()
+        }
+        let sugared = lower_module(
+            "<script setup>import { ref } from \"vue\"; const q = ref(\"\");</script>\
+             <template><input v-model=\"q\" /></template>",
+            "model.vue",
+        )
+        .expect("lowers");
+        let explicit = lower_module(
+            "<script setup>import { ref } from \"vue\"; const q = ref(\"\");</script>\
+             <template><input :value=\"q\" @input=\"q = $event.currentTarget.value\" /></template>",
+            "model.vue",
+        )
+        .expect("lowers");
+        assert_eq!(
+            parity_view(&sugared),
+            parity_view(&explicit),
+            "v-model sugar must equal the explicit spelling"
+        );
     }
 
     /// `:key` on a `v-for` element lowers to the For's key expression — a
