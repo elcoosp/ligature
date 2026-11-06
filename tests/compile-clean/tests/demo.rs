@@ -4,10 +4,86 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    slots_dynamic, slots_named, v_model,
+    slots_dynamic, slots_named, slots_structural, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::MockHost;
+
+/// The M8 structural-slot-content contract, end to end: a fill carries an If
+/// branch (its bind initializes at build AND re-initializes on every late
+/// mount through the mount-time marking) and a keyed For (the reconcile
+/// addresses the content's own list table through the composed walk); the
+/// unfilled outlet mounts the child's structural fallback, whose branch
+/// initializes through the parent-driven init-flush.
+#[test]
+fn slots_structural_branches_and_lists_address_their_content() {
+    let mut h = MockHost::new();
+    let mut app = slots_structural::App::build(&mut h, slots_structural::AppProps::default());
+    // The fill's branch mounted at build (on = true), its bind initialized —
+    // the branch lives on the CONTENT's branch table.
+    let fill = app
+        .panel
+        .frag
+        .slot_fill(1)
+        .expect("fill mounted by the parent's build");
+    assert!(fill.branch_is(0), "content branch mounted at build");
+    assert_eq!(
+        h.text_of(fill.branch(0).expect("mounted").hole(0)),
+        Some("live"),
+        "branch bind initialized at build"
+    );
+    // The keyed list lives on the content's own list table.
+    assert_eq!(fill.list_len(1), 2, "alpha/beta mounted on the content");
+    // Late mount: unmount (on = false), rewrite the label while absent, and
+    // flip back — the fresh branch's bind re-initializes through the
+    // mount-time marking (the flush re-enters via the union).
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(
+        !app.panel.frag.slot_fill(1).expect("fill").branch_is(0),
+        "branch unmounted"
+    );
+    app.set_label("next".into());
+    lig_runtime::flush(&mut app, &mut h);
+    app.set_on(true);
+    lig_runtime::flush(&mut app, &mut h);
+    let fill = app.panel.frag.slot_fill(1).expect("fill");
+    assert!(fill.branch_is(0), "branch remounted");
+    assert_eq!(
+        h.text_of(fill.branch(0).expect("mounted").hole(0)),
+        Some("next"),
+        "remounted branch re-initializes through the mount marking"
+    );
+    // Keyed reconcile inside the content: rotate one in, one out.
+    app.set_rows(vec!["beta".into(), "gamma".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    let fill = app.panel.frag.slot_fill(1).expect("fill");
+    assert_eq!(fill.list_len(1), 2, "keyed diff ran on the content's table");
+    let expected = ["beta", "gamma"]
+        .iter()
+        .map(|s| key_hash(s))
+        .collect::<Vec<_>>();
+    for (i, k) in expected.iter().enumerate() {
+        assert_eq!(
+            fill.list_key(1, i),
+            Some(*k),
+            "content list key order tracks the diff at {i}"
+        );
+    }
+    // The child's structural fallback: its branch mounted and its bind
+    // initialized by the parent-driven init-flush (title == "Status" → on).
+    let fb = app
+        .panel
+        .frag
+        .slot_fallback(2)
+        .expect("fallback mounted by the parent's build");
+    assert!(fb.branch_is(0), "fallback branch mounted by the init-flush");
+    assert_eq!(
+        h.text_of(fb.branch(0).expect("mounted").hole(0)),
+        Some("Status"),
+        "fallback branch bind initialized by the init-flush"
+    );
+}
 
 /// The M7 dynamic-slot-content contract, end to end: a fill carries a live
 /// text bind + a delegated event (the handler record lands on the parent's
