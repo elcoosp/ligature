@@ -104,6 +104,17 @@ pub enum TplAttr {
         /// Expression range.
         expr: (usize, usize),
     },
+    /// `v-model="state"` (M6): sugar for `:value` + `@input` on an `<input>`.
+    Model {
+        /// Bound state-expression range.
+        expr: (usize, usize),
+    },
+    /// `#name` / `v-slot:name` (M6): a named slot fill on a `<template>`
+    /// child of a component element.
+    SlotName {
+        /// Slot name.
+        name: String,
+    },
 }
 
 /// HTML void elements: self-closing without `/>`.
@@ -239,7 +250,7 @@ impl Parser<'_> {
             self.err(start, start + 1, "empty tag name");
             return None;
         }
-        if tag == "template" || tag == "script" {
+        if tag == "script" {
             self.err(
                 start,
                 self.pos,
@@ -321,10 +332,13 @@ impl Parser<'_> {
             ("v-if", 2),
             ("v-for", 3),
             ("v-html", 4),
+            ("v-model", 9),
+            ("v-slot:", 10),
             ("v-bind:", 5),
             ("v-on:", 6),
             (":", 7),
             ("@", 8),
+            ("#", 11),
         ] {
             if self.starts(prefix) {
                 return self.parse_directive(prefix, kind, start);
@@ -399,6 +413,22 @@ impl Parser<'_> {
         if kind == 1 {
             return Some(TplAttr::Else); // v-else
         }
+        if kind == 11 {
+            // `#name` — the slot-fill shorthand carries no value.
+            if arg.is_empty() {
+                self.err(start, self.pos, "`#` requires a slot name (`#header`)");
+                return None;
+            }
+            if self.peek() == Some(b'=') {
+                self.err(
+                    start,
+                    self.pos,
+                    "`#name` takes no value — the fill content is the element itself",
+                );
+                return None;
+            }
+            return Some(TplAttr::SlotName { name: arg });
+        }
         if self.peek() != Some(b'=') {
             self.err(
                 start,
@@ -415,6 +445,8 @@ impl Parser<'_> {
             2 => TplAttr::If { expr },
             3 => self.parse_for(&value, vstart)?,
             4 => TplAttr::Html { expr },
+            9 => TplAttr::Model { expr },
+            10 => TplAttr::SlotName { name: arg },
             // 5/6: `v-bind:`/`v-on:`; 7/8: the `:`/`@` shorthands.
             5 | 7 => TplAttr::Bind { name: arg, expr },
             6 | 8 => TplAttr::On {
@@ -559,6 +591,8 @@ mod tests {
                         TplAttr::Else => "else".to_string(),
                         TplAttr::For { .. } => "for".to_string(),
                         TplAttr::Html { .. } => "html".to_string(),
+                        TplAttr::Model { .. } => "model".to_string(),
+                        TplAttr::SlotName { name } => format!("slot:{name}"),
                     })
                     .collect::<Vec<_>>()
             })
@@ -590,12 +624,24 @@ mod tests {
     }
 
     #[test]
+    fn parses_m6_directives() {
+        let src = "<input v-model=\"a\" /><Child><template #header><b/></template></Child>";
+        let nodes = parse(src, (0, src.len())).expect("parses");
+        let input = nodes[0].as_elem().expect("input");
+        assert!(matches!(input.attrs[0], TplAttr::Model { .. }));
+        let child = nodes[1].as_elem().expect("Child");
+        let tpl = child.children[0].as_elem().expect("template");
+        assert!(matches!(&tpl.attrs[0], TplAttr::SlotName { name } if name == "header"));
+    }
+
+    #[test]
     fn syntax_errors_are_fail_closed() {
         let bad = [
             "<div class=>x</div>",
             "<div><p>unclosed",
-            "<p v-model=\"x\"/></p>",
-            "<template><p/></template>",
+            "<p v-foo=\"x\"/>",
+            "<script><p/></script>",
+            "<div #header=\"x\">x</div>",
         ];
         for src in bad {
             assert!(
