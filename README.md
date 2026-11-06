@@ -2,14 +2,20 @@
 
 A dual-frontend (Solid TSX / Vue SFC → shared canonical View IR → const-scheduled Rust) UI compiler with a subsecond-derived hot-patch protocol. This repository implements the architecture in `ligature-architecture-v1.0.md`.
 
-**Status: M6 milestone complete** — the template-surface milestone: the
-four constructs deferred since M2 are live end to end (§7.4 named slots
-with `<slot>` fallback content — `<slot name>`/`<Slot name>` outlets,
-`<template #header>` / element-valued-prop fills, per-use-site mounting
-with fallback content, IR v5; §7.6 `v-model` sugar lowering byte-equal to
-the explicit `:value` + `@input` spelling; §7.1 multi-statement effect
-bodies — one post-tier reaction per statement; §7.5 `.map` children keys
-— `key={item}` on the mapped element) on top of the M5 keyed `For`
+**Status: M7 milestone complete** — the dynamic-slot-content milestone:
+fills and fallbacks mount as live fragments (the M6 static-subtree
+restriction lifted) — scalar binds and events on slot content are
+addressed by slot-scoped run arms (`slot_fill_mut` / `slot_fallback_mut`),
+fill events attach across slabs (`attach_foreign`), and mounted fallbacks
+initialize through a parent-driven init-flush; the ref-capture split makes
+`ref={el}` capture the hole of the fragment it lives on (direct, fill,
+fallback, branch contexts); the build's initial-flush mask is exact
+per-reaction (the M0-era width band marked the wrong component's ids for
+every component after the first in a module); one runtime concept
+(`SlotOrigin`), no new crates/gates/error codes/dependencies, IR v5
+unchanged — on top of the M6 template surface (§7.4 named slots with
+`<slot>` fallback content, §7.6 `v-model` sugar, §7.1 multi-statement
+effect bodies, §7.5 `.map` children keys), the M5 keyed `For`
 (§7.5 LIS-stable keyed reconciliation), the M4 contract hardening (the
 §14.2 budget ledger gate `lig budgets`, the §10 no_std proof
 `lig no-std`, Appendix A) and the M3 incremental pipeline (a salsa-style
@@ -17,11 +23,12 @@ session engine `lig-incremental` with digest-gated re-emission (D-9),
 `lig watch`, build-order cycle recovery (LIG-E020), per-arm source-map
 attribution, the 128-reaction per-bit dispatch refinement, and the
 two-generation ThinLink patch engine with stub thunks — see
-`docs/m0/REPORT.md` through `docs/m6/REPORT.md`, and
-`docs/appendix-a.md`). M6 also fixes two latent M0-era slot-mounting
-defects the milestone's multi-use fixture caught: the fill lookup
-matched the first component dynamic anywhere in the module, and multi-use
-parents collided on a single child struct field.
+`docs/m0/REPORT.md` through `docs/m7/REPORT.md`, and
+`docs/appendix-a.md`). M7 also closes two M6-era fail-opens the
+milestone's deny tests caught: the Vue fill path silently stripped
+structural directives on fill/fallback roots, and component tags on
+content roots lowered as plain elements (both denied with `LIG-E001`
+now).
 
 ## Workspace
 
@@ -49,7 +56,7 @@ cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings   # pedantic, day one
 cargo test --workspace                                   # TDD, day one
 cargo bench --workspace --no-run                         # benched, day one
-cargo run -p lig-cli -- fixtures verify                  # 23 fixtures × both frontend legs (§4)
+cargo run -p lig-cli -- fixtures verify                  # 24 fixtures × both frontend legs (§4)
 cargo run -p lig-cli -- fixtures admission               # NFR-5: 22 diagnostic cases
 cargo run -p lig-cli -- fixtures rules-sync              # rule table ↔ fixtures 1:1
 cargo run -p lig-cli -- reproducibility                  # D-8: byte-identical codegen
