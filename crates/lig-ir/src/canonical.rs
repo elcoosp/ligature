@@ -158,7 +158,10 @@ impl ViewModule {
                             child: frag_remap[child.get() as usize],
                             prop: *prop,
                         },
-                        DynamicKind::Slot { name } => DynamicKind::Slot { name: smap(*name) },
+                        DynamicKind::Slot { name, fallback } => DynamicKind::Slot {
+                            name: smap(*name),
+                            fallback: fallback.map(|f| frag_remap[f.get() as usize]),
+                        },
                         other => other.clone(),
                     };
                     dynamics.push(DynamicIr {
@@ -618,7 +621,7 @@ mod tests {
         let mut m = counter_like(Frontend::Solid, false);
         m.canonicalize();
         let json = m.canonical_json();
-        assert!(json.contains(r#""version":4"#), "{json}");
+        assert!(json.contains(r#""version":5"#), "{json}");
         assert!(
             json.contains(r#""entries":["Counter","count","doubled"]"#),
             "{json}"
