@@ -62,7 +62,7 @@ note = "M4 reference median 0.28 µs (runtime/update_mask bench); ≈17× headro
 name = "runtime_list_diff_keyed"
 metric = "time"
 budget = 25.0
-note = "M4 reference median 2.6 µs (64-item LIS bench); ≈9.6× headroom"
+note = "M5 measures plan_keyed (the shipped sequential keyed planner, 64-item reorder; M5 reference median 3.8 µs — the M4 row measured the keyed_diff core at 2.6 µs); ≈6.6× headroom"
 
 # Patch protocol (§11.3, ADR-013 — the runtime half of save→frame).
 [[budget]]
