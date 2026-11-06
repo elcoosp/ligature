@@ -356,8 +356,9 @@ fn tip_dylib(tip_target: &Path) -> PathBuf {
 }
 
 /// Run a `cargo` subcommand in `dir` with extra env, inheriting stdio on
-/// failure; returns true on success.
-fn run_cargo(
+/// failure; returns true on success. Shared by the patch-spike and no-std
+/// gates.
+pub(crate) fn run_cargo(
     dir: &Path,
     args: &[&str],
     envs: &[(&str, &str)],
