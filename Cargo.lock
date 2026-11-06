@@ -1070,8 +1070,11 @@ dependencies = [
  "lig-ir",
  "lig-parse-solid",
  "lig-parse-vue",
+ "lig-patch",
+ "lig-runtime",
  "lig-sourcemap",
  "oxc_sourcemap",
+ "serde",
  "serde_json",
  "toml",
 ]
