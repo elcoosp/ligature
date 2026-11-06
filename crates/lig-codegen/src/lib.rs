@@ -334,6 +334,33 @@ fn generate_component_pieces(
     // this component's own outlet fallbacks. Built after the per-use field
     // suffixing so the run arms address their own instance.
     let ctx_map: HashMap<u32, Ctx> = build_content_ctx(module, root, &component_uses);
+    // Content-branch ref captures (M8): `ref={el}` on a branch hanging on
+    // slot content captures per mount — inside the mounting If arm, keyed by
+    // the branch fragment (the If's `then`). The build-body emission below
+    // skips these (their fields still get declared + sentinel-initialized).
+    let mut content_branch_refs: HashMap<u32, Vec<(usize, String)>> = HashMap::new();
+    for f in &frags {
+        let frag_ir = &module.fragments[f.id.get() as usize];
+        for (di, d) in frag_ir.dynamics.iter().enumerate() {
+            if !matches!(&d.kind, DynamicKind::Ref) {
+                continue;
+            }
+            let ctx = ctx_of(module, &frags, &ctx_map, f.id);
+            let Ctx::Branch { base, .. } = &ctx else {
+                continue;
+            };
+            if !base.content_rooted() {
+                continue;
+            }
+            let lig_ir::expr::Expr::Local(name) = module.exprs.get(d.expr) else {
+                continue;
+            };
+            content_branch_refs
+                .entry(f.id.get())
+                .or_default()
+                .push((di, sanitize(module.strings.get(*name))));
+        }
+    }
     for use_site in &component_uses {
         let (field, comp_idx) = (&use_site.field, use_site.comp_idx);
         let Some(decl) = module.components.get(comp_idx) else {
@@ -468,18 +495,90 @@ fn generate_component_pieces(
                         // The mount rides the owner fragment's receiver: an If
                         // inside slot content mounts its branch on the
                         // content (M7), not on the parent's slab.
+                        let content_rooted = ctx.content_rooted();
+                        let mount_flag = content_rooted.then(|| quote! { did_mount = true; });
                         let inner = quote! {
                             let on = #cond;
                             if #recv.branch_is(#slot) != on {
                                 if on {
                                     #recv.mount_branch(h, #slot, #b_tpl, #b_holes, #b_branches);
+                                    #mount_flag
                                 } else {
                                     #recv.unmount_branch(h, #slot);
                                 }
                             }
                         };
                         let scoped = ctx_scope(&ctx, inner);
-                        run_arms.push(quote! { #cname => { #scoped } });
+                        if content_rooted {
+                            // Content-rooted branches (M8): the fresh branch's
+                            // own binds initialize on the NEXT flush pass (the
+                            // mount marks them; the loop re-enters through
+                            // `produced.union(&rx.dirty().take())`), events
+                            // attach across slabs with the record on the
+                            // authoring component's fragment, and content refs
+                            // capture the fresh hole per mount. The mark and
+                            // the captures sit OUTSIDE the unwrap so the
+                            // fallback root (`self.frag`) stays borrowable.
+                            let branch_mask = subtree_init_mask(module, if_ir.then);
+                            let mask_lo_lit =
+                                syn::LitInt::new(&format!("{branch_mask:#x}"), Span::call_site());
+                            // The mounted branch hangs on the fragment `ctx`
+                            // addresses, at this dynamic's branch slot.
+                            let branch_read = {
+                                let base_read = ctx_frag_read(&ctx);
+                                quote! { #base_read.and_then(|f| f.branch(#slot)) }
+                            };
+                            let mut mount_attaches = Vec::new();
+                            if let Some(bf) = module.fragments.get(if_ir.then.get() as usize) {
+                                for (edi, ed) in bf.dynamics.iter().enumerate() {
+                                    let DynamicKind::Event { event, delegate } = &ed.kind else {
+                                        continue;
+                                    };
+                                    let Some(rx_id) = ed.reaction else {
+                                        continue;
+                                    };
+                                    let ev =
+                                        syn::Ident::new(&format!("{event:?}"), Span::call_site());
+                                    let hid = rx_id.get();
+                                    mount_attaches.push(quote! {
+                                        if let Some(n) = #branch_read.map(|b| b.hole(#edi)) {
+                                            self.frag.attach_foreign(
+                                                n,
+                                                ::lig_runtime::EventKind::#ev,
+                                                ::lig_runtime::HandlerId(#hid),
+                                                #delegate,
+                                                h,
+                                            );
+                                        }
+                                    });
+                                }
+                            }
+                            let mut mount_refs = Vec::new();
+                            if let Some(caps) = content_branch_refs.get(&if_ir.then.get()) {
+                                for (hole, rname) in caps {
+                                    let rfield =
+                                        syn::Ident::new(&format!("ref_{rname}"), Span::call_site());
+                                    mount_refs.push(quote! {
+                                        if let Some(n) = #branch_read.map(|b| b.hole(#hole)) {
+                                            self.#rfield = n;
+                                        }
+                                    });
+                                }
+                            }
+                            run_arms.push(quote! {
+                                #cname => {
+                                    let mut did_mount = false;
+                                    #scoped
+                                    if did_mount {
+                                        self.frag.mark_mask(#mask_lo_lit);
+                                        #(#mount_attaches)*
+                                        #(#mount_refs)*
+                                    }
+                                }
+                            });
+                        } else {
+                            run_arms.push(quote! { #cname => { #scoped } });
+                        }
                     }
                     DynamicKind::For(for_ir) => {
                         // List reconcile (§7.5): keyed lists run the
@@ -503,17 +602,75 @@ fn generate_component_pieces(
                             &format!("reconcile_f{}", for_ir.body.get()),
                             Span::call_site(),
                         );
-                        run_arms.push(quote! {
-                            #cname => {
-                                self.#method(h, #slot);
-                            }
-                        });
+                        if ctx == Ctx::Direct {
+                            // Direct-rooted list (M0 shape, byte-stable): the
+                            // reconcile is a `&mut self` method addressing
+                            // `self.frag` — the list table hangs on the
+                            // component's own fragment.
+                            run_arms.push(quote! {
+                                #cname => {
+                                    self.#method(h, #slot);
+                                }
+                            });
+                            list_methods.push(emit_list_method(
+                                module, for_ir, &item_ty, body_info, &prefix,
+                            )?);
+                        } else {
+                            // Composed list (M8 — branch-in-content and
+                            // list-in-branch): the run arm pre-clones the
+                            // source and the parent-state reads, unwraps the
+                            // composed walk, and calls the associated
+                            // reconcile with the receiver fragment. The
+                            // associated fn takes no `self`, so the mutable
+                            // walk borrow and the value reads never overlap.
+                            let src = gen_expr(module, for_ir.source)?;
+                            let src_ty_lit: syn::Type =
+                                syn::parse_str(&ty_name(&item_ty)).expect("valid item type");
+                            let reads = collect_body_reads(module, for_ir.body);
+                            let read_declares: Vec<proc_macro2::TokenStream> = reads
+                                .iter()
+                                .map(|r| {
+                                    let pname = syn::Ident::new(
+                                        &format!("s_{}", sanitize(module.strings.get(*r))),
+                                        Span::call_site(),
+                                    );
+                                    let fname = syn::Ident::new(
+                                        &sanitize(module.strings.get(*r)),
+                                        Span::call_site(),
+                                    );
+                                    quote! { let #pname = self.#fname.clone(); }
+                                })
+                                .collect();
+                            let read_args: Vec<proc_macro2::TokenStream> = reads
+                                .iter()
+                                .map(|r| {
+                                    let pname = syn::Ident::new(
+                                        &format!("s_{}", sanitize(module.strings.get(*r))),
+                                        Span::call_site(),
+                                    );
+                                    quote! { #pname.clone() }
+                                })
+                                .collect();
+                            let recv = ctx_recv(&ctx);
+                            let call = quote! {
+                                Self::#method(h, #recv, #slot, items, #(#read_args),*);
+                            };
+                            let scoped = ctx_scope(&ctx, call);
+                            run_arms.push(quote! {
+                                #cname => {
+                                    let items: ::alloc::vec::Vec<#src_ty_lit> =
+                                        ::core::clone::Clone::clone(&(#src));
+                                    #(#read_declares)*
+                                    #scoped
+                                }
+                            });
+                            list_methods.push(emit_list_method_composed(
+                                module, for_ir, &item_ty, body_info, &prefix,
+                            ));
+                        }
                         if for_ir.key.is_some() {
                             key_methods.push(emit_key_method(module, for_ir, &item_ty)?);
                         }
-                        list_methods.push(emit_list_method(
-                            module, for_ir, &item_ty, body_info, &prefix,
-                        )?);
                         item_methods.push(emit_item_method(module, for_ir, &item_ty)?);
                     }
                     DynamicKind::Component(c) => {
@@ -645,16 +802,32 @@ fn generate_component_pieces(
                             s.frag.attach(h, #di, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate);
                         });
                     }
-                    Ctx::Branch { slot } => {
+                    Ctx::Branch { slot, base } if !base.content_rooted() => {
+                        // Direct-rooted branch: attach after the flush, once
+                        // the branch exists (M7 shape — flat walks stay
+                        // byte-stable; nested walks read through the composed
+                        // chain, M8).
                         let slot = *slot;
-                        branch_attaches.push(quote! {
-                            if let Some(n) = s.frag.branch(#slot).map(|b| b.hole(#di)) {
-                                s.frag.attach_foreign(n, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate, h);
-                            }
-                        });
+                        if matches!(**base, Ctx::Direct) {
+                            branch_attaches.push(quote! {
+                                if let Some(n) = s.frag.branch(#slot).map(|b| b.hole(#di)) {
+                                    s.frag.attach_foreign(n, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate, h);
+                                }
+                            });
+                        } else {
+                            let read = ctx_frag_read(&ctx);
+                            branch_attaches.push(quote! {
+                                if let Some(n) = #read.map(|b| b.hole(#di)) {
+                                    s.frag.attach_foreign(n, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate, h);
+                                }
+                            });
+                        }
                     }
-                    Ctx::Fill { .. } | Ctx::Fallback { .. } => {
-                        // Attached at mount time in the slot assembly (M7).
+                    Ctx::Fill { .. } | Ctx::Fallback { .. } | Ctx::Branch { .. } => {
+                        // Attached at mount time: content roots in the slot
+                        // assembly (M7); content-rooted branches by the
+                        // mounting If arm (M8 — per mount, since content
+                        // branches mount and unmount with their content).
                     }
                 }
             }
@@ -875,32 +1048,42 @@ fn generate_component_pieces(
                 }
             }
             if is_fallback {
-                // The init-flush story (M7): mark the child's fallback
-                // reactions and flush the child instance with the content
-                // live — the child's build flushed before the content was
-                // mounted, so its binds ran against an empty outlet. Event-
-                // driven handler reactions stay dispatch-driven (§9.2): the
-                // content's event dynamics are excluded by id.
+                // The init-flush story (M7, subtree-wide in M8): mark the
+                // child's fallback reactions and flush the child instance
+                // with the content live — the child's build flushed before
+                // the content was mounted, so its binds ran against an empty
+                // outlet. With structural content the fallback's branch and
+                // list fragments own reactions too (their binds, and the If
+                // arms that mount the content's own branches) — the mask is
+                // the exact per-reaction set of the whole fallback SUBTREE.
+                // Event-driven handler reactions stay dispatch-driven (§9.2):
+                // the subtree's event dynamics are excluded by id.
+                let fb_subtree = subtree_ids(module, content_id);
                 let mut fb_ev_lo: u64 = 0;
                 let mut fb_ev_hi: u64 = 0;
-                for d in &content_frag.dynamics {
-                    let DynamicKind::Event { .. } = &d.kind else {
+                for &sid in &fb_subtree {
+                    let Some(sf) = module.fragments.get(sid as usize) else {
                         continue;
                     };
-                    let Some(rx_id) = d.reaction else {
-                        continue;
-                    };
-                    let id = rx_id.get();
-                    if id < 64 {
-                        fb_ev_lo |= 1u64 << id;
-                    } else {
-                        fb_ev_hi |= 1u64 << (id - 64);
+                    for d in &sf.dynamics {
+                        let DynamicKind::Event { .. } = &d.kind else {
+                            continue;
+                        };
+                        let Some(rx_id) = d.reaction else {
+                            continue;
+                        };
+                        let id = rx_id.get();
+                        if id < 64 {
+                            fb_ev_lo |= 1u64 << id;
+                        } else {
+                            fb_ev_hi |= 1u64 << (id - 64);
+                        }
                     }
                 }
                 let mut fb_lo: u64 = 0;
                 let mut fb_hi: u64 = 0;
                 for (id, r) in module.reactions.iter().enumerate() {
-                    if r.owner != content_id {
+                    if !fb_subtree.contains(&r.owner.get()) {
                         continue;
                     }
                     if id < 64 {
@@ -948,12 +1131,24 @@ fn generate_component_pieces(
             Ctx::Direct => {
                 ref_inits.push(quote! { s.#fname = s.frag.hole(#hole); });
             }
-            Ctx::Branch { slot } => {
-                branch_ref_inits.push(quote! {
-                    if let Some(b) = s.frag.branch(#slot) {
-                        s.#fname = b.hole(#hole);
-                    }
-                });
+            Ctx::Branch { slot, base } if !base.content_rooted() => {
+                let slot = *slot;
+                if matches!(**base, Ctx::Direct) {
+                    branch_ref_inits.push(quote! {
+                        if let Some(b) = s.frag.branch(#slot) {
+                            s.#fname = b.hole(#hole);
+                        }
+                    });
+                } else {
+                    // Nested Direct-rooted branch: read through the composed
+                    // chain (M8).
+                    let read = ctx_frag_read(ctx);
+                    branch_ref_inits.push(quote! {
+                        if let Some(n) = #read.map(|b| b.hole(#hole)) {
+                            s.#fname = n;
+                        }
+                    });
+                }
             }
             Ctx::Fill { field, slot } => {
                 let field = syn::Ident::new(field, Span::call_site());
@@ -963,10 +1158,12 @@ fn generate_component_pieces(
                     }
                 });
             }
-            Ctx::Fallback { .. } => {
-                // Captured by the PARENT at mount time (the content does not
-                // exist in this build yet); the field is declared + sentinel-
-                // initialized below so the parent's write has a target.
+            Ctx::Branch { .. } | Ctx::Fallback { .. } => {
+                // Content-rooted branches: captured at mount time by the
+                // mounting If arm (M8). Fallbacks: captured by the PARENT at
+                // mount time (the content does not exist in this build yet).
+                // Either way the field is declared + sentinel-initialized
+                // below so the mount-time write has a target.
             }
         }
     }
@@ -1336,20 +1533,39 @@ fn fragment_in_tree(frags: &[FragInfo], f: FragmentId) -> bool {
     frags.iter().any(|fi| fi.id == f)
 }
 
-/// How a run arm reaches the fragment its dynamic lives on (M7): directly
-/// (`self.frag`), through a mounted branch, or through mounted slot content
-/// — a use-site fill (on the child instance's fragment) or the outlet's own
-/// fallback (on `self.frag` of the authoring component).
+/// How a run arm reaches the fragment its dynamic lives on (M7, composed in
+/// M8): directly (`self.frag`), through a chain of mounted branches, or
+/// through mounted slot content — a use-site fill (on the child instance's
+/// fragment) or the outlet's own fallback (on `self.frag` of the authoring
+/// component). The chain composes: a branch hanging on slot content is
+/// `Branch { base: Fill/Fallback }`, a branch on a branch is
+/// `Branch { base: Branch { .. } }` — the walk unwraps outermost-first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Ctx {
     /// `self.frag` (the default).
     Direct,
-    /// A mounted `If` branch (the `then` body of its parent's dynamic).
-    Branch { slot: usize },
+    /// A mounted `If`/`For` branch (the `then`/`body` of its parent's
+    /// dynamic), hanging on the fragment `base` addresses. `Direct`-rooted
+    /// branches keep the M7 shape; content-rooted branches (M8) unwrap the
+    /// content first.
+    Branch { slot: usize, base: Box<Ctx> },
     /// A use-site fill mounted on `self.<field>.frag` at slot outlet `slot`.
     Fill { field: String, slot: usize },
     /// The outlet fallback mounted on `self.frag` at slot outlet `slot`.
     Fallback { slot: usize },
+}
+
+impl Ctx {
+    /// Whether the walk roots at mounted slot content (M8): the mount-time
+    /// story (init marking, event attaches, ref captures) is emitted into
+    /// the mounting arm rather than the build body.
+    fn content_rooted(&self) -> bool {
+        match self {
+            Ctx::Direct => false,
+            Ctx::Branch { base, .. } => base.content_rooted(),
+            Ctx::Fill { .. } | Ctx::Fallback { .. } => true,
+        }
+    }
 }
 
 /// Build the fragment → [`Ctx`] map for slot content owned by this
@@ -1405,21 +1621,32 @@ fn build_content_ctx(
     map
 }
 
-/// The addressing context of a reaction's owning fragment: slot content
-/// first, then the If-branch walk, else [`Ctx::Direct`].
+/// The addressing context of a reaction's owning fragment, composed (M8):
+/// a branch wrapper first — if the fragment is the `then`/`body` of an
+/// If/For, the walk recurses over that dynamic's owner (which may itself be
+/// a branch or mounted slot content) — then slot content, else
+/// [`Ctx::Direct`].
 fn ctx_of(
     module: &ViewModule,
     frags: &[FragInfo],
     ctx_map: &HashMap<u32, Ctx>,
     owner: FragmentId,
 ) -> Ctx {
+    if let Some((parent, slot)) = branch_owner_of(module, frags, owner) {
+        let base = ctx_of(module, frags, ctx_map, parent);
+        return Ctx::Branch {
+            slot,
+            base: Box::new(base),
+        };
+    }
     if let Some(c) = ctx_map.get(&owner.get()) {
         return c.clone();
     }
-    branch_slot_of(module, frags, owner).map_or(Ctx::Direct, |slot| Ctx::Branch { slot })
+    Ctx::Direct
 }
 
-/// The receiver expression a run arm binds/writes through for `ctx`.
+/// The receiver expression a run arm binds/writes through for `ctx` — the
+/// variable the OUTERMOST unwrap binds (the walk unwraps outermost-first).
 fn ctx_recv(ctx: &Ctx) -> proc_macro2::TokenStream {
     match ctx {
         Ctx::Direct => quote!(self.frag),
@@ -1428,13 +1655,18 @@ fn ctx_recv(ctx: &Ctx) -> proc_macro2::TokenStream {
     }
 }
 
-/// Wrap `inner` in the accessor guard `ctx` needs (Direct: nothing).
+/// Wrap `inner` in the accessor guards `ctx` needs (Direct: nothing). The
+/// chain unwraps outermost-first, each level binding its receiver (`b` for
+/// branches, `c` for content); shadowing keeps every level's variable name
+/// stable, so [`ctx_recv`] is always the innermost binding.
 fn ctx_scope(ctx: &Ctx, inner: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     match ctx {
         Ctx::Direct => inner,
-        Ctx::Branch { slot } => {
+        Ctx::Branch { slot, base } => {
             let slot = *slot;
-            quote! { if let Some(b) = self.frag.branch_mut(#slot) { #inner } }
+            let recv = ctx_recv(base);
+            let wrapped = quote! { if let Some(b) = #recv.branch_mut(#slot) { #inner } };
+            ctx_scope(base, wrapped)
         }
         Ctx::Fill { field, slot } => {
             let slot = *slot;
@@ -1448,10 +1680,39 @@ fn ctx_scope(ctx: &Ctx, inner: proc_macro2::TokenStream) -> proc_macro2::TokenSt
     }
 }
 
+/// A read-only walk expression to the fragment `ctx` addresses, as
+/// `Option<&Fragment>` (M8: mount-time attaches and ref captures read the
+/// hole through it without holding the mutable unwrap open).
+fn ctx_frag_read(ctx: &Ctx) -> proc_macro2::TokenStream {
+    match ctx {
+        Ctx::Direct => quote!(::core::option::Option::Some(&self.frag)),
+        Ctx::Branch { slot, base } => {
+            let slot = *slot;
+            let base_read = ctx_frag_read(base);
+            quote! { #base_read.and_then(|f| f.branch(#slot)) }
+        }
+        Ctx::Fill { field, slot } => {
+            let slot = *slot;
+            let field = syn::Ident::new(field, Span::call_site());
+            quote! { self.#field.frag.slot_fill(#slot) }
+        }
+        Ctx::Fallback { slot } => {
+            let slot = *slot;
+            quote! { self.frag.slot_fallback(#slot) }
+        }
+    }
+}
+
 /// Branch slot of a fragment: the branch-slot index of the If/For dynamic
 /// that owns it as `then`/`body` — not the raw children position (fill
-/// fragments are tree children too, and would shift the index, M7).
-fn branch_slot_of(module: &ViewModule, frags: &[FragInfo], f: FragmentId) -> Option<usize> {
+/// fragments are tree children too, and would shift the index, M7) — paired
+/// with that dynamic's owner fragment (M8: the composed walk recurses over
+/// it).
+fn branch_owner_of(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    f: FragmentId,
+) -> Option<(FragmentId, usize)> {
     for info in frags {
         let parent = module.fragments.get(info.id.get() as usize)?;
         for (di, d) in parent.dynamics.iter().enumerate() {
@@ -1461,7 +1722,7 @@ fn branch_slot_of(module: &ViewModule, frags: &[FragInfo], f: FragmentId) -> Opt
                 _ => continue,
             };
             if target == f {
-                return branch_slot_of_dynamic(parent, di as u32);
+                return Some((info.id, branch_slot_of_dynamic(parent, di as u32)?));
             }
         }
     }
@@ -1607,6 +1868,175 @@ fn emit_list_method(
         }
     };
     Ok(body)
+}
+
+/// The composed per-For reconcile (M8): lists on mounted branches or slot
+/// content address their table through a receiver fragment the run arm
+/// unwraps — the associated fn takes no `self`, so the mutable walk borrow
+/// and the parent-state reads (pre-cloned by the caller, passed by value)
+/// never overlap. Same plans as [`emit_list_method`]: keyed lists run the
+/// sequential keyed plan, unkeyed lists the Index diff; both replay the item
+/// binds so new items initialize.
+fn emit_list_method_composed(
+    module: &ViewModule,
+    for_ir: &lig_ir::fragment::ForIr,
+    item_ty: &Ty,
+    body_info: &FragInfo,
+    prefix: &str,
+) -> proc_macro2::TokenStream {
+    let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
+    let body_tpl = tpl_ident(prefix, body_info.template_id);
+    let body_holes = hole_ident(prefix, body_info.id.get() as usize);
+    let body_branches = branch_ident(prefix, body_info.id.get() as usize);
+    let apply = syn::Ident::new(
+        &format!("apply_item_f{}", for_ir.body.get()),
+        Span::call_site(),
+    );
+    let method = syn::Ident::new(
+        &format!("reconcile_f{}", for_ir.body.get()),
+        Span::call_site(),
+    );
+    let reads = collect_body_reads(module, for_ir.body);
+    let read_params: Vec<proc_macro2::TokenStream> = reads
+        .iter()
+        .map(|r| {
+            let pname = syn::Ident::new(
+                &format!("s_{}", sanitize(module.strings.get(*r))),
+                Span::call_site(),
+            );
+            let ty: syn::Type = syn::parse_str(&ty_name(
+                &module.state_by_name(*r).map_or(Ty::Int, |d| d.ty.clone()),
+            ))
+            .expect("valid state type");
+            quote! { #pname: #ty }
+        })
+        .collect();
+    let read_args: Vec<proc_macro2::TokenStream> = reads
+        .iter()
+        .map(|r| {
+            let pname = syn::Ident::new(
+                &format!("s_{}", sanitize(module.strings.get(*r))),
+                Span::call_site(),
+            );
+            quote! { #pname.clone() }
+        })
+        .collect();
+    if for_ir.key.is_some() {
+        let key_fn = syn::Ident::new(&format!("key_of_f{}", for_ir.body.get()), Span::call_site());
+        quote! {
+            #[allow(clippy::needless_range_loop)]
+            fn #method(
+                h: &mut dyn Host,
+                recv: &mut ::lig_runtime::Fragment,
+                slot: usize,
+                items: ::alloc::vec::Vec<#item_ty_lit>,
+                #(#read_params,)*
+            ) {
+                let old_len = recv.list_len(slot);
+                let mut old_keys: ::alloc::vec::Vec<u64> = ::alloc::vec::Vec::with_capacity(old_len);
+                for i in 0..old_len {
+                    old_keys.push(recv.list_key(slot, i).unwrap_or(u64::MAX));
+                }
+                let mut new_keys: ::alloc::vec::Vec<u64> =
+                    ::alloc::vec::Vec::with_capacity(items.len());
+                for (i, it) in items.iter().enumerate() {
+                    new_keys.push(#key_fn(it.clone(), i as i64));
+                }
+                for step in ::lig_runtime::plan_keyed(&old_keys, &new_keys) {
+                    match step {
+                        ::lig_runtime::SeqOp::Remove { index } => {
+                            recv.list_remove(h, slot, index);
+                        }
+                        ::lig_runtime::SeqOp::Move { from, to } => {
+                            recv.list_move(h, slot, from, to);
+                        }
+                        ::lig_runtime::SeqOp::Insert { key, index } => {
+                            recv.list_insert(
+                                h,
+                                slot,
+                                index,
+                                key,
+                                #body_tpl,
+                                #body_holes,
+                                #body_branches,
+                            );
+                        }
+                    }
+                }
+                for (i, it) in items.iter().enumerate() {
+                    if let Some(f) = recv.list_item_mut(slot, i) {
+                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                    }
+                }
+            }
+        }
+    } else {
+        quote! {
+            #[allow(clippy::needless_range_loop)]
+            fn #method(
+                h: &mut dyn Host,
+                recv: &mut ::lig_runtime::Fragment,
+                slot: usize,
+                items: ::alloc::vec::Vec<#item_ty_lit>,
+                #(#read_params,)*
+            ) {
+                let old = recv.list_len(slot);
+                let common = old.min(items.len());
+                for i in common..items.len() {
+                    recv.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
+                }
+                for i in (common..old).rev() {
+                    recv.list_remove(h, slot, i);
+                }
+                for (i, it) in items.iter().enumerate().take(common) {
+                    if let Some(f) = recv.list_item_mut(slot, i) {
+                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The non-handler reaction mask of a fragment SUBTREE (M8): the bits a
+/// mount marks so the fresh branch's own binds initialize on the next flush
+/// pass — event handlers stay dispatch-driven and are excluded by id, the
+/// exact-per-member discipline of the build masks (M7) applied per mount.
+fn subtree_init_mask(module: &ViewModule, root: FragmentId) -> u64 {
+    let mut mask: u64 = 0;
+    let mut stack = vec![root];
+    while let Some(f) = stack.pop() {
+        if let Some(fr) = module.fragments.get(f.get() as usize) {
+            for d in &fr.dynamics {
+                if matches!(&d.kind, DynamicKind::Event { .. }) {
+                    continue;
+                }
+                if let Some(rx) = d.reaction {
+                    mask |= 1u64 << rx.get();
+                }
+            }
+            for &c in &fr.children {
+                stack.push(c);
+            }
+        }
+    }
+    mask
+}
+
+/// Every fragment id of a subtree, root included (M8: the fallback
+/// init-flush mask covers the whole mounted content, branches included).
+fn subtree_ids(module: &ViewModule, root: FragmentId) -> Vec<u32> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(f) = stack.pop() {
+        out.push(f.get());
+        if let Some(fr) = module.fragments.get(f.get() as usize) {
+            for &c in &fr.children {
+                stack.push(c);
+            }
+        }
+    }
+    out
 }
 
 /// The per-For key fn (§7.5, keyed lists only): normalizes the key
