@@ -83,10 +83,15 @@ pub enum DynamicKind {
         /// Index into the child's `props`.
         prop: u16,
     },
-    /// Named slot outlet; fallback content is a nested fragment.
+    /// Slot outlet; the parent's fill (or the outlet's own fallback)
+    /// mounts into the hole at build time (§7.4).
     Slot {
-        /// Slot name.
+        /// Slot name (`default` for the children outlet).
         name: StrId,
+        /// Outlet-side fallback content, shown when a use site provides no
+        /// fill for this name. A static subtree fragment (v1 slot-content
+        /// contract) mounted by the parent's build.
+        fallback: Option<FragmentId>,
     },
     /// Conditional — branch bodies are full fragments (C4).
     If(IfIr),
