@@ -1559,36 +1559,61 @@ impl ComponentLowering<'_, '_> {
         Ok(Some(fill))
     }
 
-    /// The M7 slot-content contract: fills and fallbacks mount as live
+    /// The M8 slot-content contract: fills and fallbacks mount as live
     /// fragments — scalar binds (text/class/attr/style-prop/html), events,
     /// and refs on the content itself are addressed by slot-scoped run arms
-    /// (`slot_fill_mut`/`slot_fallback_mut` + `attach_foreign`). Structural
-    /// constructs stay fail-closed: branch/list tables hang on `self.frag`
-    /// (an If/For here would mount into the wrong fragment), prop-pass
-    /// crosses into a grandchild, and nested outlets need composed
-    /// contexts.
+    /// (`slot_fill_mut`/`slot_fallback_mut` + `attach_foreign`), and since
+    /// M8 the content may be STRUCTURAL: If/For dynamics on the content root
+    /// mount branch/list tables on the content fragment, addressed through
+    /// composed `Ctx` walks (`Branch { base: Fill/Fallback }`). Still
+    /// fail-closed anywhere inside content: component uses (grandchild
+    /// prop-pass through mounted instances), nested outlets (composed
+    /// addressing contexts for fills), and children/prop-pass/whole-style
+    /// dynamics. Event handlers inside list item bodies stay denied (the
+    /// LIG-E118 discipline — per-item dispatch needs keyed components).
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: oxc_span::Span) {
-        let f = &self.module.fragments[frag.get() as usize];
-        for d in &f.dynamics {
-            let denied = match &d.kind {
+        self.content_contract(frag, false, span);
+    }
+
+    /// The recursive content walk: `in_list_item` marks fragments mounted as
+    /// For bodies (their binds are the per-item replay's; events there are
+    /// the LIG-E118 denial).
+    fn content_contract(&mut self, frag: FragmentId, in_list_item: bool, span: oxc_span::Span) {
+        let (dynamics, children) = {
+            let f = &self.module.fragments[frag.get() as usize];
+            (f.dynamics.clone(), f.children.clone())
+        };
+        for d in &dynamics {
+            let denied: Option<String> = match &d.kind {
+                // Scalar binds, refs, and (M8) the structural constructs
+                // themselves are admitted on content.
                 DynamicKind::Text
                 | DynamicKind::Html
                 | DynamicKind::Attr { .. }
                 | DynamicKind::Class
                 | DynamicKind::StyleProp { .. }
-                | DynamicKind::Event { .. }
-                | DynamicKind::Ref => None,
-                DynamicKind::If(_) | DynamicKind::For(_) => Some(
-                    "If/For inside slot content is not addressed by the runtime (M7 defers branch and list tables on content fragments)",
-                ),
+                | DynamicKind::Ref
+                | DynamicKind::If(_)
+                | DynamicKind::For(_) => None,
+                DynamicKind::Event { .. } => in_list_item.then(|| {
+                    "event handlers inside list item bodies are not admitted in v1 — hoist the \
+                     handler to the list level (the LIG-E118 discipline)"
+                        .to_string()
+                }),
                 DynamicKind::Component(_) => Some(
-                    "component uses inside slot content are not addressed by the runtime (M7 defers grandchild prop-pass through content)",
+                    "component uses inside slot content are not addressed by the runtime \
+                     (grandchild prop-pass through mounted content is deferred)"
+                        .to_string(),
                 ),
                 DynamicKind::Slot { .. } => Some(
-                    "nested slot outlets inside slot content are not addressed by the runtime (M7 defers composed addressing contexts)",
+                    "nested slot outlets inside slot content are not addressed by the runtime \
+                     (composed addressing contexts for fills are deferred)"
+                        .to_string(),
                 ),
                 DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
-                    "children/prop-pass/whole-style dynamics inside slot content are outside the admitted subset (M2)",
+                    "children/prop-pass/whole-style dynamics inside slot content are outside the \
+                     admitted subset (M2)"
+                        .to_string(),
                 ),
             };
             if let Some(why) = denied {
@@ -1599,12 +1624,31 @@ impl ComponentLowering<'_, '_> {
                 ));
             }
         }
-        if !f.children.is_empty() {
-            self.diags.push(LigDiagnostic::error(
-                "LIG-E001",
-                "slot fill/fallback content must be a single element — nested structural fragments (If/For bodies, nested fills) are not addressed by the runtime",
-                Span::new(span.start, span.end),
-            ));
+        // Structural bodies recurse: If branches and For bodies keep the
+        // full content contract (binds, events, refs — and further
+        // structural constructs, the composed contexts are recursive).
+        let mut structural: Vec<(FragmentId, bool)> = Vec::new();
+        {
+            let f = &self.module.fragments[frag.get() as usize];
+            for d in &f.dynamics {
+                match &d.kind {
+                    DynamicKind::If(i) => {
+                        structural.push((i.then, false));
+                        if let Some(el) = i.else_ {
+                            structural.push((el, false));
+                        }
+                    }
+                    DynamicKind::For(fo) => structural.push((fo.body, true)),
+                    _ => {}
+                }
+            }
+        }
+        for child in children {
+            if let Some((_, child_in_list)) = structural.iter().find(|(id, _)| *id == child) {
+                self.content_contract(child, *child_in_list, span);
+            } else {
+                self.content_contract(child, in_list_item, span);
+            }
         }
     }
 
