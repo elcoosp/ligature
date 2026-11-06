@@ -1,0 +1,86 @@
+# §14.2 budget ledger — enforced by `lig budgets` (M4).
+#
+# One row per workload, 1:1 with the gate's measurement registry and the
+# criterion bench suite (§14.2 — "benched from day one" becomes "budgeted
+# from M4"). `budget` is an absolute ceiling in the row's unit (µs medians
+# for time rows, bytes for size rows), derived from the reference median
+# with **≥ 5× headroom** so the gate is a regression tripwire, not a
+# benchmark. Reference medians are quoted in each row's note.
+#
+# Profile contract: time budgets are calibrated for release runs — CI
+# enforces them through `cargo run -p lig-cli --release -- budgets`; a
+# dev-profile `lig budgets` reports measurements but enforces only the
+# profile-independent bytes rows. Byte counts are profile-independent by
+# construction (D-8 pins the generated text).
+#
+# Raising a ceiling is a reviewed contract change: run the full gate suite
+# and record the new reference median in the note.
+
+schema = 1
+
+# Parse + lower (both frontends), the M0 reference workload (counter).
+[[budget]]
+name = "lower_solid_counter"
+metric = "time"
+budget = 100.0
+note = "M0 reference median 18.2 µs (M4 re-measure: 18.4); ≈5.4× headroom"
+
+[[budget]]
+name = "lower_vue_counter"
+metric = "time"
+budget = 120.0
+note = "M4 reference median 21.9 µs (lig budgets, release); ≈5.5× headroom"
+
+# Canonical IR serialization (§5.6, the view_ir bench group).
+[[budget]]
+name = "canonical_json_counter"
+metric = "time"
+budget = 60.0
+note = "M4 reference median 6.0 µs (M0 view_ir/canonical_json bench); ≈10× headroom"
+
+# Codegen: quote! → syn → prettyplease (D-8 pipeline).
+[[budget]]
+name = "codegen_counter"
+metric = "time"
+budget = 3000.0
+note = "M0 reference median 523 µs (M4 re-measure: 563); ≈5.3× headroom"
+
+# Runtime (§7.2, §10 — the no_std substrate).
+[[budget]]
+name = "runtime_instantiate"
+metric = "time"
+budget = 5.0
+note = "M4 reference median 0.28 µs (runtime/instantiate bench); ≈17× headroom"
+
+[[budget]]
+name = "runtime_update_mask"
+metric = "time"
+budget = 5.0
+note = "M4 reference median 0.28 µs (runtime/update_mask bench); ≈17× headroom"
+
+[[budget]]
+name = "runtime_list_diff_keyed"
+metric = "time"
+budget = 25.0
+note = "M4 reference median 2.6 µs (64-item LIS bench); ≈9.6× headroom"
+
+# Patch protocol (§11.3, ADR-013 — the runtime half of save→frame).
+[[budget]]
+name = "patch_apply_1"
+metric = "time"
+budget = 1.0
+note = "M0 patch-apply/1 bench ~22 ns (M4 re-measure: ~60 ns); ≈15× headroom at 1 µs"
+
+[[budget]]
+name = "patch_dispatch_hit"
+metric = "time"
+budget = 1.0
+note = "M0 patch-dispatch/hit bench ~2.1 ns (M4 re-measure: ~30 ns); ≈30× headroom at 1 µs"
+
+# Generated-code size (D-8 bytes are profile-independent — enforced in every
+# profile; the byte count itself is pinned by `lig reproducibility`).
+[[budget]]
+name = "gen_counter_bytes"
+metric = "bytes"
+budget = 8192.0
+note = "M3 delivery: 7 146 B counter unit; 8 KiB ceiling (≈15% headroom)"
