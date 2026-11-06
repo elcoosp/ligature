@@ -330,6 +330,10 @@ fn generate_component_pieces(
         .iter()
         .map(|u| ((u.owner.get(), u.dyn_idx), u.field.clone()))
         .collect();
+    // Slot-content addressing contexts (M7): fills of every use site and
+    // this component's own outlet fallbacks. Built after the per-use field
+    // suffixing so the run arms address their own instance.
+    let ctx_map: HashMap<u32, Ctx> = build_content_ctx(module, root, &component_uses);
     for use_site in &component_uses {
         let (field, comp_idx) = (&use_site.field, use_site.comp_idx);
         let Some(decl) = module.components.get(comp_idx) else {
@@ -346,10 +350,13 @@ fn generate_component_pieces(
     }
 
     // --- StyleProp prev slots (per-dynamic prev diff, §8.2/C5) ----------------------
+    // Keyed per (fragment, dynamic) — two fragments in one tree may both
+    // carry a StyleProp at dynamic index 0 (root + branch; root + two fills),
+    // and one shared `p_0` field would collide (M7).
     let mut prev_fields: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut prev_inits: Vec<proc_macro2::TokenStream> = Vec::new();
-    for p in collect_styleprop_dynamics(module, root) {
-        let fname = syn::Ident::new(&format!("p_{p}"), Span::call_site());
+    for (frag_id, di) in collect_styleprop_dynamics(module, root) {
+        let fname = syn::Ident::new(&format!("p_f{frag_id}_d{di}"), Span::call_site());
         prev_fields.push(quote! { #fname: ::alloc::string::String });
         prev_inits.push(quote! { #fname: ::alloc::string::String::new() });
     }
@@ -365,7 +372,7 @@ fn generate_component_pieces(
     let mut list_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut item_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut key_methods: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut ref_captures: Vec<(String, usize)> = Vec::new();
+    let mut ref_captures: Vec<(String, usize, Ctx)> = Vec::new();
     for rx in &rxs {
         let cname = syn::Ident::new(&format!("{prefix}{}", rx.const_name), Span::call_site());
         match rx.decl.kind {
@@ -407,70 +414,45 @@ fn generate_component_pieces(
                     continue;
                 };
                 let hole_idx = dynamic as usize;
+                // One addressing discipline for every bind arm (M7): the
+                // receiver comes from the owner fragment's context —
+                // `self.frag`, a mounted branch, or mounted slot content.
+                let ctx = ctx_of(module, &frags, &ctx_map, rx.decl.owner);
+                let recv = ctx_recv(&ctx);
                 match &d.kind {
                     DynamicKind::Text => {
                         let is_str =
                             value_kind(module, module.exprs.get(rx.decl.body)) == ValueKind::Str;
                         let body = gen_expr(module, rx.decl.body)?;
-                        let owner_in_branch = branch_slot_of(module, &frags, rx.decl.owner);
-                        if let Some(slot) = owner_in_branch {
-                            if is_str {
-                                run_arms.push(quote! {
-                                    #cname => {
-                                        if let Some(b) = self.frag.branch_mut(#slot) {
-                                            b.set_text(h, #hole_idx, &#body);
-                                        }
-                                    }
-                                });
-                            } else {
-                                run_arms.push(quote! {
-                                    #cname => {
-                                        if let Some(b) = self.frag.branch_mut(#slot) {
-                                            let mut buf = [0u8; 20];
-                                            b.set_text(h, #hole_idx, ::lig_runtime::format_i64(&mut buf, #body));
-                                        }
-                                    }
-                                });
-                            }
-                        } else if is_str {
-                            run_arms.push(quote! {
-                                #cname => {
-                                    self.frag.set_text(h, #hole_idx, &#body);
-                                }
-                            });
+                        let inner = if is_str {
+                            quote! { #recv.set_text(h, #hole_idx, &#body); }
                         } else {
-                            run_arms.push(quote! {
-                                #cname => {
-                                    let mut buf = [0u8; 20];
-                                    self.frag.set_text(h, #hole_idx, ::lig_runtime::format_i64(&mut buf, #body));
-                                }
-                            });
-                        }
+                            quote! {
+                                let mut buf = [0u8; 20];
+                                #recv.set_text(h, #hole_idx, ::lig_runtime::format_i64(&mut buf, #body));
+                            }
+                        };
+                        let scoped = ctx_scope(&ctx, inner);
+                        run_arms.push(quote! { #cname => { #scoped } });
                     }
                     DynamicKind::Class => {
                         let body = gen_expr(module, rx.decl.body)?;
-                        run_arms.push(quote! {
-                            #cname => {
-                                self.frag.set_class(h, #hole_idx, Some(&(#body)));
-                            }
-                        });
+                        let inner = quote! { #recv.set_class(h, #hole_idx, Some(&(#body))); };
+                        let scoped = ctx_scope(&ctx, inner);
+                        run_arms.push(quote! { #cname => { #scoped } });
                     }
                     DynamicKind::Attr { key } => {
                         let key_lit = syn::LitStr::new(module.strings.get(*key), Span::call_site());
                         let body = gen_expr(module, rx.decl.body)?;
                         let is_str =
                             value_kind(module, module.exprs.get(rx.decl.body)) == ValueKind::Str;
-                        if is_str {
-                            run_arms.push(quote! {
-                                #cname => {
-                                    self.frag.set_attr(h, #hole_idx, #key_lit, Some(::lig_runtime::AttrVal::Str(&(#body))));
-                                }
-                            });
+                        let inner = if is_str {
+                            quote! { #recv.set_attr(h, #hole_idx, #key_lit, Some(::lig_runtime::AttrVal::Str(&(#body)))); }
                         } else {
-                            run_arms.push(quote! {
-                                #cname => self.frag.set_attr(h, #hole_idx, #key_lit, Some(::lig_runtime::AttrVal::Num((#body) as f64)));
-                            });
-                        }
+                            quote! { #recv.set_attr(h, #hole_idx, #key_lit, Some(::lig_runtime::AttrVal::Num((#body) as f64))); }
+                        };
+                        let scoped = ctx_scope(&ctx, inner);
+                        run_arms.push(quote! { #cname => { #scoped } });
                     }
                     DynamicKind::If(if_ir) => {
                         let cond = gen_expr(module, if_ir.cond)?;
@@ -483,18 +465,21 @@ fn generate_component_pieces(
                         let b_tpl = tpl_ident(&prefix, branch_info.template_id);
                         let b_holes = hole_ident(&prefix, branch_info.id.get() as usize);
                         let b_branches = branch_ident(&prefix, branch_info.id.get() as usize);
-                        run_arms.push(quote! {
-                            #cname => {
-                                let on = #cond;
-                                if self.frag.branch_is(#slot) != on {
-                                    if on {
-                                        self.frag.mount_branch(h, #slot, #b_tpl, #b_holes, #b_branches);
-                                    } else {
-                                        self.frag.unmount_branch(h, #slot);
-                                    }
+                        // The mount rides the owner fragment's receiver: an If
+                        // inside slot content mounts its branch on the
+                        // content (M7), not on the parent's slab.
+                        let inner = quote! {
+                            let on = #cond;
+                            if #recv.branch_is(#slot) != on {
+                                if on {
+                                    #recv.mount_branch(h, #slot, #b_tpl, #b_holes, #b_branches);
+                                } else {
+                                    #recv.unmount_branch(h, #slot);
                                 }
                             }
-                        });
+                        };
+                        let scoped = ctx_scope(&ctx, inner);
+                        run_arms.push(quote! { #cname => { #scoped } });
                     }
                     DynamicKind::For(for_ir) => {
                         // List reconcile (§7.5): keyed lists run the
@@ -571,36 +556,40 @@ fn generate_component_pieces(
                     DynamicKind::StyleProp { prop } => {
                         let body = gen_expr(module, rx.decl.body)?;
                         let prop_id = prop.get();
-                        let pname = syn::Ident::new(&format!("p_{dynamic}"), Span::call_site());
+                        let pname = syn::Ident::new(
+                            &format!("p_f{}_d{dynamic}", rx.decl.owner.get()),
+                            Span::call_site(),
+                        );
                         let hole_idx = dynamic as usize;
-                        run_arms.push(quote! {
-                            #cname => {
-                                let v: ::alloc::string::String = ::core::clone::Clone::clone(&(#body));
-                                if v != self.#pname {
-                                    self.#pname = v.clone();
-                                    self.frag.set_style_dyn(
-                                        h,
-                                        #hole_idx,
-                                        &[(#prop_id, ::lig_runtime::PropVal::Raw(&v))],
-                                    );
-                                }
+                        let inner = quote! {
+                            let v: ::alloc::string::String = ::core::clone::Clone::clone(&(#body));
+                            if v != self.#pname {
+                                self.#pname = v.clone();
+                                #recv.set_style_dyn(
+                                    h,
+                                    #hole_idx,
+                                    &[(#prop_id, ::lig_runtime::PropVal::Raw(&v))],
+                                );
                             }
-                        });
+                        };
+                        let scoped = ctx_scope(&ctx, inner);
+                        run_arms.push(quote! { #cname => { #scoped } });
                     }
                     DynamicKind::Html => {
                         let body = gen_expr(module, rx.decl.body)?;
                         let hole_idx = dynamic as usize;
-                        run_arms.push(quote! {
-                            #cname => {
-                                self.frag.set_html(h, #hole_idx, &(#body));
-                            }
-                        });
+                        let inner = quote! { #recv.set_html(h, #hole_idx, &(#body)); };
+                        let scoped = ctx_scope(&ctx, inner);
+                        run_arms.push(quote! { #cname => { #scoped } });
                     }
                     DynamicKind::Ref => {
                         // Build-time: the ref local captures the hole NodeId.
                         if let lig_ir::expr::Expr::Local(name) = module.exprs.get(rx.decl.body) {
-                            ref_captures
-                                .push((sanitize(module.strings.get(*name)), dynamic as usize));
+                            ref_captures.push((
+                                sanitize(module.strings.get(*name)),
+                                dynamic as usize,
+                                ctx.clone(),
+                            ));
                         } else {
                             return Err(CodegenError::Unsupported(
                                 "ref must be a local binding in v1",
@@ -626,7 +615,14 @@ fn generate_component_pieces(
     }
 
     // --- attach list (event dynamics of ALL fragments in tree order) ----------
+    // Direct-context events attach before the initial flush (§9.2 run-once
+    // build shape, byte-stable since M0). Slot-content events attach at
+    // mount time, inside the slot assembly above (the parent's build is the
+    // only place both origins exist). Events inside mounted branches attach
+    // after the flush, once the branch exists — the handler record lands on
+    // the fragment whose reaction set owns the handler (M7).
     let mut attaches: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut branch_attaches: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut dispatch_lo: u64 = 0;
     let mut dispatch_hi: u64 = 0;
     for f in &frags {
@@ -642,9 +638,25 @@ fn generate_component_pieces(
                 }
                 let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
                 let h = rx_id.get();
-                attaches.push(quote! {
-                    s.frag.attach(h, #di, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate);
-                });
+                let ctx = ctx_of(module, &frags, &ctx_map, f.id);
+                match &ctx {
+                    Ctx::Direct => {
+                        attaches.push(quote! {
+                            s.frag.attach(h, #di, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate);
+                        });
+                    }
+                    Ctx::Branch { slot } => {
+                        let slot = *slot;
+                        branch_attaches.push(quote! {
+                            if let Some(n) = s.frag.branch(#slot).map(|b| b.hole(#di)) {
+                                s.frag.attach_foreign(n, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate, h);
+                            }
+                        });
+                    }
+                    Ctx::Fill { .. } | Ctx::Fallback { .. } => {
+                        // Attached at mount time in the slot assembly (M7).
+                    }
+                }
             }
         }
     }
@@ -702,26 +714,33 @@ fn generate_component_pieces(
     }
 
     // --- build ----------------------------------------------------------------------
-    // Exact per-bit init masks (M3 dispatch refinement): every non-event
-    // reaction runs once at build; the low word carries ids 0..64 and the
-    // spill word ids 64..128 (bits are id − 64).
+    // Exact per-bit init masks (M3 refinement, made exact per member in M7):
+    // every reaction of THIS component runs once at build except the
+    // event-driven handlers (their bits are exactly `dispatch_lo/hi`, the
+    // event dynamics' reaction ids — script effects DO run at build, the
+    // `effect_multi` demo pins it). The bit IS the reaction id (bits are
+    // global reaction ids; a component that is not first in the module owns
+    // ids past the low prefix, and the old `(1 << n) - 1` band marked the
+    // wrong component's ids and missed its own late ones). The low word
+    // carries ids 0..64 and the spill word ids 64..128 (bits are id − 64).
     if n_reactions > 128 {
         return Err(CodegenError::Unsupported(
             "more than 128 reactions in one component (spill-word dispatch cap)",
         ));
     }
-    let init_mask: u64 = if n_reactions < 64 {
-        ((1u64 << n_reactions) - 1) & !dispatch_lo
-    } else {
-        !dispatch_lo
-    };
-    let init_hi: u64 = if n_reactions <= 64 {
-        0
-    } else {
-        ((1u64 << (n_reactions - 64)) - 1) & !dispatch_hi
-    };
-    let init_mask_lit = format!("{init_mask:#x}").replace("0x", "0x");
-    let init_mask_lit = syn::LitInt::new(&init_mask_lit, Span::call_site());
+    let mut init_mask: u64 = 0;
+    let mut init_hi: u64 = 0;
+    for rx in &rxs {
+        let id = rx.id;
+        if id < 64 {
+            init_mask |= 1u64 << id;
+        } else {
+            init_hi |= 1u64 << (id - 64);
+        }
+    }
+    init_mask &= !dispatch_lo;
+    init_hi &= !dispatch_hi;
+    let init_mask_lit = syn::LitInt::new(&format!("{init_mask:#x}"), Span::call_site());
     let init_spill = if init_hi != 0 {
         let init_hi_lit = syn::LitInt::new(&format!("{init_hi:#x}"), Span::call_site());
         quote! { s.frag.dirty.mark_spill_word(0, #init_hi_lit); }
@@ -732,11 +751,16 @@ fn generate_component_pieces(
     let root_holes = hole_ident(&prefix, root_info.id.get() as usize);
     let root_branches = branch_ident(&prefix, root_info.id.get() as usize);
 
-    // Slot fills + outlet fallbacks (§7.4, M6): for every slot outlet in each
-    // used child, mount THIS use site's fill by name; a use site that does not
-    // fill the slot mounts the outlet's own fallback content. Fill fragments
-    // live in the parent's tree, fallback fragments in the child's — both sets
-    // of statics are emitted into the same generated module scope.
+    // Slot fills + outlet fallbacks (§7.4, M6; origins + the init-flush
+    // story in M7): for every slot outlet in each used child, mount THIS use
+    // site's fill by name (`SlotOrigin::Fill`); a use site that does not
+    // fill the slot mounts the outlet's own fallback content
+    // (`SlotOrigin::Fallback`). A fallback that carries dynamic binds is
+    // initialized HERE: the child's build already flushed (its content was
+    // not mounted yet), so the parent marks the child's fallback reactions
+    // and flushes the child instance. Fill fragments live in the parent's
+    // tree, fallback fragments in the child's — both sets of statics are
+    // emitted into the same generated module scope.
     let mut slot_fills: Vec<proc_macro2::TokenStream> = Vec::new();
     for use_site in &component_uses {
         let Some(child_root) =
@@ -760,7 +784,11 @@ fn generate_component_pieces(
                 .iter()
                 .find(|s| s.name == *slot_name)
                 .and_then(|s| s.fallback);
-            let Some(content_id) = fill.or(*fallback) else {
+            let (content_id, origin, is_fallback) = if let Some(fill_id) = fill {
+                (fill_id, quote!(::lig_runtime::SlotOrigin::Fill), false)
+            } else if let Some(fb) = *fallback {
+                (fb, quote!(::lig_runtime::SlotOrigin::Fallback), true)
+            } else {
                 continue;
             };
             let content_frag = &module.fragments[content_id.get() as usize];
@@ -780,20 +808,169 @@ fn generate_component_pieces(
             let branches = branch_ident(&owner_prefix, content_id.get() as usize);
             let fname = syn::Ident::new(&use_site.field, Span::call_site());
             slot_fills.push(quote! {
-                s.#fname.frag.mount_slot(h, #di, #tpl, #holes, #branches);
+                s.#fname.frag.mount_slot(h, #di, #origin, #tpl, #holes, #branches);
             });
+            // Content event attaches (M7): the events of the mounted
+            // content attach at mount time — the parent's build is the only
+            // place both origins exist. The RECORD lands on the fragment
+            // whose reaction set owns the handler: the parent's `s.frag`
+            // for fills, the child instance's for fallbacks. `attach_foreign`
+            // records across slabs; dispatch marks that fragment's dirty set.
+            for (edi, ed) in content_frag.dynamics.iter().enumerate() {
+                let DynamicKind::Event { event, delegate } = &ed.kind else {
+                    continue;
+                };
+                let Some(rx_id) = ed.reaction else { continue };
+                let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
+                let h = rx_id.get();
+                if is_fallback {
+                    slot_fills.push(quote! {
+                        if let Some(n) = s.#fname.frag.slot_fallback(#di).map(|c| c.hole(#edi)) {
+                            s.#fname.frag.attach_foreign(
+                                n,
+                                ::lig_runtime::EventKind::#ev,
+                                ::lig_runtime::HandlerId(#h),
+                                #delegate,
+                                h,
+                            );
+                        }
+                    });
+                } else {
+                    slot_fills.push(quote! {
+                        if let Some(n) = s.#fname.frag.slot_fill(#di).map(|c| c.hole(#edi)) {
+                            s.frag.attach_foreign(
+                                n,
+                                ::lig_runtime::EventKind::#ev,
+                                ::lig_runtime::HandlerId(#h),
+                                #delegate,
+                                h,
+                            );
+                        }
+                    });
+                }
+            }
+            // Content refs of FALLBACK content (M7): the ref field is the
+            // child's (the fallback fragment belongs to the child's tree) —
+            // the parent writes it once the content is mounted. Fill refs
+            // capture from the parent's own `ref_captures` (Ctx::Fill) below.
+            if is_fallback {
+                for (edi, ed) in content_frag.dynamics.iter().enumerate() {
+                    if !matches!(&ed.kind, DynamicKind::Ref) {
+                        continue;
+                    }
+                    let Some(lig_ir::expr::Expr::Local(name)) =
+                        Some(module.exprs.get(ed.expr).clone())
+                    else {
+                        continue;
+                    };
+                    let rfield = syn::Ident::new(
+                        &format!("ref_{}", sanitize(module.strings.get(name))),
+                        Span::call_site(),
+                    );
+                    slot_fills.push(quote! {
+                        if let Some(c) = s.#fname.frag.slot_fallback(#di) {
+                            s.#fname.#rfield = c.hole(#edi);
+                        }
+                    });
+                }
+            }
+            if is_fallback {
+                // The init-flush story (M7): mark the child's fallback
+                // reactions and flush the child instance with the content
+                // live — the child's build flushed before the content was
+                // mounted, so its binds ran against an empty outlet. Event-
+                // driven handler reactions stay dispatch-driven (§9.2): the
+                // content's event dynamics are excluded by id.
+                let mut fb_ev_lo: u64 = 0;
+                let mut fb_ev_hi: u64 = 0;
+                for d in &content_frag.dynamics {
+                    let DynamicKind::Event { .. } = &d.kind else {
+                        continue;
+                    };
+                    let Some(rx_id) = d.reaction else {
+                        continue;
+                    };
+                    let id = rx_id.get();
+                    if id < 64 {
+                        fb_ev_lo |= 1u64 << id;
+                    } else {
+                        fb_ev_hi |= 1u64 << (id - 64);
+                    }
+                }
+                let mut fb_lo: u64 = 0;
+                let mut fb_hi: u64 = 0;
+                for (id, r) in module.reactions.iter().enumerate() {
+                    if r.owner != content_id {
+                        continue;
+                    }
+                    if id < 64 {
+                        fb_lo |= 1u64 << id;
+                    } else {
+                        fb_hi |= 1u64 << (id - 64);
+                    }
+                }
+                fb_lo &= !fb_ev_lo;
+                fb_hi &= !fb_ev_hi;
+                if fb_lo != 0 || fb_hi != 0 {
+                    let fb_lo_lit = syn::LitInt::new(&format!("{fb_lo:#x}"), Span::call_site());
+                    let fb_flush = if fb_hi != 0 {
+                        let fb_hi_lit = syn::LitInt::new(&format!("{fb_hi:#x}"), Span::call_site());
+                        quote! {
+                            s.#fname.frag.dirty.mark_spill_word(0, #fb_hi_lit);
+                            ::lig_runtime::flush(&mut s.#fname, h);
+                        }
+                    } else {
+                        quote! { ::lig_runtime::flush(&mut s.#fname, h); }
+                    };
+                    slot_fills.push(quote! {
+                        s.#fname.frag.mark_mask(#fb_lo_lit);
+                        #fb_flush
+                    });
+                }
+            }
         }
     }
 
-    // Ref captures: `ref={el}` stores the hole NodeId on the named field.
-    let ref_inits: Vec<proc_macro2::TokenStream> = ref_captures
-        .iter()
-        .map(|(name, hole)| {
-            let fname = syn::Ident::new(&format!("ref_{name}"), Span::call_site());
-            quote! { s.#fname = s.frag.hole(#hole); }
-        })
-        .collect();
-    for (name, _hole) in &ref_captures {
+    // Ref captures (M7 split): `ref={el}` stores the hole NodeId on the
+    // named field — the hole of the fragment the ref lives on. Direct refs
+    // capture from `self.frag` in the build body; slot-content refs capture
+    // once the parent mounts the content (fills write the parent's field;
+    // fallback refs are the CHILD's field — the fallback fragment belongs to
+    // the child's tree — and the parent writes it post-mount); branch refs
+    // capture after the initial flush mounts the branch. Every ref field
+    // starts as the absent sentinel `NodeId(u32::MAX)`.
+    let mut ref_inits: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut content_ref_inits: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut branch_ref_inits: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (name, hole, ctx) in &ref_captures {
+        let fname = syn::Ident::new(&format!("ref_{name}"), Span::call_site());
+        match ctx {
+            Ctx::Direct => {
+                ref_inits.push(quote! { s.#fname = s.frag.hole(#hole); });
+            }
+            Ctx::Branch { slot } => {
+                branch_ref_inits.push(quote! {
+                    if let Some(b) = s.frag.branch(#slot) {
+                        s.#fname = b.hole(#hole);
+                    }
+                });
+            }
+            Ctx::Fill { field, slot } => {
+                let field = syn::Ident::new(field, Span::call_site());
+                content_ref_inits.push(quote! {
+                    if let Some(c) = s.#field.frag.slot_fill(#slot) {
+                        s.#fname = c.hole(#hole);
+                    }
+                });
+            }
+            Ctx::Fallback { .. } => {
+                // Captured by the PARENT at mount time (the content does not
+                // exist in this build yet); the field is declared + sentinel-
+                // initialized below so the parent's write has a target.
+            }
+        }
+    }
+    for (name, _hole, _ctx) in &ref_captures {
         let fname = syn::Ident::new(&format!("ref_{name}"), Span::call_site());
         struct_fields.push(quote! { pub #fname: ::lig_runtime::NodeId });
         init_fields.push(quote! { #fname: ::lig_runtime::NodeId(u32::MAX) });
@@ -858,7 +1035,11 @@ fn generate_component_pieces(
             #(#list_methods)*
 
             /// Run-once build (C4): executes top-to-bottom; reactivity lives
-            /// exclusively in reactions.
+            /// exclusively in reactions. M7 phases: slot assembly (mounts,
+            /// content attaches, fallback init-flush) → direct ref captures
+            /// → direct attaches → the initial flush (memos + binds) →
+            /// branch attaches + branch ref captures (branch content exists
+            /// only after the flush).
             pub fn build(h: &mut dyn Host, props: #props_ty) -> Self {
                 let mut s = Self {
                     #(#init_fields,)*
@@ -867,12 +1048,15 @@ fn generate_component_pieces(
                 };
                 #(#slot_fills)*
                 #(#ref_inits)*
+                #(#content_ref_inits)*
                 #(#attaches)*
                 // Initial pass: memos + binds only — dispatch-driven handler
                 // reactions run on events, never at build (§9.2 run-once).
                 s.frag.mark_mask(#init_mask_lit);
                 #init_spill
                 ::lig_runtime::flush(&mut s, h);
+                #(#branch_attaches)*
+                #(#branch_ref_inits)*
                 s
             }
         }
@@ -1098,9 +1282,10 @@ fn field_name_for(module: &ViewModule, component: ComponentId) -> String {
     sanitize(&name).to_ascii_lowercase()
 }
 
-/// Every StyleProp dynamic index in this component tree (prev-slot fields).
-fn collect_styleprop_dynamics(module: &ViewModule, root: FragmentId) -> Vec<u32> {
-    let mut out = Vec::new();
+/// Every StyleProp dynamic in this component tree, as (fragment id, dynamic
+/// index) — the prev-slot field key (M7: per-fragment keys).
+fn collect_styleprop_dynamics(module: &ViewModule, root: FragmentId) -> Vec<(u32, u32)> {
+    let mut out: Vec<(u32, u32)> = Vec::new();
     let mut stack = vec![root];
     while let Some(f) = stack.pop() {
         let Some(frag) = module.fragments.get(f.get() as usize) else {
@@ -1108,13 +1293,14 @@ fn collect_styleprop_dynamics(module: &ViewModule, root: FragmentId) -> Vec<u32>
         };
         for (di, d) in frag.dynamics.iter().enumerate() {
             if matches!(d.kind, DynamicKind::StyleProp { .. }) {
-                out.push(di as u32);
+                out.push((f.get(), di as u32));
             }
         }
         for &c in &frag.children {
             stack.push(c);
         }
     }
+    out.sort_unstable();
     out
 }
 
@@ -1150,14 +1336,133 @@ fn fragment_in_tree(frags: &[FragInfo], f: FragmentId) -> bool {
     frags.iter().any(|fi| fi.id == f)
 }
 
-/// Branch slot of a fragment: its position among its PARENT's children.
-/// parse-solid pushes branch fragments in If/For template order, so the
-/// children position IS the branch slot for the spike shape.
+/// How a run arm reaches the fragment its dynamic lives on (M7): directly
+/// (`self.frag`), through a mounted branch, or through mounted slot content
+/// — a use-site fill (on the child instance's fragment) or the outlet's own
+/// fallback (on `self.frag` of the authoring component).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Ctx {
+    /// `self.frag` (the default).
+    Direct,
+    /// A mounted `If` branch (the `then` body of its parent's dynamic).
+    Branch { slot: usize },
+    /// A use-site fill mounted on `self.<field>.frag` at slot outlet `slot`.
+    Fill { field: String, slot: usize },
+    /// The outlet fallback mounted on `self.frag` at slot outlet `slot`.
+    Fallback { slot: usize },
+}
+
+/// Build the fragment → [`Ctx`] map for slot content owned by this
+/// component: every use site's fills (fill fragments live in the parent's
+/// tree) and every outlet fallback of this component's own root (fallback
+/// fragments live in the child's tree, so they classify when generating the
+/// CHILD — the parent names them only at mount time).
+fn build_content_ctx(
+    module: &ViewModule,
+    root: FragmentId,
+    uses: &[ComponentUse],
+) -> HashMap<u32, Ctx> {
+    let mut map: HashMap<u32, Ctx> = HashMap::new();
+    for use_site in uses {
+        let Some(child_root) =
+            module.component_root(lig_core::id::ComponentId::new(use_site.comp_idx as u32))
+        else {
+            continue;
+        };
+        let child_frag = &module.fragments[child_root.get() as usize];
+        for (di, d) in child_frag.dynamics.iter().enumerate() {
+            let DynamicKind::Slot {
+                name: slot_name, ..
+            } = &d.kind
+            else {
+                continue;
+            };
+            for s in &use_site.ir.slots {
+                if s.name == *slot_name
+                    && let Some(fb) = s.fallback
+                {
+                    map.insert(
+                        fb.get(),
+                        Ctx::Fill {
+                            field: use_site.field.clone(),
+                            slot: di,
+                        },
+                    );
+                }
+            }
+        }
+    }
+    if let Some(root_frag) = module.fragments.get(root.get() as usize) {
+        for (di, d) in root_frag.dynamics.iter().enumerate() {
+            if let DynamicKind::Slot {
+                fallback: Some(fb), ..
+            } = &d.kind
+            {
+                map.insert(fb.get(), Ctx::Fallback { slot: di });
+            }
+        }
+    }
+    map
+}
+
+/// The addressing context of a reaction's owning fragment: slot content
+/// first, then the If-branch walk, else [`Ctx::Direct`].
+fn ctx_of(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    ctx_map: &HashMap<u32, Ctx>,
+    owner: FragmentId,
+) -> Ctx {
+    if let Some(c) = ctx_map.get(&owner.get()) {
+        return c.clone();
+    }
+    branch_slot_of(module, frags, owner).map_or(Ctx::Direct, |slot| Ctx::Branch { slot })
+}
+
+/// The receiver expression a run arm binds/writes through for `ctx`.
+fn ctx_recv(ctx: &Ctx) -> proc_macro2::TokenStream {
+    match ctx {
+        Ctx::Direct => quote!(self.frag),
+        Ctx::Branch { .. } => quote!(b),
+        Ctx::Fill { .. } | Ctx::Fallback { .. } => quote!(c),
+    }
+}
+
+/// Wrap `inner` in the accessor guard `ctx` needs (Direct: nothing).
+fn ctx_scope(ctx: &Ctx, inner: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
+    match ctx {
+        Ctx::Direct => inner,
+        Ctx::Branch { slot } => {
+            let slot = *slot;
+            quote! { if let Some(b) = self.frag.branch_mut(#slot) { #inner } }
+        }
+        Ctx::Fill { field, slot } => {
+            let slot = *slot;
+            let field = syn::Ident::new(field, Span::call_site());
+            quote! { if let Some(c) = self.#field.frag.slot_fill_mut(#slot) { #inner } }
+        }
+        Ctx::Fallback { slot } => {
+            let slot = *slot;
+            quote! { if let Some(c) = self.frag.slot_fallback_mut(#slot) { #inner } }
+        }
+    }
+}
+
+/// Branch slot of a fragment: the branch-slot index of the If/For dynamic
+/// that owns it as `then`/`body` — not the raw children position (fill
+/// fragments are tree children too, and would shift the index, M7).
 fn branch_slot_of(module: &ViewModule, frags: &[FragInfo], f: FragmentId) -> Option<usize> {
     for info in frags {
         let parent = module.fragments.get(info.id.get() as usize)?;
-        if let Some(slot) = parent.children.iter().position(|&c| c == f) {
-            return Some(slot);
+        for (di, d) in parent.dynamics.iter().enumerate() {
+            let target = match &d.kind {
+                DynamicKind::If(i) => i.then,
+                DynamicKind::For(fo) => fo.body,
+                _ => continue,
+            };
+            if target == f {
+                return branch_slot_of_dynamic(parent, di as u32);
+            }
         }
     }
     None
