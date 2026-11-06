@@ -23,6 +23,7 @@ use lig_ir::module::{ReactionDecl, ReactionKind, ViewModule};
 use lig_reactivity::{ComponentSchedule, ScheduleError, build_schedule};
 use proc_macro2::Span;
 use quote::quote;
+use std::collections::HashMap;
 
 /// A codegen failure (fail-closed — BR-1 applies to emission too).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -304,9 +305,34 @@ fn generate_component_pieces(
     struct_fields.push(quote! { pub frag: ::lig_runtime::Fragment });
 
     // --- child component instances (fields + build) --------------------------------
-    let component_uses = collect_component_uses(module, root);
-    for (field, comp_idx, _dyn) in &component_uses {
-        let Some(decl) = module.components.get(*comp_idx) else {
+    let mut component_uses = collect_component_uses(module, root);
+    // Per-use child field names: a component used once keeps its base name;
+    // further uses get a numbered suffix so every use site addresses its own
+    // instance (§7.4 slot fills mount per use). The traversal is sorted, so
+    // the numbering is deterministic (D-8).
+    let mut seen_child_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for use_site in &mut component_uses {
+        let base = use_site.field.clone();
+        if seen_child_fields.insert(base.clone()) {
+            continue;
+        }
+        let mut n = 2usize;
+        loop {
+            let candidate = format!("{base}_{n}");
+            if seen_child_fields.insert(candidate.clone()) {
+                use_site.field = candidate;
+                break;
+            }
+            n += 1;
+        }
+    }
+    let component_field_map: HashMap<(u32, u32), String> = component_uses
+        .iter()
+        .map(|u| ((u.owner.get(), u.dyn_idx), u.field.clone()))
+        .collect();
+    for use_site in &component_uses {
+        let (field, comp_idx) = (&use_site.field, use_site.comp_idx);
+        let Some(decl) = module.components.get(comp_idx) else {
             return Err(CodegenError::Unsupported("missing component declaration"));
         };
         let child_name = sanitize(module.strings.get(decl.name));
@@ -510,7 +536,10 @@ fn generate_component_pieces(
                         // state + a child flush; the child's own reactions
                         // run from its schedule.
                         let field = syn::Ident::new(
-                            &field_name_for(module, c.component),
+                            &component_field_map
+                                .get(&(rx.decl.owner.get(), dynamic))
+                                .cloned()
+                                .unwrap_or_else(|| field_name_for(module, c.component)),
                             Span::call_site(),
                         );
                         let mut sets = Vec::new();
@@ -703,48 +732,57 @@ fn generate_component_pieces(
     let root_holes = hole_ident(&prefix, root_info.id.get() as usize);
     let root_branches = branch_ident(&prefix, root_info.id.get() as usize);
 
-    // Slot fills: mount each used child's slot content (§7.4) after the
-    // child exists. Slot dynamic index = its index among the child's dynamics.
+    // Slot fills + outlet fallbacks (§7.4, M6): for every slot outlet in each
+    // used child, mount THIS use site's fill by name; a use site that does not
+    // fill the slot mounts the outlet's own fallback content. Fill fragments
+    // live in the parent's tree, fallback fragments in the child's — both sets
+    // of statics are emitted into the same generated module scope.
     let mut slot_fills: Vec<proc_macro2::TokenStream> = Vec::new();
-    for (field, comp_idx, dyn_idx) in &component_uses {
+    for use_site in &component_uses {
         let Some(child_root) =
-            module.component_root(lig_core::id::ComponentId::new(*comp_idx as u32))
+            module.component_root(lig_core::id::ComponentId::new(use_site.comp_idx as u32))
         else {
             continue;
         };
         let child_frag = &module.fragments[child_root.get() as usize];
         for (di, d) in child_frag.dynamics.iter().enumerate() {
-            if let DynamicKind::Slot { name: slot_name } = &d.kind {
-                // Find the matching fill: the parent's ComponentIr slot with
-                // the same name, mounted from THIS use site's fills.
-                let Some(fill_id) = module
-                    .fragments
-                    .iter()
-                    .flat_map(|f| f.dynamics.iter())
-                    .find_map(|d| match &d.kind {
-                        DynamicKind::Component(c) if c.component.get() as usize == *comp_idx => c
-                            .slots
-                            .iter()
-                            .find(|s| s.name == *slot_name)
-                            .and_then(|s| s.fallback),
-                        _ => None,
-                    })
-                else {
-                    continue;
-                };
-                let Some(fill_info) = frags.iter().find(|f| f.id == fill_id) else {
-                    continue;
-                };
-                let f_tpl = tpl_ident(&prefix, fill_info.template_id);
-                let f_holes = hole_ident(&prefix, fill_info.id.get() as usize);
-                let f_branches = branch_ident(&prefix, fill_info.id.get() as usize);
-                let fname = syn::Ident::new(field, Span::call_site());
-                slot_fills.push(quote! {
-                    s.#fname.frag.mount_slot(h, #di, #f_tpl, #f_holes, #f_branches);
-                });
-            }
+            let DynamicKind::Slot {
+                name: slot_name,
+                fallback,
+            } = &d.kind
+            else {
+                continue;
+            };
+            // This use's fill for the outlet's name, else the outlet fallback.
+            let fill = use_site
+                .ir
+                .slots
+                .iter()
+                .find(|s| s.name == *slot_name)
+                .and_then(|s| s.fallback);
+            let Some(content_id) = fill.or(*fallback) else {
+                continue;
+            };
+            let content_frag = &module.fragments[content_id.get() as usize];
+            // Fill fragments belong to the parent's tree (their statics ride
+            // the parent prefix); fallback fragments belong to the child's.
+            let owner_prefix = if frags.iter().any(|f| f.id == content_id) {
+                prefix.clone()
+            } else {
+                let child_name = module.components.get(use_site.comp_idx).map_or_else(
+                    || "Child".to_string(),
+                    |decl| module.strings.get(decl.name).to_string(),
+                );
+                format!("{}_", sanitize(&child_name))
+            };
+            let tpl = tpl_ident(&owner_prefix, content_frag.template.get() as usize);
+            let holes = hole_ident(&owner_prefix, content_id.get() as usize);
+            let branches = branch_ident(&owner_prefix, content_id.get() as usize);
+            let fname = syn::Ident::new(&use_site.field, Span::call_site());
+            slot_fills.push(quote! {
+                s.#fname.frag.mount_slot(h, #di, #tpl, #holes, #branches);
+            });
         }
-        let _ = dyn_idx;
     }
 
     // Ref captures: `ref={el}` stores the hole NodeId on the named field.
@@ -1007,9 +1045,17 @@ fn init_is_literal(module: &ViewModule, e: ExprId) -> bool {
     }
 }
 
-/// Component-use sites in this component tree: `(field name, component id,
-/// dynamic index)`, in template order.
-fn collect_component_uses(module: &ViewModule, root: FragmentId) -> Vec<(String, usize, u32)> {
+/// One component use site: the child's struct field, component index,
+/// dynamic index, owning fragment, and the use-site IR (props + slot fills).
+struct ComponentUse {
+    field: String,
+    comp_idx: usize,
+    dyn_idx: u32,
+    owner: FragmentId,
+    ir: lig_ir::fragment::ComponentIr,
+}
+
+fn collect_component_uses(module: &ViewModule, root: FragmentId) -> Vec<ComponentUse> {
     let mut out = Vec::new();
     let mut stack = vec![root];
     while let Some(f) = stack.pop() {
@@ -1025,18 +1071,20 @@ fn collect_component_uses(module: &ViewModule, root: FragmentId) -> Vec<(String,
                         || "Child".to_string(),
                         |decl| module.strings.get(decl.name).to_string(),
                     );
-                out.push((
-                    sanitize(&comp_name).to_ascii_lowercase(),
-                    c.component.get() as usize,
-                    di as u32,
-                ));
+                out.push(ComponentUse {
+                    field: sanitize(&comp_name).to_ascii_lowercase(),
+                    comp_idx: c.component.get() as usize,
+                    dyn_idx: di as u32,
+                    owner: f,
+                    ir: c.clone(),
+                });
             }
         }
         for &c in &frag.children {
             stack.push(c);
         }
     }
-    out.sort_by_key(|(_, _, di)| *di);
+    out.sort_by_key(|u| (u.dyn_idx, u.owner.get()));
     out
 }
 
