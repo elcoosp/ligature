@@ -109,6 +109,114 @@ fn map_children_lower_to_unkeyed_for() {
     );
 }
 
+const KEYED_TSX: &str = r#"export function Tags() {
+  const [tags, setTags] = createSignal(["alpha", "beta", "gamma"]);
+  return (
+    <ul>
+      <For each={tags()} key={(t) => t}>
+        {(t) => <li>{t}</li>}
+      </For>
+    </ul>
+  );
+}
+"#;
+
+/// The For's key expression: `key={(t) => t}` lowers to a `Local` read of
+/// the item binding (the same shape the Vue `:key` leg produces — §6.4
+/// parity), and the module still validates.
+#[test]
+fn for_key_lowers_to_the_item_read() {
+    let m = expect_ok(KEYED_TSX, "tags.tsx");
+    let key = m
+        .fragments
+        .iter()
+        .flat_map(|f| f.dynamics.iter())
+        .find_map(|d| match &d.kind {
+            lig_ir::DynamicKind::For(f) => f.key,
+            _ => None,
+        })
+        .expect("keyed For carries a key expression");
+    let item = m
+        .fragments
+        .iter()
+        .flat_map(|f| f.dynamics.iter())
+        .find_map(|d| match &d.kind {
+            lig_ir::DynamicKind::For(f) => Some(f.item),
+            _ => None,
+        })
+        .expect("For item binding");
+    assert_eq!(
+        m.exprs.get(key),
+        &lig_ir::expr::Expr::Local(item),
+        "identity key reads the item binding"
+    );
+    assert_eq!(
+        lig_ir::validate::validate(&m),
+        [] as [lig_ir::validate::Violation; 0]
+    );
+}
+
+/// A key arrow over a name that is not the body's item binding is
+/// fail-closed: the key and the body must describe the same item.
+#[test]
+fn for_key_with_a_foreign_param_is_e001() {
+    let src = r#"export function Tags() {
+  const [tags, setTags] = createSignal(["alpha"]);
+  return (
+    <ul>
+      <For each={tags()} key={(x) => x}>
+        {(t) => <li>{t}</li>}
+      </For>
+    </ul>
+  );
+}
+"#;
+    let err = lig_parse_solid::lower_module(src, "tags.tsx").expect_err("must fail");
+    assert!(err.iter().any(|d| d.code == "LIG-E001"), "{err:?}");
+    assert!(err.iter().any(|d| d.message.contains("item binding")));
+}
+
+/// A key reading component state re-identifies items on unrelated writes —
+/// fail-closed at admission.
+#[test]
+fn for_key_reading_state_is_e001() {
+    let src = r#"export function Tags() {
+  const [tags, setTags] = createSignal(["alpha"]);
+  const [salt, setSalt] = createSignal(1);
+  return (
+    <ul>
+      <For each={tags()} key={(t) => salt()}>
+        {(t) => <li>{t}</li>}
+      </For>
+    </ul>
+  );
+}
+"#;
+    let err = lig_parse_solid::lower_module(src, "tags.tsx").expect_err("must fail");
+    assert!(err.iter().any(|d| d.code == "LIG-E001"), "{err:?}");
+    assert!(err.iter().any(|d| d.message.contains("pure function")));
+}
+
+/// A non-arrow `key` value is fail-closed with the admitted shape in the
+/// message.
+#[test]
+fn for_key_non_arrow_is_e001() {
+    let src = r#"export function Tags() {
+  const [tags, setTags] = createSignal(["alpha"]);
+  return (
+    <ul>
+      <For each={tags()} key={tags()}>
+        {(t) => <li>{t}</li>}
+      </For>
+    </ul>
+  );
+}
+"#;
+    let err = lig_parse_solid::lower_module(src, "tags.tsx").expect_err("must fail");
+    assert!(err.iter().any(|d| d.code == "LIG-E001"), "{err:?}");
+    assert!(err.iter().any(|d| d.message.contains("arrow")));
+}
+
 #[test]
 fn unknown_identifier_is_e100() {
     let src = r"export function Bad() {
