@@ -9,10 +9,12 @@ use lig_core::id::ReactionId;
 use lig_core::intern::StringTable;
 use serde::{Deserialize, Serialize};
 
-/// The View IR schema version (§5.6: bump on any field change). v3 adds
+/// The View IR schema version (§5.6: bump on any field change). v4 added
 /// the `lints` channel, `Expr::Event/Array/Native`, slot fills, and the
-/// per-expr/dynamic span table (admission + src→IR maps, M1).
-pub const VIEW_IR_VERSION: u16 = 4;
+/// per-expr/dynamic span table (admission + src→IR maps, M1). v5 gives the
+/// slot outlet its own `fallback` fragment (M6 — named slots and `<slot>`
+/// fallback content end to end).
+pub const VIEW_IR_VERSION: u16 = 5;
 
 /// A compiled view module — the only serialized artifact (§5.1).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -258,7 +260,7 @@ mod tests {
     fn new_module_has_current_version() {
         let m = ViewModule::new(Frontend::Solid);
         assert_eq!(m.version, VIEW_IR_VERSION);
-        assert_eq!(m.version, 4);
+        assert_eq!(m.version, 5);
     }
 
     #[test]
