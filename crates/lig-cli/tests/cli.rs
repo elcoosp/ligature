@@ -235,6 +235,9 @@ fn doctor_reports_all_checks() {
     assert!(out.status.success(), "doctor green: {out:?}");
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("error catalog embedded"), "{stdout}");
+    // M4: the budget ledger is an environment check too.
+    assert!(stdout.contains("budget ledger"), "{stdout}");
+    assert!(stdout.contains("no_std proof targets"), "{stdout}");
     assert!(stdout.contains("all checks pass"), "{stdout}");
 }
 
@@ -257,4 +260,60 @@ fn explain_serves_the_embedded_catalog_far_from_the_repo() {
         stdout.contains("ligature.dev/e/LIG-E114"),
         "catalog URL: {stdout}"
     );
+}
+
+#[test]
+fn budgets_gate_reports_the_ledger_table() {
+    // Profile-independent assertions only: a dev run enforces the bytes row
+    // and reports the time rows; the release run in CI enforces all of them.
+    let out = lig()
+        .current_dir(repo_root())
+        .args(["budgets"])
+        .output()
+        .expect("spawn lig budgets");
+    assert!(out.status.success(), "budgets gate green: {out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
+    assert!(stdout.contains("7146"), "D-8-pinned byte count: {stdout}");
+    assert!(
+        stdout.contains("all 10 row(s) within budget"),
+        "summary present: {stdout}"
+    );
+}
+
+#[test]
+fn no_std_gate_proves_or_demands_targets() {
+    // The gate is strict: a missing proof target is exit 1 with the fix. The
+    // test asserts the right behavior in BOTH environments — with the
+    // targets installed it proves the runtime + a generated unit compile
+    // no_std; without them it demands `rustup target add`.
+    let probe = Command::new("rustup")
+        .args(["target", "list", "--installed"])
+        .output()
+        .expect("probe rustup targets");
+    let installed = String::from_utf8_lossy(&probe.stdout);
+    let targets_ready = installed
+        .lines()
+        .any(|l| l.trim() == "thumbv7em-none-eabihf")
+        && installed
+            .lines()
+            .any(|l| l.trim() == "aarch64-unknown-none-softfloat");
+
+    let out = lig().args(["no-std"]).output().expect("spawn lig no-std");
+    if targets_ready {
+        assert!(out.status.success(), "no-std proof green: {out:?}");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(stdout.contains("proof green"), "{stdout}");
+        assert!(
+            stdout.contains("generated counter unit builds"),
+            "generated-unit leg: {stdout}"
+        );
+    } else {
+        assert_eq!(out.status.code(), Some(1), "missing targets are a failure");
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("rustup target add"),
+            "fix hint present: {stderr}"
+        );
+    }
 }
