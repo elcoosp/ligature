@@ -2,7 +2,10 @@
 //! host and updates through the const schedule. Every assertion here is a
 //! compile-clean fixture run end-to-end.
 
-use compile_clean::{component_use, counter, dynamic_style, event_object, for_keyed, for_list};
+use compile_clean::{
+    component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
+    slots_named, v_model,
+};
 use lig_runtime::{EvData, key_hash};
 use mock_host::MockHost;
 
@@ -105,6 +108,63 @@ fn component_use_builds_child_and_passes_props() {
         app.panel.frag.slot_is(1),
         "children slot filled (dynamic 1)"
     );
+}
+
+/// The §7.4 slot contract, end to end (M6): the parent's build mounts each
+/// use site's fill into the child's outlet holes by name — and a use site
+/// that does not fill a slot mounts the outlet's own fallback content.
+/// Items are filled, not recreated: both Panel instances render in place.
+#[test]
+fn slots_named_mount_fills_and_fallbacks_per_use_site() {
+    let mut h = MockHost::new();
+    let app = slots_named::App::build(&mut h, slots_named::AppProps::default());
+    // Use 1 fills the header (dynamic 1) and the default outlet (dynamic 2).
+    assert!(
+        app.panel.frag.slot_is(1),
+        "use 1: header slot filled from the element-valued prop"
+    );
+    assert!(app.panel.frag.slot_is(2), "use 1: default slot filled");
+    // Use 2 fills only the default outlet; the header outlet shows the
+    // child's own fallback fragment (mounted from the child's statics).
+    assert!(
+        app.panel_2.frag.slot_is(1),
+        "use 2: header slot shows the outlet's fallback content"
+    );
+    assert!(app.panel_2.frag.slot_is(2), "use 2: default slot filled");
+    assert_eq!(app.panel.title, "Status", "props ride the use site");
+    assert_eq!(app.panel_2.title, "Bare");
+}
+
+/// The §7.6 v-model sugar, end to end: the input event writes the
+/// synthesized setter through the payload, and the value attr replays.
+#[test]
+fn v_model_writes_through_the_event_payload() {
+    let mut h = MockHost::new();
+    let mut s = v_model::Signup::build(&mut h, v_model::SignupProps::default());
+    assert_eq!(s.email, "", "initial email");
+    let ev = EvData::new().current_target_value("me@ligature.dev");
+    s.fire_1(&mut h, &ev);
+    assert_eq!(s.email, "me@ligature.dev", "v-model wrote the setter");
+}
+
+/// The §7.1 multi-statement effect contract (M6): each statement of a block
+/// body lowers to its own effect reaction, and a single setTick flush runs
+/// both in schedule order.
+#[test]
+fn effect_multi_runs_every_statement_as_its_own_reaction() {
+    let mut h = MockHost::new();
+    let mut s = effect_multi::Sync::build(&mut h, effect_multi::SyncProps::default());
+    // The build-time init flush runs every effect once: log = "0", count = 0.
+    assert_eq!(s.log, "0", "init flush ran both statements");
+    assert_eq!(s.count, 0);
+    s.set_tick(7);
+    lig_runtime::flush(&mut s, &mut h);
+    assert_eq!(s.log, "7", "statement 1: log tracks the tick");
+    assert_eq!(s.count, 14, "statement 2: count ran in the same flush");
+    s.set_tick(9);
+    lig_runtime::flush(&mut s, &mut h);
+    assert_eq!(s.log, "9");
+    assert_eq!(s.count, 18, "both reactions re-run per flush");
 }
 
 #[test]
