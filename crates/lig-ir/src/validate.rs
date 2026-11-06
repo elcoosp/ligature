@@ -122,6 +122,16 @@ pub fn validate(m: &ViewModule) -> Vec<Violation> {
                         });
                     }
                 }
+                DynamicKind::Slot { fallback, .. } => {
+                    if let Some(fb) = fallback
+                        && fb.get() as usize >= n_frags
+                    {
+                        v.push(Violation {
+                            path: format!("{path}.slot.fallback"),
+                            message: "dangling fragment id".into(),
+                        });
+                    }
+                }
                 DynamicKind::PropPass { child, .. } if child.get() as usize >= n_frags => {
                     v.push(Violation {
                         path: format!("{path}.prop_pass"),
