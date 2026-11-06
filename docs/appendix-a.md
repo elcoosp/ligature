@@ -3,7 +3,7 @@
 Every gate in this repository pins one artifact in some way; exactly one
 artifact is pinned by all of them at once: the generated Rust for the
 `counter` fixture, committed at `fixtures/generated/counter.rs` and
-byte-pinned by `lig reproducibility` (D-8 — **7 146 bytes**,
+byte-pinned by `lig reproducibility` (D-8 — **7 437 bytes**,
 `0x85d06a5c087b3589` component digest). This appendix walks that file top
 to bottom: what each shape is, which architecture section it implements,
 and which gate holds it still. Read it next to the file — the quotes here
@@ -19,7 +19,7 @@ every compiler stage.
 
 ```text
 unit:  counter.rs
-size:  7 146 B (budget: 8 192 B — `lig budgets`, row gen_counter_bytes)
+size:  7 437 B (budget: 8 192 B — `lig budgets`, row gen_counter_bytes)
 maps:  dist/maps/counter.map.json — chained VLQ, per-arm attribution (M3)
 ir:    dist/ir/counter.json — canonical View IR v2 (§5.6)
 ```
@@ -199,6 +199,12 @@ capture the payload, mark the handler reaction, flush.
 ## 7. Run-once build (C4)
 
 ```rust
+        /// Run-once build (C4): executes top-to-bottom; reactivity lives
+        /// exclusively in reactions. M7 phases: slot assembly (mounts,
+        /// content attaches, fallback init-flush) → direct ref captures
+        /// → direct attaches → the initial flush (memos + binds) →
+        /// branch attaches + branch ref captures (branch content exists
+        /// only after the flush).
         pub fn build(h: &mut dyn Host, props: CounterProps) -> Self {
             let mut s = Self {
                 count: 0i64,
@@ -299,7 +305,7 @@ wiring to link on a bare-metal host.
 ## 10. The budget row (§14.2, M4)
 
 The unit is a budget line item, too: `lig budgets` measures its size
-(`gen_counter_bytes` — 7 146 B against an 8 192 B ceiling, enforced in
+(`gen_counter_bytes` — 7 437 B against an 8 192 B ceiling, enforced in
 every profile) and every stage that produced it (lower, canonical IR,
 codegen — `docs/benchmarks/budgets.toml` holds the full ledger with the
 reference medians). A regression in any of them fails CI with the row, the
