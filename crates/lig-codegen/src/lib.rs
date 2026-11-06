@@ -338,6 +338,7 @@ fn generate_component_pieces(
     let mut run_arms: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut list_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut item_methods: Vec<proc_macro2::TokenStream> = Vec::new();
+    let mut key_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut ref_captures: Vec<(String, usize)> = Vec::new();
     for rx in &rxs {
         let cname = syn::Ident::new(&format!("{prefix}{}", rx.const_name), Span::call_site());
@@ -470,11 +471,12 @@ fn generate_component_pieces(
                         });
                     }
                     DynamicKind::For(for_ir) => {
-                        // Unkeyed list reconcile (Index semantics, §7.5): the
-                        // keyed LIS diff ships as the runtime primitive
-                        // (`keyed_diff`, bench-gated) and drives patch-mode
-                        // updates; v1 fixtures use Solid `<For>`/`.map`
-                        // (unkeyed). Emission goes through a per-For method.
+                        // List reconcile (§7.5): keyed lists run the
+                        // sequential keyed plan (`plan_keyed` — removes,
+                        // moves, inserts as live-index steps, LIS-stable
+                        // shape); unkeyed lists keep the Index diff.
+                        // Emission goes through a per-For method plus the
+                        // per-item replay (and a key fn when keyed).
                         let slot = branch_slot_of_dynamic(frag, dynamic);
                         let Some(slot) = slot else { continue };
                         let body_info = frags.iter().find(|f| f.id == for_ir.body);
@@ -495,6 +497,9 @@ fn generate_component_pieces(
                                 self.#method(h, #slot);
                             }
                         });
+                        if for_ir.key.is_some() {
+                            key_methods.push(emit_key_method(module, for_ir, &item_ty)?);
+                        }
                         list_methods.push(emit_list_method(
                             module, for_ir, &item_ty, body_info, &prefix,
                         )?);
@@ -854,6 +859,7 @@ fn generate_component_pieces(
     });
     pieces.extend(apply_fns);
     pieces.extend(item_methods);
+    pieces.extend(key_methods);
     pieces.push(template_gen::gen_style_table(module, &prefix));
 
     // IR → generated-symbol links (source maps, §9.4).
@@ -1131,8 +1137,11 @@ fn emit_apply_fns(module: &ViewModule, frags: &[FragInfo]) -> Vec<proc_macro2::T
     Vec::new()
 }
 
-/// The per-For reconcile method (unkeyed Index diff, §7.5): mount new items,
-/// remove tails, then refresh surviving items' binds with the new values.
+/// The per-For reconcile method (§7.5): keyed lists run the sequential
+/// keyed plan (`plan_keyed` — removes, moves, inserts, each addressing the
+/// live list at apply time, then a full bind replay so index-driven binds
+/// track the new positions); unkeyed lists keep the Index diff (mount new
+/// items, remove tails, refresh survivors).
 #[allow(clippy::too_many_arguments)]
 fn emit_list_method(
     module: &ViewModule,
@@ -1178,26 +1187,138 @@ fn emit_list_method(
             quote! { #pname.clone() }
         })
         .collect();
-    Ok(quote! {
-        #[allow(clippy::needless_range_loop)]
-        fn #method(&mut self, h: &mut dyn Host, slot: usize) {
-            let items: ::alloc::vec::Vec<#item_ty_lit> = ::core::clone::Clone::clone(&(#src));
-            let old = self.frag.list_len(slot);
-            let common = old.min(items.len());
-            for i in common..items.len() {
-                self.frag.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
-            }
-            for i in (common..old).rev() {
-                self.frag.list_remove(h, slot, i);
-            }
-            #(#read_declares)*
-            for (i, it) in items.iter().enumerate().take(common) {
-                if let Some(f) = self.frag.list_item_mut(slot, i) {
-                    #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+    let body = if for_ir.key.is_some() {
+        let key_fn = syn::Ident::new(&format!("key_of_f{}", for_ir.body.get()), Span::call_site());
+        quote! {
+            fn #method(&mut self, h: &mut dyn Host, slot: usize) {
+                let items: ::alloc::vec::Vec<#item_ty_lit> = ::core::clone::Clone::clone(&(#src));
+                let old_len = self.frag.list_len(slot);
+                let mut old_keys: ::alloc::vec::Vec<u64> = ::alloc::vec::Vec::with_capacity(old_len);
+                for i in 0..old_len {
+                    old_keys.push(self.frag.list_key(slot, i).unwrap_or(u64::MAX));
+                }
+                let mut new_keys: ::alloc::vec::Vec<u64> =
+                    ::alloc::vec::Vec::with_capacity(items.len());
+                for (i, it) in items.iter().enumerate() {
+                    new_keys.push(#key_fn(it.clone(), i as i64));
+                }
+                for step in ::lig_runtime::plan_keyed(&old_keys, &new_keys) {
+                    match step {
+                        ::lig_runtime::SeqOp::Remove { index } => {
+                            self.frag.list_remove(h, slot, index);
+                        }
+                        ::lig_runtime::SeqOp::Move { from, to } => {
+                            self.frag.list_move(h, slot, from, to);
+                        }
+                        ::lig_runtime::SeqOp::Insert { key, index } => {
+                            self.frag.list_insert(
+                                h,
+                                slot,
+                                index,
+                                key,
+                                #body_tpl,
+                                #body_holes,
+                                #body_branches,
+                            );
+                        }
+                    }
+                }
+                #(#read_declares)*
+                for (i, it) in items.iter().enumerate() {
+                    if let Some(f) = self.frag.list_item_mut(slot, i) {
+                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                    }
                 }
             }
         }
+    } else {
+        quote! {
+            #[allow(clippy::needless_range_loop)]
+            fn #method(&mut self, h: &mut dyn Host, slot: usize) {
+                let items: ::alloc::vec::Vec<#item_ty_lit> = ::core::clone::Clone::clone(&(#src));
+                let old = self.frag.list_len(slot);
+                let common = old.min(items.len());
+                for i in common..items.len() {
+                    self.frag.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
+                }
+                for i in (common..old).rev() {
+                    self.frag.list_remove(h, slot, i);
+                }
+                #(#read_declares)*
+                for (i, it) in items.iter().enumerate().take(common) {
+                    if let Some(f) = self.frag.list_item_mut(slot, i) {
+                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                    }
+                }
+            }
+        }
+    };
+    Ok(body)
+}
+
+/// The per-For key fn (§7.5, keyed lists only): normalizes the key
+/// expression into the `u64` identity space the diff runs in — string keys
+/// hash (FNV-1a, `key_hash`), numeric/bool keys cast.
+fn emit_key_method(
+    module: &ViewModule,
+    for_ir: &lig_ir::fragment::ForIr,
+    item_ty: &Ty,
+) -> Result<proc_macro2::TokenStream, CodegenError> {
+    let Some(key_id) = for_ir.key else {
+        return Err(CodegenError::Unsupported(
+            "emit_key_method requires a keyed For",
+        ));
+    };
+    // Keys are item identities: a state read would re-identify items on
+    // unrelated writes. The frontends deny this at admission; codegen stays
+    // fail-closed.
+    if expr_reads_state(module.exprs.get(key_id)) {
+        return Err(CodegenError::Unsupported(
+            "For key must be a pure function of the item (no state reads)",
+        ));
+    }
+    let expr = module.exprs.get(key_id);
+    let key_ty = match expr {
+        lig_ir::expr::Expr::Local(l) if *l == for_ir.item => item_ty.clone(),
+        lig_ir::expr::Expr::Local(l) if for_ir.index.is_some_and(|ix| ix == *l) => Ty::Int,
+        _ => codegen_ty_of(module, expr),
+    };
+    let raw = gen_item_expr(module, key_id, for_ir, item_ty)?;
+    let norm = match &key_ty {
+        Ty::Str => quote!(::lig_runtime::key_hash(&(#raw))),
+        Ty::Int | Ty::Float | Ty::Bool => quote!((#raw) as u64),
+        _ => {
+            return Err(CodegenError::Unsupported(
+                "For key must lower to a string or number",
+            ));
+        }
+    };
+    let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
+    let name = syn::Ident::new(&format!("key_of_f{}", for_ir.body.get()), Span::call_site());
+    Ok(quote! {
+        fn #name(item: #item_ty_lit, index: i64) -> u64 {
+            #norm
+        }
     })
+}
+
+/// Whether the expression (forest) reads component state — sub-expressions
+/// hang inline (`Call` args, template holes), so a plain recursive match.
+fn expr_reads_state(e: &lig_ir::expr::Expr) -> bool {
+    use lig_ir::expr::Expr as E;
+    match e {
+        E::State(_) => true,
+        E::Field(inner, _) | E::Unary(_, inner) => expr_reads_state(inner),
+        E::Index(a, b) | E::Binary(_, a, b) | E::Ternary(a, b, _) => {
+            expr_reads_state(a) || expr_reads_state(b)
+        }
+        E::Array(items) => items.iter().any(expr_reads_state),
+        E::Tpl(parts) => parts
+            .iter()
+            .any(|p| matches!(p, lig_ir::expr::TplPart::Hole(h) if expr_reads_state(h))),
+        E::Call(_, args) => args.iter().any(expr_reads_state),
+        _ => false,
+    }
 }
 
 /// The `State` names read by a For body fragment's binds (sorted, deduped).
