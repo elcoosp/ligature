@@ -106,12 +106,46 @@ pub fn scan(source: &str) -> Result<Vec<Section>, Vec<LigDiagnostic>> {
                 break;
             };
             let tag_end = i + tag_end_rel;
-            let Some(close_rel) = source[tag_end..].find("</template") else {
+            // Walk nested template elements (M6: named slot fills are nested
+            // `<template #name>` elements): an open tag increments the depth,
+            // a close tag decrements it, and the section ends at the close
+            // that balances the block's own opening tag.
+            let content_start = tag_end + 1;
+            let mut depth = 0usize;
+            let mut p = content_start;
+            let mut content_end = None;
+            while p < bytes.len() {
+                if source[p..].starts_with("</template")
+                    && !bytes.get(p + 10).is_some_and(u8::is_ascii_alphanumeric)
+                {
+                    if depth == 0 {
+                        content_end = Some(p);
+                        break;
+                    }
+                    depth -= 1;
+                    p += 1;
+                    continue;
+                }
+                if source[p..].starts_with("<template")
+                    && !bytes.get(p + 9).is_some_and(u8::is_ascii_alphanumeric)
+                {
+                    if let Some(gt) = source[p..].find('>') {
+                        if !source[p..=p + gt].ends_with("/>") {
+                            depth += 1;
+                        }
+                        p += gt + 1;
+                    } else {
+                        depth += 1;
+                        p += 1;
+                    }
+                    continue;
+                }
+                p += 1;
+            }
+            let Some(content_end) = content_end else {
                 diags.push(err(i, bytes.len(), "unterminated <template> block"));
                 break;
             };
-            let content_start = tag_end + 1;
-            let content_end = tag_end + close_rel;
             let Some(gt) = source[content_end..].find('>') else {
                 diags.push(err(
                     content_end,
@@ -284,6 +318,20 @@ mod tests {
         let sections = scan(src).expect("scans");
         assert_eq!(sections.len(), 2);
         assert!(sections[0].script.is_some() && sections[1].script.is_some());
+    }
+
+    /// M6: named slot fills are nested `<template #name>` elements — the
+    /// section scanner must balance them, not stop at the first close tag.
+    #[test]
+    fn nested_template_fills_do_not_close_the_section() {
+        let src = "<script setup>defineOptions({ name: \"A\" });</script>\n<template><Child><template #header><b/></template></Child></template>\n";
+        let sections = scan(src).expect("scans");
+        assert_eq!(sections.len(), 1);
+        let (s, e) = sections[0].template;
+        assert_eq!(
+            &src[s..e],
+            "<Child><template #header><b/></template></Child>"
+        );
     }
 
     #[test]
