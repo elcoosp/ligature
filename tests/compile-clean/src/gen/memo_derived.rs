@@ -54,7 +54,11 @@ pub mod generated {
             self.frag.mark_mask(1u64);
         }
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
-        /// exclusively in reactions.
+        /// exclusively in reactions. M7 phases: slot assembly (mounts,
+        /// content attaches, fallback init-flush) → direct ref captures
+        /// → direct attaches → the initial flush (memos + binds) →
+        /// branch attaches + branch ref captures (branch content exists
+        /// only after the flush).
         pub fn build(h: &mut dyn Host, props: SumProps) -> Self {
             let mut s = Self {
                 a: 2i64,

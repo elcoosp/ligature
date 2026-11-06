@@ -14,7 +14,7 @@ pub mod generated {
         pub color: ::alloc::string::String,
         pub ev: ::lig_runtime::EvData,
         pub frag: ::lig_runtime::Fragment,
-        p_0: ::alloc::string::String,
+        p_f0_d0: ::alloc::string::String,
     }
     #[derive(Default)]
     pub struct SwatchProps {}
@@ -47,12 +47,16 @@ pub mod generated {
             self.frag.mark_mask(1u64);
         }
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
-        /// exclusively in reactions.
+        /// exclusively in reactions. M7 phases: slot assembly (mounts,
+        /// content attaches, fallback init-flush) → direct ref captures
+        /// → direct attaches → the initial flush (memos + binds) →
+        /// branch attaches + branch ref captures (branch content exists
+        /// only after the flush).
         pub fn build(h: &mut dyn Host, props: SwatchProps) -> Self {
             let mut s = Self {
                 color: ::alloc::string::String::from("crimson"),
                 ev: ::lig_runtime::EvData::new(),
-                p_0: ::alloc::string::String::new(),
+                p_f0_d0: ::alloc::string::String::new(),
                 frag: ::lig_runtime::Fragment::new(
                     h,
                     Swatch_TPL_T0,
@@ -78,8 +82,8 @@ pub mod generated {
                     let v: ::alloc::string::String = ::core::clone::Clone::clone(
                         &(self.color),
                     );
-                    if v != self.p_0 {
-                        self.p_0 = v.clone();
+                    if v != self.p_f0_d0 {
+                        self.p_f0_d0 = v.clone();
                         self.frag
                             .set_style_dyn(
                                 h,

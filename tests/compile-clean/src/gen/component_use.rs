@@ -43,7 +43,11 @@ pub mod generated {
     const App_R0_BIND_D0: u8 = 0u8;
     impl App {
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
-        /// exclusively in reactions.
+        /// exclusively in reactions. M7 phases: slot assembly (mounts,
+        /// content attaches, fallback init-flush) → direct ref captures
+        /// → direct attaches → the initial flush (memos + binds) →
+        /// branch attaches + branch ref captures (branch content exists
+        /// only after the flush).
         pub fn build(h: &mut dyn Host, props: AppProps) -> Self {
             let mut s = Self {
                 ev: ::lig_runtime::EvData::new(),
@@ -60,6 +64,7 @@ pub mod generated {
                 .mount_slot(
                     h,
                     1usize,
+                    ::lig_runtime::SlotOrigin::Fill,
                     App_TPL_T0,
                     App_HOLE_ANCHORS_F1,
                     App_BRANCH_ANCHORS_F1,
@@ -145,7 +150,11 @@ pub mod generated {
             self.frag.mark_mask(0u64);
         }
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
-        /// exclusively in reactions.
+        /// exclusively in reactions. M7 phases: slot assembly (mounts,
+        /// content attaches, fallback init-flush) → direct ref captures
+        /// → direct attaches → the initial flush (memos + binds) →
+        /// branch attaches + branch ref captures (branch content exists
+        /// only after the flush).
         pub fn build(h: &mut dyn Host, props: PanelProps) -> Self {
             let mut s = Self {
                 title: props.title,
@@ -158,7 +167,7 @@ pub mod generated {
                     Panel_BRANCH_ANCHORS_F2,
                 ),
             };
-            s.frag.mark_mask(0x3);
+            s.frag.mark_mask(0x6);
             ::lig_runtime::flush(&mut s, h);
             s
         }
