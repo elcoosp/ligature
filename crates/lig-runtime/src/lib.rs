@@ -34,7 +34,7 @@ pub use host::{
     AttrVal, EvData, EventKind, HandlerId, HookId, Host, NodeId, PropVal, StyleConstId,
     TemplateDesc,
 };
-pub use reconcile::{ListOp, keyed_diff, lis_sequence, unkeyed_diff};
+pub use reconcile::{ListOp, SeqOp, key_hash, keyed_diff, lis_sequence, plan_keyed, unkeyed_diff};
 pub use schedule::{MAX_PASSES, Reactions, Schedule, flush};
 pub use template::{AnchorStep, Template, TplAttr, TplNode};
 
