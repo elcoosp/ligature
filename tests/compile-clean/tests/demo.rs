@@ -2,8 +2,8 @@
 //! host and updates through the const schedule. Every assertion here is a
 //! compile-clean fixture run end-to-end.
 
-use compile_clean::{component_use, counter, dynamic_style, event_object, for_list};
-use lig_runtime::EvData;
+use compile_clean::{component_use, counter, dynamic_style, event_object, for_keyed, for_list};
+use lig_runtime::{EvData, key_hash};
 use mock_host::MockHost;
 
 #[test]
@@ -37,6 +37,53 @@ fn for_list_mounts_and_reconciles_items() {
     app.set_names(vec!["alpha".into()]);
     lig_runtime::flush(&mut app, &mut h);
     assert_eq!(app.frag.list_len(0), 1, "tails removed");
+}
+
+/// The §7.5 keyed contract, end to end: a reorder moves the existing item
+/// fragments (LIS-stable shape — one host `Move`, no `Create`/`Destroy`
+/// churn), keys track the new sequence, and the text binds replay.
+#[test]
+fn for_keyed_reorders_without_recreating_items() {
+    let mut h = MockHost::new();
+    let mut app = for_keyed::Tags::build(&mut h, for_keyed::TagsProps::default());
+    assert_eq!(app.frag.list_len(0), 3, "alpha/beta/gamma mounted");
+    let creates_before = h.count_kind("Create");
+    // Rotate the tail to the front: [gamma, alpha, beta].
+    app.set_tags(vec!["gamma".into(), "alpha".into(), "beta".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(
+        h.count_kind("Create"),
+        creates_before,
+        "keyed reorder creates nothing"
+    );
+    assert_eq!(h.count_kind("Destroy"), 0, "keyed reorder destroys nothing");
+    assert_eq!(h.count_kind("Move"), 1, "rotation is one LIS-stable move");
+    let expected = ["gamma", "alpha", "beta"]
+        .iter()
+        .map(|s| key_hash(s))
+        .collect::<Vec<_>>();
+    for (i, k) in expected.iter().enumerate() {
+        assert_eq!(
+            app.frag.list_key(0, i),
+            Some(*k),
+            "key order tracks position {i}"
+        );
+    }
+    // Removal + insertion still route through the keyed diff.
+    app.set_tags(vec!["alpha".into(), "delta".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.frag.list_len(0), 2, "one kept, one inserted");
+    let expected = ["alpha", "delta"]
+        .iter()
+        .map(|s| key_hash(s))
+        .collect::<Vec<_>>();
+    for (i, k) in expected.iter().enumerate() {
+        assert_eq!(
+            app.frag.list_key(0, i),
+            Some(*k),
+            "key order after diff at {i}"
+        );
+    }
 }
 
 #[test]
