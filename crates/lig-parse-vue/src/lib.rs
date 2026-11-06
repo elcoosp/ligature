@@ -2063,7 +2063,7 @@ impl ComponentLowering<'_> {
                     continue;
                 }
                 self.deny_structural_content_root(fill_root[0]);
-                let fill = self.fragment_from_elem(fill_root[0], "slotfill");
+                let fill = self.fragment_from_content_root(fill_root[0], "slotfill");
                 self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
                 slots.push(SlotIr {
                     name: self.intern(name.clone()),
@@ -2084,7 +2084,7 @@ impl ComponentLowering<'_> {
         }
         if let Some(child_el) = plain_element {
             self.deny_structural_content_root(child_el);
-            let fill = self.fragment_from_elem(child_el, "slotfill");
+            let fill = self.fragment_from_content_root(child_el, "slotfill");
             self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
             slots.push(SlotIr {
                 name: self.intern("default"),
@@ -2197,72 +2197,106 @@ impl ComponentLowering<'_> {
             return None;
         }
         self.deny_structural_content_root(element_children[0]);
-        let fill = self.fragment_from_elem(element_children[0], "slotfallback");
+        let fill = self.fragment_from_content_root(element_children[0], "slotfallback");
         self.ensure_static_slot_content(fill, (el.span.0 as u32, el.span.1 as u32));
         Some(fill)
     }
 
-    /// Structural constructs on a slot-content ROOT are fail-closed (M7):
-    /// the parent mounts content unconditionally, branch/list tables would
-    /// hang on the wrong fragment, and a component use needs grandchild
-    /// prop-pass through the content. `fragment_from_elem` strips the
-    /// directives (its branch/for-body call sites rely on that) and lowers
-    /// component tags as plain elements, which would silently DROP the
-    /// construct — M6-era fail-opens this milestone closes. Descendants
-    /// keep the full lowering: their v-if/v-for produce dynamics, which
-    /// `ensure_static_slot_content` denies.
+    /// Component uses, nested outlets, and chain-tail directives on a
+    /// slot-content ROOT stay fail-closed (M8): a component use needs
+    /// grandchild prop-pass through the mounted content, a `<slot>` root is
+    /// a nested outlet (and `lower_element` does not dispatch the tag —
+    /// without this check it would silently lower as a plain element, the
+    /// M6-era fail-open shape), and `v-else-if`/`v-else` roots have no chain
+    /// to join (the fill mounts unconditionally; put the whole chain on the
+    /// content's children instead). Structural ROOTS (`v-if`/`v-for`) are
+    /// ADMITTED since M8 — `fragment_from_content_root` lowers them onto the
+    /// content fragment. `fragment_from_elem` strips the directives (its
+    /// branch/for-body call sites rely on that), so without the M8 root
+    /// lowering a `v-if` root would silently DROP the construct.
     fn deny_structural_content_root(&mut self, el: &TplElement) {
-        if el.attrs.iter().any(|a| {
-            matches!(
-                a,
-                TplAttr::If { .. } | TplAttr::ElseIf { .. } | TplAttr::Else | TplAttr::For { .. }
-            )
-        }) {
+        if el
+            .attrs
+            .iter()
+            .any(|a| matches!(a, TplAttr::ElseIf { .. } | TplAttr::Else))
+        {
             self.diags.push(LigDiagnostic::error(
                 "LIG-E001",
-                "structural directives (v-if/v-for) on slot-content roots are not addressed by the runtime (M7 defers branch and list tables on content fragments)",
+                "`v-else-if`/`v-else` on slot-content roots have no chain to join — put the whole chain on the content's children",
                 Span::new(el.span.0 as u32, el.span.1 as u32),
             ));
         }
         if is_component_tag(&el.tag) {
             self.diags.push(LigDiagnostic::error(
                 "LIG-E001",
-                "component uses on slot-content roots are not addressed by the runtime (M7 defers grandchild prop-pass through content)",
+                "component uses on slot-content roots are not addressed by the runtime (grandchild prop-pass through mounted content is deferred)",
+                Span::new(el.span.0 as u32, el.span.1 as u32),
+            ));
+        }
+        if el.tag == "slot" {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "nested slot outlets inside slot content are not addressed by the runtime (composed addressing contexts for fills are deferred)",
                 Span::new(el.span.0 as u32, el.span.1 as u32),
             ));
         }
     }
 
-    /// The M7 slot-content contract: fills and fallbacks mount as live
+    /// The M8 slot-content contract: fills and fallbacks mount as live
     /// fragments — scalar binds (text/class/attr/style-prop/html), events,
     /// and refs on the content itself are addressed by slot-scoped run arms
-    /// (`slot_fill_mut`/`slot_fallback_mut` + `attach_foreign`). Structural
-    /// constructs stay fail-closed: branch/list tables hang on `self.frag`
-    /// (an If/For here would mount into the wrong fragment), prop-pass
-    /// crosses into a grandchild, and nested outlets need composed
-    /// contexts.
+    /// (`slot_fill_mut`/`slot_fallback_mut` + `attach_foreign`), and since
+    /// M8 the content may be STRUCTURAL: If/For dynamics on the content
+    /// mount branch/list tables on the content fragment, addressed through
+    /// composed `Ctx` walks (`Branch { base: Fill/Fallback }`). Still
+    /// fail-closed anywhere inside content: component uses (grandchild
+    /// prop-pass through mounted instances), nested outlets (composed
+    /// addressing contexts for fills), and children/prop-pass/whole-style
+    /// dynamics. Event handlers inside list item bodies stay denied (the
+    /// LIG-E118 discipline — per-item dispatch needs keyed components).
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: (u32, u32)) {
-        let f = &self.module.fragments[frag.get() as usize];
-        for d in &f.dynamics {
-            let denied = match &d.kind {
+        self.content_contract(frag, false, span);
+    }
+
+    /// The recursive content walk: `in_list_item` marks fragments mounted as
+    /// For bodies (their binds are the per-item replay's; events there are
+    /// the LIG-E118 denial).
+    fn content_contract(&mut self, frag: FragmentId, in_list_item: bool, span: (u32, u32)) {
+        let (dynamics, children) = {
+            let f = &self.module.fragments[frag.get() as usize];
+            (f.dynamics.clone(), f.children.clone())
+        };
+        for d in &dynamics {
+            let denied: Option<String> = match &d.kind {
+                // Scalar binds, refs, and (M8) the structural constructs
+                // themselves are admitted on content.
                 DynamicKind::Text
                 | DynamicKind::Html
                 | DynamicKind::Attr { .. }
                 | DynamicKind::Class
                 | DynamicKind::StyleProp { .. }
-                | DynamicKind::Event { .. }
-                | DynamicKind::Ref => None,
-                DynamicKind::If(_) | DynamicKind::For(_) => Some(
-                    "If/For inside slot content is not addressed by the runtime (M7 defers branch and list tables on content fragments)",
-                ),
+                | DynamicKind::Ref
+                | DynamicKind::If(_)
+                | DynamicKind::For(_) => None,
+                DynamicKind::Event { .. } => in_list_item.then(|| {
+                    "event handlers inside list item bodies are not admitted in v1 — hoist the \
+                     handler to the list level (the LIG-E118 discipline)"
+                        .to_string()
+                }),
                 DynamicKind::Component(_) => Some(
-                    "component uses inside slot content are not addressed by the runtime (M7 defers grandchild prop-pass through content)",
+                    "component uses inside slot content are not addressed by the runtime \
+                     (grandchild prop-pass through mounted content is deferred)"
+                        .to_string(),
                 ),
                 DynamicKind::Slot { .. } => Some(
-                    "nested slot outlets inside slot content are not addressed by the runtime (M7 defers composed addressing contexts)",
+                    "nested slot outlets inside slot content are not addressed by the runtime \
+                     (composed addressing contexts for fills are deferred)"
+                        .to_string(),
                 ),
                 DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
-                    "children/prop-pass/whole-style dynamics inside slot content are outside the admitted subset (M2)",
+                    "children/prop-pass/whole-style dynamics inside slot content are outside the \
+                     admitted subset (M2)"
+                        .to_string(),
                 ),
             };
             if let Some(why) = denied {
@@ -2273,13 +2307,94 @@ impl ComponentLowering<'_> {
                 ));
             }
         }
-        if !f.children.is_empty() {
-            self.diags.push(LigDiagnostic::error(
-                "LIG-E001",
-                "slot fill/fallback content must be a single element — nested structural fragments (If/For bodies, nested fills) are not addressed by the runtime",
-                Span::new(span.0, span.1),
-            ));
+        // Structural bodies recurse: If branches and For bodies keep the
+        // full content contract (binds, events, refs — and further
+        // structural constructs, the composed contexts are recursive).
+        let mut structural: Vec<(FragmentId, bool)> = Vec::new();
+        {
+            let f = &self.module.fragments[frag.get() as usize];
+            for d in &f.dynamics {
+                match &d.kind {
+                    DynamicKind::If(i) => {
+                        structural.push((i.then, false));
+                        if let Some(el) = i.else_ {
+                            structural.push((el, false));
+                        }
+                    }
+                    DynamicKind::For(fo) => structural.push((fo.body, true)),
+                    _ => {}
+                }
+            }
         }
+        for child in children {
+            if let Some((_, child_in_list)) = structural.iter().find(|(id, _)| *id == child) {
+                self.content_contract(child, *child_in_list, span);
+            } else {
+                self.content_contract(child, in_list_item, span);
+            }
+        }
+    }
+
+    /// The fill/fallback fragment from its root element (M8): a structural
+    /// root (`v-if`/`v-for` on the content root element) lowers ONTO the
+    /// content fragment — the If/For dynamic and its branch/list bodies hang
+    /// on the content, which is exactly the composed-context shape the
+    /// codegen addresses. Plain roots lower through `fragment_from_elem`.
+    fn fragment_from_content_root(&mut self, el: &TplElement, kind_name: &str) -> FragmentId {
+        let has_if = el.attrs.iter().any(|a| matches!(a, TplAttr::If { .. }));
+        let has_for = el.attrs.iter().any(|a| matches!(a, TplAttr::For { .. }));
+        if !has_if && !has_for {
+            return self.fragment_from_elem(el, kind_name);
+        }
+        let name = format!("{kind_name}_{}", self.branch_counter);
+        self.branch_counter += 1;
+        let name_id = self.intern(name);
+        let frag = self.module.push_fragment(FragmentIr {
+            name: name_id,
+            template: TemplateId::new(0),
+            dynamics: vec![],
+            children: vec![],
+            props: vec![],
+            returns: vec![],
+        });
+        self.frames.push(Frame {
+            fragment: frag,
+            dynamics: vec![],
+            anchors: vec![],
+            children: vec![],
+        });
+        let mut path = Vec::new();
+        let root = if let Some(TplAttr::For { item, index, list }) =
+            el.attrs.iter().find(|a| matches!(a, TplAttr::For { .. }))
+        {
+            let (item, index, list) = (item.clone(), index.clone(), *list);
+            self.lower_for(el, &item, index.as_deref(), list, &path)
+        } else if let Some(TplAttr::If { expr }) =
+            el.attrs.iter().find(|a| matches!(a, TplAttr::If { .. }))
+        {
+            // No siblings to join: a content root carries its own chain.
+            let expr = *expr;
+            let nodes = [TplNode::Elem(el.clone())];
+            let mut out = Vec::new();
+            let _consumed = self.lower_if_chain(el, expr, &nodes, 0, &path, &mut out);
+            out.into_iter().next().unwrap_or(NodeIr::Marker)
+        } else {
+            self.lower_element(el, &mut path)
+        };
+        let tpl = self.module.intern_template(TemplateIr::new(root));
+        let fi = frag.get() as usize;
+        self.module.fragments[fi].template = tpl;
+        let frame = self.frames.last().expect("open frame");
+        self.module.fragments[fi]
+            .dynamics
+            .clone_from(&frame.dynamics);
+        self.module.fragments[fi]
+            .children
+            .clone_from(&frame.children);
+        assign_anchor_paths(self.module, frag, &frame.anchors);
+        self.frames.pop();
+        self.frame().children.push(frag);
+        frag
     }
 }
 
@@ -2767,15 +2882,14 @@ const label = ref("live");
         );
     }
 
-    /// The M7 fail-closed boundary (Vue leg): structural constructs inside
-    /// slot content are denied with LIG-E001 — branch/list tables hang on
-    /// `self.frag`, prop-pass crosses into a grandchild.
+    /// The M8 slot-content contract (Vue leg): the content may be STRUCTURAL
+    /// — `v-if`/`v-for` on content roots lower ONTO the content fragment
+    /// (`fragment_from_content_root`), descendants keep the full lowering,
+    /// and the branch/list tables address through composed `Ctx` walks.
     #[test]
-    fn slot_content_stays_fail_closed_on_structural_constructs() {
-        let cases: [(&str, &str); 3] = [
-            // v-if inside a fill
-            (
-                r#"<script setup>
+    fn slot_content_admits_structural_constructs() {
+        // v-if on the fill root lowers onto the fill fragment.
+        let src = r#"<script setup lang="ts">
 defineOptions({ name: "App" });
 const on = ref(true);
 </script>
@@ -2784,12 +2898,27 @@ const on = ref(true);
     <template #header><p v-if="on">hi</p></template>
   </Panel>
 </template>
-"#,
-                "If in fill",
-            ),
-            // v-for inside a fallback
-            (
-                r#"<script setup>
+<script setup>
+defineOptions({ name: "Panel" });
+</script>
+<template><section><slot name="header" /><slot name="foot" /></section></template>
+"#;
+        let m = lower_module(src, "structural_fill.vue").expect("lowers");
+        let v = lig_ir::validate::validate(&m);
+        assert!(v.is_empty(), "invariants must hold: {v:?}");
+        let fill = m
+            .fragments
+            .iter()
+            .find(|f| m.strings.get(f.name).starts_with("slotfill"))
+            .expect("fill fragment");
+        assert!(
+            fill.dynamics
+                .iter()
+                .any(|d| matches!(d.kind, lig_ir::DynamicKind::If(_))),
+            "the v-if lowers onto the fill fragment: {fill:?}"
+        );
+        // v-for on the fallback root lowers onto the fallback fragment.
+        let src = r#"<script setup lang="ts">
 defineOptions({ name: "Panel" });
 const rows = ref(["a"]);
 </script>
@@ -2800,12 +2929,30 @@ const rows = ref(["a"]);
     </slot>
   </section>
 </template>
-"#,
-                "For in fallback",
-            ),
+"#;
+        let m = lower_module(src, "structural_fallback.vue").expect("lowers");
+        let fb = m
+            .fragments
+            .iter()
+            .find(|f| m.strings.get(f.name).starts_with("slotfallback"))
+            .expect("fallback fragment");
+        assert!(
+            fb.dynamics
+                .iter()
+                .any(|d| matches!(d.kind, lig_ir::DynamicKind::For(_))),
+            "the v-for lowers onto the fallback fragment: {fb:?}"
+        );
+    }
+
+    /// The M8 fail-closed boundary (Vue leg): component uses and nested
+    /// outlets inside slot content stay denied with LIG-E001 — grandchild
+    /// prop-pass and composed fill contexts are deferred.
+    #[test]
+    fn slot_content_stays_fail_closed_on_components_and_outlets() {
+        let cases: [(&str, &str); 2] = [
             // Component use inside a fill
             (
-                r#"<script setup>
+                r#"<script setup lang="ts">
 defineOptions({ name: "App" });
 </script>
 <template>
@@ -2815,6 +2962,19 @@ defineOptions({ name: "App" });
 </template>
 "#,
                 "Component in fill",
+            ),
+            // Nested outlet inside a fallback
+            (
+                r#"<script setup lang="ts">
+defineOptions({ name: "Panel" });
+</script>
+<template>
+  <section>
+    <slot name="foot"><slot name="inner" /></slot>
+  </section>
+</template>
+"#,
+                "Slot in fallback",
             ),
         ];
         for (body, what) in cases {
