@@ -1,9 +1,9 @@
 # Ligature CI (§13). Gates: fmt, clippy pedantic (-D warnings), tests,
 # bench compilation (benched from day one, §14.2), S4 canonical-IR parity
-# (both frontend legs), D-8 reproducibility, and the S2 patch-spike budget
-# (< 1 s save→frame). The gates ship in the `lig` CLI itself (M2: the
-# former xtask folded into `lig fixtures …` / `lig reproducibility` /
-# `lig patch-spike`).
+# (both frontend legs), D-8 reproducibility, the S2 patch-spike budget
+# (< 1 s save→frame), the §14.2 budget ledger (M4), and the §10 no_std proof
+# (M4). The gates ship in the `lig` CLI itself (M2: the former xtask folded
+# into `lig fixtures …` / `lig reproducibility` / `lig patch-spike`).
 name: CI
 
 on:
@@ -63,6 +63,38 @@ jobs:
         uses: Swatinem/rust-cache@v2
       - name: save→frame budget gate
         run: cargo run -p lig-cli -- patch-spike
+
+  budgets:
+    # §14.2 budget ledger (M4): the bench workloads re-measured in-process
+    # against the committed ceilings. Time budgets are release numbers — the
+    # enforcement run is `--release` (the dev profile measures only).
+    name: §14.2 budget ledger (release)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: budget ledger gate
+        run: cargo run -p lig-cli --release -- budgets
+
+  no-std:
+    # §10 no_std proof (M4): the structural contract (zero deps, forbid
+    # unsafe, std test-only) plus bare-metal builds of lig-runtime and a
+    # generated unit for thumbv7em + aarch64-none.
+    name: §10 no_std proof
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install pinned toolchain (rust-toolchain.toml)
+        uses: actions-rust-lang/setup-rust-toolchain@v2
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+      - name: Install no_std proof targets
+        run: rustup target add thumbv7em-none-eabihf aarch64-unknown-none-softfloat
+      - name: no_std proof gate
+        run: cargo run -p lig-cli -- no-std
 
   bench-swc:
     # §2.5 / §14.2: Oxc vs SWC re-benchmark on our own workload. SWC is
