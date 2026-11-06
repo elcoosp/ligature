@@ -175,7 +175,22 @@ struct ComponentLowering<'a, 'm> {
     scope: ComponentScope,
     branch_counter: u32,
     frames: Vec<Frame>,
+    /// Set while lowering a `.map` body whose root element carries `key={…}`
+    /// (§7.5): the root element's `key` attribute is consumed as the list key
+    /// and must not become an item-template attribute. Consumed by the first
+    /// `jsx_element` call (the body's root).
+    skip_root_key: bool,
     _marker: std::marker::PhantomData<&'m ()>,
+}
+
+/// The raw `key` attribute detection result on a `.map` body element.
+enum MapKeyAttr<'a> {
+    /// No `key` attribute — the list stays unkeyed (Index diff).
+    None,
+    /// A `key` was found but is malformed (diagnostic already recorded).
+    Invalid,
+    /// `(attribute span, key expression source)`.
+    Found(oxc_span::Span, &'a Expression<'a>),
 }
 
 fn lower_component(
@@ -203,6 +218,7 @@ fn lower_component(
         diags,
         scope,
         branch_counter: 0,
+        skip_root_key: false,
         frames: vec![Frame {
             fragment: root,
             dynamics: vec![],
@@ -635,26 +651,68 @@ impl ComponentLowering<'_, '_> {
     /// `createEffect(() => …)` / `watchEffect(…)` → a post-tier reaction
     /// (§7.1) — shared by the declarator and bare-statement spellings.
     fn lower_effect_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>) {
-        if let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) {
-            let body = match arg {
-                Expression::ArrowFunctionExpression(arrow) => arrow_body_expr(&arrow.body),
-                other => Some(other),
-            };
-            if let Some(body) = body {
-                match self.lower_expr(body) {
-                    Ok(body_id) => {
-                        let reads = self.collect_reads(body_id);
-                        let owner = self.frames[0].fragment;
-                        self.push_reaction(ReactionDecl {
-                            kind: ReactionKind::Effect { tier: Tier::Post },
-                            reads,
-                            writes: vec![],
-                            body: body_id,
-                            owner,
-                        });
+        let Some(arg) = call.arguments.first().and_then(|a| a.as_expression()) else {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "createEffect requires a callback argument",
+                Span::new(call.span.start, call.span.end),
+            ));
+            return;
+        };
+        // Statement spellings (§7.1, M6): a block body lowers each expression
+        // statement as its own effect reaction — reads/writes stay per
+        // statement, the const schedule stays exact. Multi-statement bodies
+        // were silently truncated to the first statement before M6.
+        let stmts: Vec<&Expression<'_>> = match arg {
+            Expression::ArrowFunctionExpression(arrow) => {
+                if let Some(e) = arrow.body.as_expression() {
+                    vec![e]
+                } else {
+                    let ArrowFunctionBody::FunctionBody(fb) = &arrow.body else {
+                        unreachable!("a non-expression arrow body is a FunctionBody");
+                    };
+                    for stmt in &fb.statements {
+                        if !matches!(stmt, Statement::ExpressionStatement(_)) {
+                            self.diags.push(LigDiagnostic::error(
+                                "LIG-E001",
+                                "effect bodies admit expression statements only (declarations, `if`, and `return` are outside the subset)",
+                                Span::new(stmt.span().start, stmt.span().end),
+                            ));
+                        }
                     }
-                    Err(diag) => self.diags.push(diag),
+                    fb.statements
+                        .iter()
+                        .filter_map(|s| match s {
+                            Statement::ExpressionStatement(es) => Some(&es.expression),
+                            _ => None,
+                        })
+                        .collect()
                 }
+            }
+            other => vec![other],
+        };
+        if stmts.is_empty() {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "effect bodies admit at least one expression statement",
+                Span::new(arg.span().start, arg.span().end),
+            ));
+            return;
+        }
+        for body_src in stmts {
+            match self.lower_expr(body_src) {
+                Ok(body_id) => {
+                    let reads = self.collect_reads(body_id);
+                    let owner = self.frames[0].fragment;
+                    self.push_reaction(ReactionDecl {
+                        kind: ReactionKind::Effect { tier: Tier::Post },
+                        reads,
+                        writes: vec![],
+                        body: body_id,
+                        owner,
+                    });
+                }
+                Err(diag) => self.diags.push(diag),
             }
         }
     }
@@ -718,12 +776,18 @@ impl ComponentLowering<'_, '_> {
         if tag == "For" && !self.scope.component_names.iter().any(|n| n == "For") {
             return self.lower_for_component(el, path);
         }
+        if tag == "Slot" && !self.scope.component_names.iter().any(|n| n == "Slot") {
+            return self.lower_slot_outlet(el, path);
+        }
         if is_component {
             return self.lower_component_use(&tag, el, path);
         }
 
         let mut static_attrs: Vec<StaticAttr> = Vec::new();
         let mut style: Option<StyleConstId> = None;
+        // A `.map` body root's `key` attribute is consumed as the list key
+        // (§7.5) — it never becomes an item-template attribute.
+        let skip_key_here = std::mem::take(&mut self.skip_root_key);
 
         for item in &el.opening_element.attributes {
             match item {
@@ -732,6 +796,9 @@ impl ComponentLowering<'_, '_> {
                         continue;
                     };
                     let name = name_id.name.to_string();
+                    if skip_key_here && name == "key" {
+                        continue;
+                    }
                     let Some(value) = &attr.value else { continue };
                     match value {
                         JSXAttributeValue::StringLiteral(s) => {
@@ -1382,6 +1449,131 @@ impl ComponentLowering<'_, '_> {
         Ok(Some(expr))
     }
 
+    /// The `<Slot>` outlet (§7.4, M6 — the ligature Solid spelling; real
+    /// Solid passes slots as props, this compiler extends the tag set like
+    /// `<Show>`/`<For>`): `<Slot name="header">fallback</Slot>` or a bare
+    /// `<Slot />`. The children lower to the outlet's fallback fragment
+    /// (shown when a use site provides no fill for the name).
+    fn lower_slot_outlet(&mut self, el: &oxc_ast::ast::JSXElement<'_>, path: &[u32]) -> NodeIr {
+        let name_attr = el.opening_element.attributes.iter().find_map(|item| {
+            let JSXAttributeItem::Attribute(attr) = item else {
+                return None;
+            };
+            let JSXAttributeName::Identifier(id) = &attr.name else {
+                return None;
+            };
+            if id.name != "name" {
+                return None;
+            }
+            match &attr.value {
+                Some(JSXAttributeValue::StringLiteral(s)) => {
+                    Some(s.value.as_str().unwrap_or("").to_string())
+                }
+                _ => None,
+            }
+        });
+        // A non-static `name` is fail-closed (the outlet name is an identity,
+        // not a binding).
+        for item in &el.opening_element.attributes {
+            let JSXAttributeItem::Attribute(attr) = item else {
+                continue;
+            };
+            let JSXAttributeName::Identifier(id) = &attr.name else {
+                continue;
+            };
+            if id.name == "name" && !matches!(attr.value, Some(JSXAttributeValue::StringLiteral(_)))
+            {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "<Slot> `name` must be a static string — slot names are identities",
+                    Span::new(el.opening_element.span.start, el.opening_element.span.end),
+                ));
+                return NodeIr::Marker;
+            }
+        }
+        let slot_name = name_attr.unwrap_or_else(|| "default".to_string());
+        let Ok(fallback) = self.slot_fallback_from_children(el) else {
+            return NodeIr::Marker;
+        };
+        let slot_name_id = self.intern(slot_name);
+        let null = self.module.insert_expr(Expr::Lit(Lit::Null));
+        self.push_dynamic(
+            DynamicKind::Slot {
+                name: slot_name_id,
+                fallback,
+            },
+            null,
+            vec![],
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            el.span(),
+        );
+        NodeIr::Marker
+    }
+
+    /// One element child of a slot outlet lowers to the fallback fragment;
+    /// anything else (multi-element, bare text, dynamic content) is
+    /// fail-closed. `None` = no fallback content.
+    fn slot_fallback_from_children(
+        &mut self,
+        el: &oxc_ast::ast::JSXElement<'_>,
+    ) -> Result<Option<FragmentId>, ()> {
+        let element_children: Vec<&oxc_ast::ast::JSXElement<'_>> = el
+            .children
+            .iter()
+            .filter_map(|c| match c {
+                JSXChild::Element(e) => Some(&**e),
+                _ => None,
+            })
+            .collect();
+        let has_visible_text = el.children.iter().any(|c| match c {
+            JSXChild::Text(t) => !t.value.as_str().trim().is_empty(),
+            JSXChild::ExpressionContainer(c) => c.expression.as_expression().is_some(),
+            _ => false,
+        });
+        if element_children.is_empty() {
+            if has_visible_text {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "slot fallback content must be a single element (wrap the content in one element)",
+                    Span::new(el.span().start, el.span().end),
+                ));
+                return Err(());
+            }
+            return Ok(None);
+        }
+        if element_children.len() > 1 {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "multi-element slot fallbacks are outside the admitted subset (wrap them in one element)",
+                Span::new(el.span().start, el.span().end),
+            ));
+            return Err(());
+        }
+        let child_el = element_children[0];
+        let fill = self.fragment_from("slotfallback", el.span(), move |comp, path| {
+            comp.jsx_element(child_el, path)
+        });
+        self.ensure_static_slot_content(fill, el.span());
+        Ok(Some(fill))
+    }
+
+    /// The v1 slot-content contract: fills and fallbacks mount as static
+    /// subtrees — the runtime has no run arms addressing a slot instance's
+    /// holes, so dynamic binds inside slot content would write nowhere.
+    /// Fail-closed here rather than emit a broken unit.
+    fn ensure_static_slot_content(&mut self, frag: FragmentId, span: oxc_span::Span) {
+        let f = &self.module.fragments[frag.get() as usize];
+        if !f.dynamics.is_empty() || !f.children.is_empty() {
+            self.diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "slot fill/fallback content must be static in v1 — dynamic binds inside slot content are not addressed by the runtime",
+                Span::new(span.start, span.end),
+            ));
+        }
+    }
+
     fn lower_component_use(
         &mut self,
         tag: &str,
@@ -1400,6 +1592,7 @@ impl ComponentLowering<'_, '_> {
             return NodeIr::Marker;
         };
         let mut props: Vec<PropBinding> = Vec::new();
+        let mut attr_fills: Vec<SlotIr> = Vec::new();
         for item in &el.opening_element.attributes {
             let JSXAttributeItem::Attribute(attr) = item else {
                 continue;
@@ -1407,6 +1600,40 @@ impl ComponentLowering<'_, '_> {
             let JSXAttributeName::Identifier(name) = &attr.name else {
                 continue;
             };
+            // JSX-element-valued attributes fill the named slot of the same
+            // name (§7.4, M6): `<Panel header={<h1>…</h1>}>` (braces — the
+            // idiomatic JSX spelling) or `header=<h1>…</h1>` (bare). They are
+            // slot content, not prop bindings.
+            let element_fill = match &attr.value {
+                Some(JSXAttributeValue::Element(el)) => Some((el, attr.span)),
+                Some(JSXAttributeValue::ExpressionContainer(c)) => {
+                    match c.expression.as_expression() {
+                        Some(Expression::JSXElement(el)) => Some((el, attr.span)),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            if let Some((fill_el, fill_span)) = element_fill {
+                if name.name == "children" {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "`children={<…/>}` is not a slot fill — element children are the default slot",
+                        Span::new(fill_span.start, fill_span.end),
+                    ));
+                    continue;
+                }
+                let fill_el: &oxc_ast::ast::JSXElement<'_> = fill_el;
+                let fill = self.fragment_from("slotfill", el.span(), move |comp, path| {
+                    comp.jsx_element(fill_el, path)
+                });
+                self.ensure_static_slot_content(fill, el.span());
+                attr_fills.push(SlotIr {
+                    name: self.intern(name.name.to_string()),
+                    fallback: Some(fill),
+                });
+                continue;
+            }
             let value = match &attr.value {
                 Some(JSXAttributeValue::ExpressionContainer(c)) => {
                     let Some(e) = c.expression.as_expression() else {
@@ -1442,7 +1669,7 @@ impl ComponentLowering<'_, '_> {
             || self.module.insert_expr(Expr::Lit(Lit::Null)),
             |p| p.value,
         );
-        let mut slots: Vec<SlotIr> = Vec::new();
+        let mut slots: Vec<SlotIr> = attr_fills;
         let element_children: Vec<&oxc_ast::ast::JSXElement<'_>> = el
             .children
             .iter()
@@ -1463,6 +1690,7 @@ impl ComponentLowering<'_, '_> {
                 let fill = self.fragment_from("slotfill", el.span(), move |comp, path| {
                     comp.jsx_element(jsx_el, path)
                 });
+                self.ensure_static_slot_content(fill, el.span());
                 slots.push(SlotIr {
                     name: self.intern("default"),
                     fallback: Some(fill),
@@ -1544,7 +1772,10 @@ impl ComponentLowering<'_, '_> {
             let null = self.module.insert_expr(Expr::Lit(Lit::Null));
             let slot_name = self.intern("default");
             self.push_dynamic(
-                DynamicKind::Slot { name: slot_name },
+                DynamicKind::Slot {
+                    name: slot_name,
+                    fallback: None,
+                },
                 null,
                 vec![],
                 path,
@@ -1610,15 +1841,38 @@ impl ComponentLowering<'_, '_> {
             return NodeIr::Marker;
         };
         let item_id = self.intern(&item);
-        self.scope.local.insert(item);
+        self.scope.local.insert(item.clone());
+        // A `key` attribute on the mapped element (§7.5, M6) turns the list
+        // keyed — the React-style spelling of `<For key>` / `:key`. It is
+        // stripped from the item fragment: the key drives diffing, it is not
+        // an attribute of the item template.
+        let key_attr = self.map_key_attr(body_src, &item);
+        if matches!(key_attr, MapKeyAttr::Invalid) {
+            return NodeIr::Marker;
+        }
+        self.skip_root_key = matches!(key_attr, MapKeyAttr::Found(..));
         let body_frag = self.fragment_from_jsx(body_src, "items");
+        self.skip_root_key = false;
+        let key = match key_attr {
+            MapKeyAttr::None => None,
+            MapKeyAttr::Invalid => unreachable!("checked above"),
+            MapKeyAttr::Found(attr_span, key_expr_src) => {
+                match self.finish_map_key(attr_span, key_expr_src) {
+                    Ok(k) => k,
+                    Err(d) => {
+                        self.diags.push(d);
+                        return NodeIr::Marker;
+                    }
+                }
+            }
+        };
         let reads = self.collect_reads(source);
         self.push_dynamic(
             DynamicKind::For(ForIr {
                 source,
                 item: item_id,
                 index: None,
-                key: None,
+                key,
                 body: body_frag,
             }),
             source,
@@ -1629,6 +1883,105 @@ impl ComponentLowering<'_, '_> {
             call.span,
         );
         NodeIr::Marker
+    }
+
+    /// Detect + validate the `key` attribute on a `.map` body element (raw
+    /// AST walk — nothing is lowered yet): at most one, an expression (a
+    /// static `key` gives every item the same identity), and an arrow form
+    /// taking exactly the item binding.
+    fn map_key_attr<'a>(&mut self, body_src: &'a Expression<'_>, item: &str) -> MapKeyAttr<'a> {
+        let Expression::JSXElement(el) = unwrap_parens(body_src) else {
+            return MapKeyAttr::None;
+        };
+        let mut found: Option<(oxc_span::Span, &'a Expression<'a>)> = None;
+        for attr_item in &el.opening_element.attributes {
+            let JSXAttributeItem::Attribute(attr) = attr_item else {
+                continue;
+            };
+            let JSXAttributeName::Identifier(id) = &attr.name else {
+                continue;
+            };
+            if id.name != "key" {
+                continue;
+            }
+            if found.is_some() {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "`.map` bodies take at most one `key`",
+                    Span::new(el.opening_element.span.start, el.opening_element.span.end),
+                ));
+                return MapKeyAttr::Invalid;
+            }
+            let Some(JSXAttributeValue::ExpressionContainer(c)) = &attr.value else {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "a static `key` gives every item the same identity — key={expr} over the item",
+                    Span::new(attr.span.start, attr.span.end),
+                ));
+                return MapKeyAttr::Invalid;
+            };
+            let Some(e) = c.expression.as_expression() else {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "`key` must be an expression over the item",
+                    Span::new(attr.span.start, attr.span.end),
+                ));
+                return MapKeyAttr::Invalid;
+            };
+            // The arrow form takes exactly the item binding — the key and the
+            // body describe the same item (§7.5).
+            if let Expression::ArrowFunctionExpression(arrow) = unwrap_parens(e) {
+                let param_is_item = arrow.params.items.len() == 1
+                    && matches!(
+                        arrow.params.items.first().map(|p| &p.pattern),
+                        Some(oxc_ast::ast::BindingPattern::BindingIdentifier(b))
+                            if b.name.as_str() == item
+                    );
+                if !param_is_item {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        format!("`.map` `key` arrow must take exactly the item binding `{item}`"),
+                        Span::new(attr.span.start, attr.span.end),
+                    ));
+                    return MapKeyAttr::Invalid;
+                }
+                if arrow_body_expr(&arrow.body).is_none() {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "`.map` `key` arrow body must be a single expression",
+                        Span::new(attr.span.start, attr.span.end),
+                    ));
+                    return MapKeyAttr::Invalid;
+                }
+            }
+            found = Some((attr.span, e));
+        }
+        found.map_or(MapKeyAttr::None, |(span, e)| MapKeyAttr::Found(span, e))
+    }
+
+    /// Lower the `.map` key expression (already shape-validated in
+    /// [`Self::map_key_attr`]). Keys are identities — state reads re-identify
+    /// items on unrelated writes and fail closed (§7.5, ADR-018 §2).
+    fn finish_map_key(
+        &mut self,
+        attr_span: oxc_span::Span,
+        key_expr_src: &Expression<'_>,
+    ) -> Result<Option<ExprId>, LigDiagnostic> {
+        let body_expr = match unwrap_parens(key_expr_src) {
+            Expression::ArrowFunctionExpression(arrow) => {
+                arrow_body_expr(&arrow.body).expect("validated in map_key_attr")
+            }
+            other => other,
+        };
+        let expr = self.lower_expr(body_expr)?;
+        if !self.collect_reads(expr).is_empty() {
+            return Err(LigDiagnostic::error(
+                "LIG-E001",
+                "`key` must be a pure function of the item — state reads re-identify items on unrelated writes",
+                Span::new(attr_span.start, attr_span.end),
+            ));
+        }
+        Ok(Some(expr))
     }
 
     fn lower_ternary(
