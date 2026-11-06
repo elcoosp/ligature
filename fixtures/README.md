@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (19)
+## Behavior fixtures (23)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -48,13 +48,17 @@ table).
 | `dynamic-attribute` | dynamic attribute (`src`) |
 | `dynamic-style` | mixed style object → per-property `StyleProp` dynamics + `LIG-W102` + const fold |
 | `effect-log` | `createEffect`/`watchEffect` reaction (post tier, read-masked) |
+| `effect-multi` | multi-statement effect bodies (M6): a two-statement `createEffect`/`watchEffect` block → two post-tier reactions with per-statement reads |
 | `event-object` | `$event.currentTarget.value` payload flow |
 | `for-index` | getter-only list signal + `<For>`/`v-for` index accessor |
 | `for-keyed` | keyed list reconciliation (M5): `<For key={(t) => t}>` / `v-for … :key="t"` — identity keys on both legs, `plan_keyed` LIS-stable moves in the generated unit |
 | `for-list` | `<For>` mount over a list signal |
 | `map-children` | `.map` child expression (unkeyed list; the Vue leg uses `v-for`) |
+| `map-keyed` | keyed `.map` children (M6): `key={item}` on the mapped element / `:key="item"` on the `v-for` element — the key stripped from the item fragment, `ForIr.key = Local(item)` |
 | `memo-derived` | `createMemo`/`computed` read in a text hole |
 | `show-conditional` | `Show` with `fallback` / `v-if`/`v-else` at the template root |
+| `slots-named` | named slots + fallback (M6): `<slot name="header">`/`<Slot name="header">` outlets with `<em>` fallback, `<template #header>` / element-valued-prop fills, two use sites in one parent (fill on one, fallback on the other) |
+| `v-model` | `v-model` two-way binding (M6): `<input v-model="email" />` on the Vue leg vs the explicit `value`/`onInput` pair on the Solid leg — byte-equal IR |
 | `static-template` | fully static subtree → template inlining, zero dynamics |
 | `style-object` | static style object → const style profile |
 | `ternary-child` | conditional child with element branches (`branch_N` naming, both frontends) |
