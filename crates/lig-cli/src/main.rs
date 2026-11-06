@@ -1,15 +1,18 @@
 //! The `lig` CLI (§12.1): `check`, `build`, `watch`, `explain`, `resolve`,
 //! `inspect`, `doctor`, plus the CI gates (`fixtures …`, `reproducibility`,
-//! `patch-spike`, `incremental`, `errors-gen`). M3 surface — the incremental
-//! session engine (`lig-incremental`): digest-gated re-emission (D-9), watch
-//! mode, build-order cycle recovery (LIG-E020), and the two-generation
-//! ThinLink patch gate. Exit codes: 0 = clean, 1 = denied, 2 = internal
-//! error.
+//! `patch-spike`, `incremental`, `errors-gen`, `budgets`, `no-std`). M4
+//! surface — the §14.2 budget ledger gate and the §10 no_std proof join the
+//! incremental session engine (`lig-incremental`): digest-gated re-emission
+//! (D-9), watch mode, build-order cycle recovery (LIG-E020), and the
+//! two-generation ThinLink patch gate. Exit codes: 0 = clean, 1 = denied,
+//! 2 = internal error.
 
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+mod budgets;
 mod gates;
+mod nostd;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use lig_admission::Profile;
@@ -126,6 +129,13 @@ enum Command {
     /// Regenerate the error-code registry + embedded catalog from
     /// docs/errors/*.md (D-7).
     ErrorsGen,
+    /// §14.2 gate: measure the bench workloads in-process against the
+    /// committed budget ledger (docs/benchmarks/budgets.toml). Time budgets
+    /// are enforced in release runs; bytes rows everywhere.
+    Budgets,
+    /// §10 gate: the no_std proof — the structural contract plus bare-metal
+    /// builds of lig-runtime and a generated unit.
+    NoStd,
 }
 
 #[derive(Debug, Subcommand)]
@@ -203,6 +213,8 @@ fn main() -> ExitCode {
         Command::PatchSpike => ExitCode::from(gates::patch_spike() as u8),
         Command::Incremental => ExitCode::from(gates::incremental() as u8),
         Command::ErrorsGen => ExitCode::from(gates::errors_gen() as u8),
+        Command::Budgets => ExitCode::from(budgets::budgets_gate() as u8),
+        Command::NoStd => ExitCode::from(nostd::no_std_proof() as u8),
     }
 }
 
@@ -645,6 +657,28 @@ fn run_doctor() {
         println!("  • patch protocol: unavailable on windows (dlopen protocol is unix-only)");
     } else {
         println!("  ✓ patch protocol: dlopen jump-table surface available");
+    }
+
+    // M4: the budget ledger (§14.2) and the no_std proof environment (§10).
+    match budgets::load_ledger_for_doctor() {
+        Ok(rows) => println!("  ✓ budget ledger: {rows} row(s) (docs/benchmarks/budgets.toml)"),
+        Err(e) => {
+            failures += 1;
+            println!("  ✗ budget ledger: {e}");
+        }
+    }
+    let (installed, total) = nostd::installed_targets();
+    if installed == total {
+        println!(
+            "  ✓ no_std proof targets installed ({})",
+            nostd::target_names().join(", ")
+        );
+    } else {
+        println!(
+            "  • no_std proof targets: {installed}/{total} installed — `rustup target add {}` \
+             enables `lig no-std`",
+            nostd::target_names().join(" ")
+        );
     }
 
     // Out-dir writability.
