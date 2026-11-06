@@ -69,7 +69,8 @@ pub struct ListItem {
 }
 
 /// A mounted list (§7.5 `For`): keyed items hanging on one anchor marker, in
-/// visual order. Reconciliation is driven by `keyed_diff`/`unkeyed_diff`.
+/// visual order. Reconciliation is driven by `plan_keyed` (keyed lists,
+/// since M5) / the index diff (unkeyed lists).
 pub struct ListSlot {
     /// The parent-side anchor node.
     anchor: NodeId,
