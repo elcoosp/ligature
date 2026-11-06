@@ -311,27 +311,38 @@ export function App() {
     );
 }
 
-/// The M7 fail-closed boundary (Solid leg): structural constructs inside
-/// slot content are denied with LIG-E001 — branch/list tables hang on
-/// `self.frag`, prop-pass crosses into a grandchild, nested outlets need
-/// composed contexts.
+/// The M8 slot-content contract (Solid leg): the content may be STRUCTURAL —
+/// If/For dynamics on the content root lower onto the content fragment (the
+/// branch/list tables are the content's, addressed through composed `Ctx`
+/// walks), while component uses and nested outlets stay fail-closed.
 #[test]
-fn slot_content_stays_fail_closed_on_structural_constructs() {
-    let cases: [(&str, &str); 3] = [
-        // If inside a fill
-        (
-            r#"export function App() {
+fn slot_content_admits_structural_constructs() {
+    // If inside a fill (the Show root lowers onto the fill fragment)
+    let src = r#"export function App() {
   const [on, setOn] = createSignal(true);
   return (
     <Panel title="x" header={<Show when={on()}><b>hi</b></Show>} />
   );
 }
-"#,
-            "If in fill",
-        ),
-        // For inside a fallback
-        (
-            r#"export function Panel({ title }) {
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /><Slot name="foot" /></section>;
+}
+"#;
+    let m = expect_ok(src, "structural_fill.tsx");
+    let fill = m
+        .fragments
+        .iter()
+        .find(|f| m.strings.get(f.name).starts_with("slotfill"))
+        .expect("fill fragment");
+    assert!(
+        fill.dynamics
+            .iter()
+            .any(|d| matches!(d.kind, lig_ir::DynamicKind::If(_))),
+        "the If lowers onto the fill fragment: {fill:?}"
+    );
+    // For inside a fallback
+    let src = r#"export function Panel({ title }) {
   return (
     <section>
       <Slot name="foot">
@@ -340,9 +351,28 @@ fn slot_content_stays_fail_closed_on_structural_constructs() {
     </section>
   );
 }
-"#,
-            "For in fallback",
-        ),
+"#;
+    let m = expect_ok(src, "structural_fallback.tsx");
+    let fb = m
+        .fragments
+        .iter()
+        .find(|f| m.strings.get(f.name).starts_with("slotfallback"))
+        .expect("fallback fragment");
+    assert!(
+        fb.dynamics
+            .iter()
+            .any(|d| matches!(d.kind, lig_ir::DynamicKind::For(_))),
+        "the For lowers onto the fallback fragment: {fb:?}"
+    );
+}
+
+/// The M8 fail-closed boundary (Solid leg): component uses and nested slot
+/// outlets inside slot content are still denied with LIG-E001 — prop-pass
+/// crosses into a grandchild and nested fills need composed addressing
+/// contexts for fills.
+#[test]
+fn slot_content_stays_fail_closed_on_components_and_outlets() {
+    let cases: [(&str, &str); 2] = [
         // Component use inside a fill
         (
             r#"export function App() {
@@ -352,6 +382,20 @@ fn slot_content_stays_fail_closed_on_structural_constructs() {
 }
 "#,
             "Component in fill",
+        ),
+        // Nested outlet inside a fallback
+        (
+            r#"export function Panel({ title }) {
+  return (
+    <section>
+      <Slot name="foot">
+        <Slot name="inner" />
+      </Slot>
+    </section>
+  );
+}
+"#,
+            "Slot in fallback",
         ),
     ];
     for (body, what) in cases {
