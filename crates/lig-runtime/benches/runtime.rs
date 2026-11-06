@@ -8,7 +8,7 @@ use criterion::{Criterion, criterion_group, criterion_main};
 use lig_runtime::host::{
     AttrVal, EventKind, HandlerId, HookId, Host, NodeId, PropVal, StyleConstId, TemplateDesc,
 };
-use lig_runtime::{AnchorStep, DirtySet, Fragment, Reactions, Schedule, TplNode, keyed_diff};
+use lig_runtime::{AnchorStep, DirtySet, Fragment, Reactions, Schedule, TplNode, plan_keyed};
 
 struct CountingHost {
     commits: usize,
@@ -135,12 +135,13 @@ fn bench_runtime(c: &mut Criterion) {
     });
 
     c.bench_function("runtime/list_diff_keyed", |b| {
-        // 64-item list, 8 shuffled — the mid-size reorder case
+        // 64-item list, 8 shuffled — the mid-size reorder case, measured
+        // through the shipped sequential planner (§7.5).
         let old: Vec<u64> = (0..64).map(|i| 100 + i).collect();
         let mut new = old.clone();
         new.swap(10, 40);
         new[60] = 999;
-        b.iter(|| keyed_diff(&old, &new));
+        b.iter(|| plan_keyed(&old, &new));
     });
 }
 
