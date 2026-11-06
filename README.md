@@ -2,7 +2,7 @@
 
 A dual-frontend (Solid TSX / Vue SFC → shared canonical View IR → const-scheduled Rust) UI compiler with a subsecond-derived hot-patch protocol. This repository implements the architecture in `ligature-architecture-v1.0.md`.
 
-**Status: M3 milestone complete** — the incremental pipeline: a salsa-style session engine (`lig-incremental`) with digest-gated re-emission (D-9), `lig watch`, build-order cycle recovery (LIG-E020), per-arm source-map attribution, the 128-reaction per-bit dispatch refinement, and the two-generation ThinLink patch engine with stub thunks (see `docs/m0/REPORT.md`, `docs/m1/REPORT.md`, `docs/m2/REPORT.md`, `docs/m3/REPORT.md`).
+**Status: M4 milestone complete** — the contract-hardening milestone: the §14.2 budget ledger gate (`lig budgets`, budgets enforced in CI), the §10 no_std proof (`lig no-std` — bare-metal builds of the runtime *and* a generated unit), and Appendix A (the annotated generated unit) on top of the M3 incremental pipeline: a salsa-style session engine (`lig-incremental`) with digest-gated re-emission (D-9), `lig watch`, build-order cycle recovery (LIG-E020), per-arm source-map attribution, the 128-reaction per-bit dispatch refinement, and the two-generation ThinLink patch engine with stub thunks (see `docs/m0/REPORT.md` through `docs/m4/REPORT.md`, and `docs/appendix-a.md`).
 
 ## Workspace
 
@@ -36,7 +36,18 @@ cargo run -p lig-cli -- fixtures rules-sync              # rule table ↔ fixtur
 cargo run -p lig-cli -- reproducibility                  # D-8: byte-identical codegen
 cargo run -p lig-cli -- incremental                      # D-9: digest-gated re-emit + LIG-E020 (M3)
 cargo run -p lig-cli -- patch-spike                      # S2/M3: two generations, < 1 s per save
+cargo run -p lig-cli --release -- budgets                # §14.2: the budget ledger (M4 — release enforces)
+cargo run -p lig-cli -- no-std                           # §10: the no_std proof (M4; `rustup target add thumbv7em-none-eabihf aarch64-unknown-none-softfloat` first)
 ```
+
+The budget ledger is `docs/benchmarks/budgets.toml` — one ceiling per
+bench workload (≥ 5× the reference median; a regression tripwire, not a
+benchmark), with the generated-unit size budget enforced in every profile.
+The no_std proof is three legs: the structural contract (zero deps,
+`forbid(unsafe)`, std test-only), bare-metal builds of `lig-runtime`, and
+a generated unit compiled inside a `#![no_std]` scratch crate
+(ADR-017). Appendix A (`docs/appendix-a.md`) annotates the unit all of
+these gates pin.
 
 Fixture regenerators (review diffs like code): `lig fixtures gen` and
 `lig fixtures parity-gen`; the error-catalog regenerator is `lig errors-gen`
@@ -44,10 +55,10 @@ Fixture regenerators (review diffs like code): `lig fixtures gen` and
 
 Incremental development: `lig build` re-emits only digest-changed units
 (D-9, `dist/build-state.json`), `lig watch` re-runs digest-gated passes on
-save, and `lig doctor` checks the environment (embedded catalog, patch
-protocol, out-dir).
+save, and `lig doctor` checks the environment (embedded catalog, budget
+ledger, patch protocol, no_std targets, out-dir).
 
-Benchmarks (`cargo bench`): parse/lowering (both frontends), canonical IR, codegen, runtime reconcile, patch protocol. The Oxc-vs-SWC re-benchmark is feature-gated: `cargo bench -p lig-parse-solid --features bench-swc --bench swc_compare`.
+Benchmarks (`cargo bench`): parse/lowering (both frontends), canonical IR, codegen, runtime reconcile, patch protocol — measured medians live in `docs/benchmarks/`, enforced ceilings in `docs/benchmarks/budgets.toml`. The Oxc-vs-SWC re-benchmark is feature-gated: `cargo bench -p lig-parse-solid --features bench-swc --bench swc_compare`.
 
 ## Releases
 
