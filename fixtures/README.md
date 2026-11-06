@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (23)
+## Behavior fixtures (24)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -57,6 +57,7 @@ table).
 | `map-keyed` | keyed `.map` children (M6): `key={item}` on the mapped element / `:key="item"` on the `v-for` element — the key stripped from the item fragment, `ForIr.key = Local(item)` |
 | `memo-derived` | `createMemo`/`computed` read in a text hole |
 | `show-conditional` | `Show` with `fallback` / `v-if`/`v-else` at the template root |
+| `slots-dynamic` | dynamic slot content (M7): a fill carrying a live text bind + a delegated event and a fallback carrying its own text bind — slot-scoped run arms address the mounted content (`slot_fill_mut`/`slot_fallback_mut`), the fill event attaches across slabs (`attach_foreign`), and the fallback bind initializes through the parent-driven init-flush |
 | `slots-named` | named slots + fallback (M6): `<slot name="header">`/`<Slot name="header">` outlets with `<em>` fallback, `<template #header>` / element-valued-prop fills, two use sites in one parent (fill on one, fallback on the other) |
 | `v-model` | `v-model` two-way binding (M6): `<input v-model="email" />` on the Vue leg vs the explicit `value`/`onInput` pair on the Solid leg — byte-equal IR |
 | `static-template` | fully static subtree → template inlining, zero dynamics |
