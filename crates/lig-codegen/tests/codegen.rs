@@ -140,3 +140,79 @@ fn spill_path_emits_exact_per_bit_masks_and_writes_hi() {
     );
     assert!(text.contains("const Big_R69_FX: u8 = 69u8;"), "{text}");
 }
+#[test]
+fn ref_captures_split_by_addressing_context() {
+    // M7: a ref captures the hole NodeId of the fragment it lives on. The
+    // four addressing contexts emit four capture phases: direct refs in the
+    // build body, fill refs through the mounted content, fallback refs
+    // through the child's outlet (the parent writes the child's `pub`
+    // field), branch refs after the initial flush mounts the branch.
+    let src = r#"export function Panel({ title }) {
+  const [open, setOpen] = createSignal(true);
+  let foot;
+  let branched;
+  return (
+    <section>
+      <Slot name="header" />
+      <Slot name="foot">
+        <i ref={foot}>{title}</i>
+      </Slot>
+      <Show when={open()}>
+        <em ref={branched}>{title}</em>
+      </Show>
+    </section>
+  );
+}
+
+export function App() {
+  const [label, setLabel] = createSignal("live");
+  let direct;
+  let fillEl;
+  return (
+    <div ref={direct}>
+      <Panel title="Status" header={<b ref={fillEl}>{label}</b>} />
+    </div>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "refs.tsx").expect("lower");
+    let unit = lig_codegen::generate_module(&module).expect("codegen");
+    let text = unit.text;
+    // Direct ref: the build body captures from `self.frag`.
+    assert!(
+        text.contains("s.ref_direct = s.frag.hole("),
+        "direct ref captures in the build body: {text}"
+    );
+    // Fill ref: captured through the mounted content, into the parent's field.
+    assert!(
+        text.contains("if let Some(c) = s.panel.frag.slot_fill(0usize)"),
+        "fill ref capture guards on the mounted content: {text}"
+    );
+    assert!(
+        text.contains("s.ref_fillEl = c.hole("),
+        "fill ref writes the parent's field: {text}"
+    );
+    // Fallback ref: the parent writes the CHILD's pub field at mount time.
+    assert!(
+        text.contains("if let Some(c) = s.panel.frag.slot_fallback(1usize)"),
+        "fallback ref capture guards on the mounted outlet: {text}"
+    );
+    assert!(
+        text.contains("s.panel.ref_foot = c.hole("),
+        "fallback ref writes the child's field: {text}"
+    );
+    // Branch ref: captured after the initial flush mounts the branch.
+    assert!(
+        text.contains("if let Some(b) = s.frag.branch(0usize)"),
+        "branch ref capture guards on the mounted branch: {text}"
+    );
+    assert!(
+        text.contains("s.ref_branched = b.hole("),
+        "branch ref writes the component's field: {text}"
+    );
+    // Every ref field starts as the absent sentinel.
+    assert!(
+        text.contains("ref_direct: ::lig_runtime::NodeId(u32::MAX)"),
+        "sentinel init: {text}"
+    );
+}
