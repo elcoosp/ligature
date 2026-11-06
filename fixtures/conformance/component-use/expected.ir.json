@@ -1,5 +1,5 @@
 {
-  "version": 4,
+  "version": 5,
   "frontend": "solid",
   "source_files": [
     {
@@ -176,7 +176,8 @@
           ],
           "kind": {
             "Slot": {
-              "name": 6
+              "name": 6,
+              "fallback": null
             }
           },
           "expr": 2,
