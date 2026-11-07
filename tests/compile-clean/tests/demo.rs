@@ -4,7 +4,7 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    slots_dynamic, slots_named, slots_structural, v_model,
+    slots_component, slots_dynamic, slots_named, slots_nested, slots_structural, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::MockHost;
@@ -321,5 +321,116 @@ fn dynamic_style_prev_diffs_property_updates() {
         h.count_kind("SetStyleDyn"),
         2,
         "changed value commits exactly once"
+    );
+}
+
+/// The M9 grandchild prop-pass contract, end to end: a component use inside
+/// slot content builds as the content author's struct field, its DOM root
+/// inserts into the mounted content's component hole at mount time, and the
+/// prop-pass run arm (the content author's bind reaction) writes the
+/// grandchild's setters and flushes the instance — a signal update flows
+/// through the mounted content into the grandchild's own template.
+#[test]
+fn content_component_inserts_and_passes_props_through_the_mount() {
+    let mut h = MockHost::new();
+    let mut app = slots_component::App::build(&mut h, slots_component::AppProps::default());
+    // The grandchild inserted into the header fill's component hole at
+    // mount time; its prop initialized by the initial flush (which runs
+    // after slot assembly).
+    assert!(
+        app.panel.frag.slot_fill(1).is_some(),
+        "header fill mounted by the parent's build"
+    );
+    assert_eq!(
+        h.text_of(app.badge.frag.hole(0)),
+        Some("two"),
+        "grandchild prop initialized through the initial flush"
+    );
+    // The signal update flows: App flush → prop-pass arm → grandchild flush
+    // → the grandchild's own text bind.
+    app.set_n("three".into());
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.badge.count, "three", "prop-pass wrote the instance");
+    assert_eq!(
+        h.text_of(app.badge.frag.hole(0)),
+        Some("three"),
+        "the grandchild's bind re-rendered the new prop"
+    );
+    // The default fill mounted on the child's default outlet.
+    assert_eq!(
+        app.panel.frag.slot_origin(2),
+        Some(SlotOrigin::Fill),
+        "default outlet carries the element-children fill"
+    );
+}
+
+/// The M9 nested-outlet contract, end to end: a nested outlet on slot
+/// content mounts its use-site fill (composed `slot_fill_mut` →
+/// `slot_fill_mut` walk) or — when the use site does not fill it — its own
+/// fallback (composed `slot_fill_mut` → `slot_fallback_mut`); binds on both
+/// initialize at build through the initial flush and track updates through
+/// the composed walks.
+#[test]
+fn nested_outlets_mount_fills_and_fallbacks_through_the_composed_walk() {
+    let mut h = MockHost::new();
+    let mut app = slots_nested::App::build(&mut h, slots_nested::AppProps::default());
+    // Use 1 fills the nested outlet: the fill mounts ON the header fill's
+    // own slot table, and its bind initialized ("in").
+    let fill = app
+        .panel
+        .frag
+        .slot_fill(1)
+        .expect("header fill mounted (use 1)");
+    assert!(
+        fill.slot_is(0),
+        "the nested outlet carries the use-site fill"
+    );
+    let inner = fill.slot_fill(0).expect("nested fill mounted");
+    assert_eq!(
+        h.text_of(inner.hole(0)),
+        Some("in"),
+        "nested fill bind initialized through the initial flush"
+    );
+    // Use 2 does not fill `inner`: the outlet's own fallback mounts.
+    let fill2 = app
+        .panel_2
+        .frag
+        .slot_fill(1)
+        .expect("header fill mounted (use 2)");
+    assert!(
+        fill2.slot_is(0),
+        "the nested outlet carries its own fallback"
+    );
+    let fb2 = fill2.slot_fallback(0).expect("nested fallback mounted");
+    assert_eq!(
+        h.text_of(fb2.hole(0)),
+        Some("in"),
+        "nested fallback bind initialized through the initial flush"
+    );
+    // Updates flow through the composed walks: fill bind (content → nested
+    // fill) and fallback bind (content → nested fallback).
+    app.set_tag("next".into());
+    lig_runtime::flush(&mut app, &mut h);
+    let fill = app.panel.frag.slot_fill(1).expect("fill");
+    assert_eq!(
+        h.text_of(fill.slot_fill(0).expect("nested fill").hole(0)),
+        Some("next"),
+        "the nested fill bind walked the composed chain"
+    );
+    let fill2 = app.panel_2.frag.slot_fill(1).expect("fill2");
+    assert_eq!(
+        h.text_of(fill2.slot_fallback(0).expect("nested fallback").hole(0)),
+        Some("next"),
+        "the nested fallback bind walked the composed chain"
+    );
+    // The origin gates hold: use 1's outlet is FILLED, so the fallback
+    // accessor sees nothing — a fallback write can never cross into a fill.
+    assert!(
+        app.panel
+            .frag
+            .slot_fill(1)
+            .unwrap()
+            .slot_fallback(0)
+            .is_none()
     );
 }
