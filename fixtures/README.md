@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (24)
+## Behavior fixtures (27)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -57,8 +57,11 @@ table).
 | `map-keyed` | keyed `.map` children (M6): `key={item}` on the mapped element / `:key="item"` on the `v-for` element — the key stripped from the item fragment, `ForIr.key = Local(item)` |
 | `memo-derived` | `createMemo`/`computed` read in a text hole |
 | `show-conditional` | `Show` with `fallback` / `v-if`/`v-else` at the template root |
+| `slots-component` | component-in-content (M9): a fill carrying a `<Badge count={n()} />` use — the grandchild builds as the content author's field, inserts into the mounted content's component hole, and receives reactive props through the content author's prop-pass arm; the default `<Slot />` outlet carries the element-children fill |
 | `slots-dynamic` | dynamic slot content (M7): a fill carrying a live text bind + a delegated event and a fallback carrying its own text bind — slot-scoped run arms address the mounted content (`slot_fill_mut`/`slot_fallback_mut`), the fill event attaches across slabs (`attach_foreign`), and the fallback bind initializes through the parent-driven init-flush |
 | `slots-named` | named slots + fallback (M6): `<slot name="header">`/`<Slot name="header">` outlets with `<em>` fallback, `<template #header>` / element-valued-prop fills, two use sites in one parent (fill on one, fallback on the other) |
+| `slots-nested` | nested outlets (M9): a fill carrying a `<Slot name="inner">` outlet on two use sites — one fills `inner` (mounted at content-mount time through the composed `slot_fill_mut` → `slot_fill_mut` walk), the other leaves it unfilled (the outlet's own fallback mounts through the `slot_fallback_mut` accessor); binds on both initialize at build and track updates through the composed walks |
+| `slots-structural` | structural slot content (M8): a fill carrying an If with a disjoint-read bind (the mount-marking pin) and a keyed For; the unfilled outlet mounts the child's structural fallback, whose branch initializes through the subtree-wide init-flush |
 | `v-model` | `v-model` two-way binding (M6): `<input v-model="email" />` on the Vue leg vs the explicit `value`/`onInput` pair on the Solid leg — byte-equal IR |
 | `static-template` | fully static subtree → template inlining, zero dynamics |
 | `style-object` | static style object → const style profile |
