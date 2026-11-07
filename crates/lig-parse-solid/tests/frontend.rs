@@ -366,36 +366,139 @@ export function Panel({ title }) {
     );
 }
 
-/// The M8 fail-closed boundary (Solid leg): component uses and nested slot
-/// outlets inside slot content are still denied with LIG-E001 — prop-pass
-/// crosses into a grandchild and nested fills need composed addressing
-/// contexts for fills.
+/// The M9 slot-content contract (Solid leg): component uses and nested slot
+/// outlets admit DIRECTLY on fill/fallback content — a grandchild component
+/// use lowers onto the content fragment with its prop bindings (the
+/// prop-pass is the content author's reaction), and a nested outlet lowers
+/// with its own fallback (whose fills match the same use site).
 #[test]
-fn slot_content_stays_fail_closed_on_components_and_outlets() {
-    let cases: [(&str, &str); 2] = [
-        // Component use inside a fill
+fn slot_content_admits_component_uses_and_nested_outlets() {
+    // A grandchild component use inside a fill, with a reactive prop.
+    let src = r#"export function App() {
+  const [n, setN] = createSignal(1);
+  return (
+    <Panel title="x" header={<Badge count={n()} />} />
+  );
+}
+
+export function Badge({ count }) {
+  return <b class="badge">{count}</b>;
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let m = expect_ok(src, "component_in_fill.tsx");
+    let v = lig_ir::validate::validate(&m);
+    assert!(v.is_empty(), "invariants must hold: {v:?}");
+    let comp = m
+        .fragments
+        .iter()
+        .filter(|f| m.strings.get(f.name).starts_with("slotfill"))
+        .flat_map(|f| f.dynamics.iter())
+        .find_map(|d| match &d.kind {
+            lig_ir::DynamicKind::Component(c) => Some(c.clone()),
+            _ => None,
+        });
+    assert!(
+        comp.is_some(),
+        "the component use lowers onto a fill fragment: {:?}",
+        m.fragments
+            .iter()
+            .map(|f| (m.strings.get(f.name).to_string(), f.dynamics.len()))
+            .collect::<Vec<_>>()
+    );
+    let comp = comp.expect("component ir");
+    assert_eq!(comp.props.len(), 1, "the reactive prop binds");
+    // A nested outlet inside a fill, with the fill for it on the same use site.
+    let src = r#"export function App() {
+  return (
+    <Panel
+      title="x"
+      header={<div><Slot name="inner"><em>none</em></Slot></div>}
+      inner={<b>inner filled</b>}
+    />
+  );
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let m = expect_ok(src, "nested_outlet.tsx");
+    let v = lig_ir::validate::validate(&m);
+    assert!(v.is_empty(), "invariants must hold: {v:?}");
+    let nested_outlet = m.fragments.iter().any(|f| {
+        m.strings.get(f.name).starts_with("slotfill")
+            && f.dynamics.iter().any(|d| {
+                matches!(&d.kind, lig_ir::DynamicKind::Slot { name, .. }
+                    if m.strings.get(*name) == "inner")
+            })
+    });
+    assert!(
+        nested_outlet,
+        "the nested `inner` outlet lowers onto a fill fragment: {:?}",
+        m.fragments
+            .iter()
+            .map(|f| m.strings.get(f.name).to_string())
+            .collect::<Vec<_>>()
+    );
+}
+
+/// The M9 fail-closed boundary (Solid leg): component uses and nested
+/// outlets inside BRANCH or LIST bodies of content stay denied with
+/// LIG-E001 — a remounted branch would need per-mount instance identity,
+/// and per-item instances remain the keyed-component story.
+#[test]
+fn slot_content_stays_fail_closed_on_structural_instances() {
+    let cases: [(&str, &str); 3] = [
+        // Component use inside a branch hanging on content
         (
             r#"export function App() {
+  const [on, setOn] = createSignal(true);
   return (
-    <Panel title="x" header={<Panel title="y" />} />
+    <Panel title="x" header={<Show when={on()}><Badge count={1} /></Show>} />
   );
 }
+
+export function Badge({ count }) {
+  return <b>{count}</b>;
+}
 "#,
-            "Component in fill",
+            "Component in content branch",
         ),
-        // Nested outlet inside a fallback
+        // Component use inside a For body on content
         (
-            r#"export function Panel({ title }) {
+            r#"import { For } from "solid-js";
+export function App() {
   return (
-    <section>
-      <Slot name="foot">
-        <Slot name="inner" />
-      </Slot>
-    </section>
+    <Panel
+      title="x"
+      header={<For each={["a"]}>{(t) => <Badge count={1} />}</For>}
+    />
+  );
+}
+
+export function Badge({ count }) {
+  return <b>{count}</b>;
+}
+"#,
+            "Component in content list",
+        ),
+        // Nested outlet inside a branch hanging on content
+        (
+            r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  return (
+    <Panel
+      title="x"
+      header={<Show when={on()}><Slot name="inner" /></Show>}
+    />
   );
 }
 "#,
-            "Slot in fallback",
+            "Outlet in content branch",
         ),
     ];
     for (body, what) in cases {
