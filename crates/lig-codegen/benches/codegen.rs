@@ -19,5 +19,19 @@ fn bench_codegen(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_codegen);
+/// Lower the composed slot-content fixture once (M9: component-in-content +
+/// nested outlets — the ctx classification walk, the recursive mount walk,
+/// and the grandchild inserts ride the module pipeline), then time repeated
+/// codegen of the same IR.
+fn bench_codegen_composed(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/slots-component/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "slots-component.tsx").expect("fixture lowers");
+    c.bench_function("codegen/composed", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module))).expect("composed codegens");
+        });
+    });
+}
+
+criterion_group!(benches, bench_codegen, bench_codegen_composed);
 criterion_main!(benches);
