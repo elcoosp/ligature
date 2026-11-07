@@ -218,6 +218,7 @@ fn samples_for(name: &str) -> usize {
         "lower_solid_counter" | "lower_vue_counter" => 120,
         "canonical_json_counter" => 200,
         "codegen_counter" => 60,
+        "codegen_composed" => 40,
         "runtime_instantiate" | "runtime_update_mask" | "patch_apply_1" | "patch_dispatch_hit" => {
             800
         }
@@ -231,6 +232,15 @@ fn samples_for(name: &str) -> usize {
 /// fixture so the gate and the parity harness share one source of truth.
 fn counter_vue_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/counter/input.vue");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The composed slot-content fixture (the M9 codegen bench's workload:
+/// component-in-content + nested outlets — the ctx classification walk, the
+/// recursive mount walk, and the grandchild inserts), read from the
+/// committed fixture so the gate and the parity harness share one source.
+fn slots_component_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/slots-component/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -261,6 +271,14 @@ fn measure(name: &str, root: &Path) -> f64 {
             let m = counter_module();
             median_us(samples_for(name), || {
                 let u = generate_component(&m, ComponentId::new(0)).expect("codegen");
+                black_box(u);
+            })
+        }
+        "codegen_composed" => {
+            let src = slots_component_source(root);
+            let m = lig_parse_solid::lower_module(&src, "slots-component.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
                 black_box(u);
             })
         }
@@ -316,6 +334,7 @@ const REGISTRY: &[&str] = &[
     "lower_vue_counter",
     "canonical_json_counter",
     "codegen_counter",
+    "codegen_composed",
     "runtime_instantiate",
     "runtime_update_mask",
     "runtime_list_diff_keyed",
@@ -478,8 +497,8 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 10 rows, all named, no dupes.
-        assert_eq!(REGISTRY.len(), 10);
+        // The registry is the sync contract: 11 rows, all named, no dupes.
+        assert_eq!(REGISTRY.len(), 11);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
