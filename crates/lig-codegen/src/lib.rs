@@ -23,7 +23,7 @@ use lig_ir::module::{ReactionDecl, ReactionKind, ViewModule};
 use lig_reactivity::{ComponentSchedule, ScheduleError, build_schedule};
 use proc_macro2::Span;
 use quote::quote;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// A codegen failure (fail-closed — BR-1 applies to emission too).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -330,10 +330,12 @@ fn generate_component_pieces(
         .iter()
         .map(|u| ((u.owner.get(), u.dyn_idx), u.field.clone()))
         .collect();
-    // Slot-content addressing contexts (M7): fills of every use site and
-    // this component's own outlet fallbacks. Built after the per-use field
+    // Slot-content addressing contexts (M7, two-sided walk in M9): fills of
+    // every use site (matched against the child's root outlets, the child's
+    // own fallback contents, and the use site's own fill contents) and this
+    // component's own outlet fallbacks. Built after the per-use field
     // suffixing so the run arms address their own instance.
-    let ctx_map: HashMap<u32, Ctx> = build_content_ctx(module, root, &component_uses);
+    let ctx_map: HashMap<u32, Ctx> = build_content_ctx(module, root, &component_uses)?;
     // Content-branch ref captures (M8): `ref={el}` on a branch hanging on
     // slot content captures per mount — inside the mounting If arm, keyed by
     // the branch fragment (the If's `then`). The build-body emission below
@@ -676,7 +678,18 @@ fn generate_component_pieces(
                     DynamicKind::Component(c) => {
                         // Prop-pass (§7.6): direct writes on the child's
                         // state + a child flush; the child's own reactions
-                        // run from its schedule.
+                        // run from its schedule. M9: the arm is
+                        // ctx-independent (the instance is the content
+                        // author's field), but a component inside a
+                        // content-rooted BRANCH would need per-mount
+                        // instance identity — the frontends deny it, and
+                        // codegen stays fail-closed.
+                        if ctx.content_rooted() && matches!(ctx, Ctx::Branch { .. }) {
+                            return Err(CodegenError::Unsupported(
+                                "component uses inside branch/list bodies of slot content need \
+                                 per-mount instance identity (deferred)",
+                            ));
+                        }
                         let field = syn::Ident::new(
                             &component_field_map
                                 .get(&(rx.decl.owner.get(), dynamic))
@@ -691,11 +704,23 @@ fn generate_component_pieces(
                                 Span::call_site(),
                             );
                             let raw = gen_expr(module, pb.value)?;
+                            // Setters take their value BY VALUE: a string
+                            // literal interns into `String::from`, and every
+                            // other expression clones — a state read would
+                            // otherwise move out of `self` while the child
+                            // field borrow is live (M9's slots-component
+                            // fixture pins the state-read prop case).
                             let v = match module.exprs.get(pb.value) {
                                 lig_ir::expr::Expr::Lit(lig_ir::expr::Lit::Str(_)) => {
                                     quote!(::alloc::string::String::from(#raw))
                                 }
-                                _ => raw,
+                                lig_ir::expr::Expr::Lit(
+                                    lig_ir::expr::Lit::Int(_)
+                                    | lig_ir::expr::Lit::Float(_)
+                                    | lig_ir::expr::Lit::Bool(_)
+                                    | lig_ir::expr::Lit::Null,
+                                ) => raw,
+                                _ => quote!((#raw).clone()),
                             };
                             sets.push(quote! { self.#field.#setter(#v); });
                         }
@@ -1047,6 +1072,30 @@ fn generate_component_pieces(
                     });
                 }
             }
+            // The M9 recursive content walk: nested outlets mount their
+            // fills/own fallbacks, grandchild roots insert, nested events
+            // attach and nested refs capture — all at mount time, before
+            // the fallback init-flush below (its binds address the freshly
+            // mounted nested content).
+            {
+                let root_recv = quote! { s.#fname.frag };
+                let steps: Vec<MutStep> = vec![(!is_fallback, di)];
+                walk_content_mounts(
+                    module,
+                    &frags,
+                    &prefix,
+                    &component_field_map,
+                    content_id,
+                    &root_recv,
+                    &steps,
+                    &use_site.ir.slots,
+                    &owner_prefix,
+                    &use_site.field,
+                    true,
+                    0,
+                    &mut slot_fills,
+                )?;
+            }
             if is_fallback {
                 // The init-flush story (M7, subtree-wide in M8): mark the
                 // child's fallback reactions and flush the child instance
@@ -1150,7 +1199,7 @@ fn generate_component_pieces(
                     });
                 }
             }
-            Ctx::Fill { field, slot } => {
+            Ctx::Fill { field, slot, .. } => {
                 let field = syn::Ident::new(field, Span::call_site());
                 content_ref_inits.push(quote! {
                     if let Some(c) = s.#field.frag.slot_fill(#slot) {
@@ -1534,12 +1583,13 @@ fn fragment_in_tree(frags: &[FragInfo], f: FragmentId) -> bool {
 }
 
 /// How a run arm reaches the fragment its dynamic lives on (M7, composed in
-/// M8): directly (`self.frag`), through a chain of mounted branches, or
-/// through mounted slot content — a use-site fill (on the child instance's
-/// fragment) or the outlet's own fallback (on `self.frag` of the authoring
-/// component). The chain composes: a branch hanging on slot content is
-/// `Branch { base: Fill/Fallback }`, a branch on a branch is
-/// `Branch { base: Branch { .. } }` — the walk unwraps outermost-first.
+/// M8, fill-composed in M9): directly (`self.frag`), through a chain of
+/// mounted branches, or through mounted slot content — a use-site fill (on
+/// the child instance's fragment) or the outlet's own fallback (on
+/// `self.frag` of the authoring component). The chain composes: a branch
+/// hanging on slot content is `Branch { base: Fill/Fallback }`, a branch on
+/// a branch is `Branch { base: Branch { .. } }`, a fill of a nested outlet
+/// is `Fill { base: Fill { .. } }` — the walk unwraps outermost-first.
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Ctx {
     /// `self.frag` (the default).
@@ -1549,62 +1599,100 @@ enum Ctx {
     /// branches keep the M7 shape; content-rooted branches (M8) unwrap the
     /// content first.
     Branch { slot: usize, base: Box<Ctx> },
-    /// A use-site fill mounted on `self.<field>.frag` at slot outlet `slot`.
-    Fill { field: String, slot: usize },
+    /// A use-site fill mounted on `self.<field>.frag` at slot outlet
+    /// `slot`. `fill` selects the accessor: `true` unwraps the fill content
+    /// (`slot_fill_mut`), `false` the outlet's fallback content
+    /// (`slot_fallback_mut` — a fill matched to an outlet that lives inside
+    /// the child's fallback content, M9). `base` is the context of the
+    /// fragment the OUTLET hangs on (`Direct` = the child's own root, the
+    /// M7 shape; composed = a fill of a nested outlet, M9).
+    Fill {
+        field: String,
+        slot: usize,
+        fill: bool,
+        base: Box<Ctx>,
+    },
     /// The outlet fallback mounted on `self.frag` at slot outlet `slot`.
-    Fallback { slot: usize },
+    /// `base` is the context of the fragment the OUTLET hangs on (`Direct`
+    /// = this component's own root, the M7 shape; composed = a fallback of
+    /// a nested outlet on own fallback content, M9).
+    Fallback { slot: usize, base: Box<Ctx> },
 }
 
 impl Ctx {
     /// Whether the walk roots at mounted slot content (M8): the mount-time
     /// story (init marking, event attaches, ref captures) is emitted into
-    /// the mounting arm rather than the build body.
+    /// the mounting arm rather than the build body. Fills and fallbacks are
+    /// ALWAYS content-rooted (they are the mounted content); branches
+    /// compose over their base.
     fn content_rooted(&self) -> bool {
         match self {
             Ctx::Direct => false,
-            Ctx::Branch { base, .. } => base.content_rooted(),
             Ctx::Fill { .. } | Ctx::Fallback { .. } => true,
+            Ctx::Branch { base, .. } => base.content_rooted(),
         }
     }
 }
 
 /// Build the fragment → [`Ctx`] map for slot content owned by this
-/// component: every use site's fills (fill fragments live in the parent's
-/// tree) and every outlet fallback of this component's own root (fallback
-/// fragments live in the child's tree, so they classify when generating the
-/// CHILD — the parent names them only at mount time).
+/// component (M9 two-sided walk): every use site's fills, matched by name
+/// against the outlets the use can reach — the child's root (the M7 shape),
+/// the child's own fallback contents (M9, the composed fallback chain), and
+/// the use site's OWN fill contents (nested outlets the author spelled
+/// inside its fill, M9) — plus every outlet fallback of this component's
+/// own root (fallback fragments live in the child's tree, so they classify
+/// when generating the CHILD — the parent names them only at mount time).
+/// Branch/For fragments of the child are not walked: outlets inside them
+/// mount with the branch (deferred — the mount walk reports the fill).
 fn build_content_ctx(
     module: &ViewModule,
     root: FragmentId,
     uses: &[ComponentUse],
-) -> HashMap<u32, Ctx> {
+) -> Result<HashMap<u32, Ctx>, CodegenError> {
     let mut map: HashMap<u32, Ctx> = HashMap::new();
+    let mut matched: HashSet<u32> = HashSet::new(); // matched fill fragment ids
     for use_site in uses {
         let Some(child_root) =
             module.component_root(lig_core::id::ComponentId::new(use_site.comp_idx as u32))
         else {
             continue;
         };
-        let child_frag = &module.fragments[child_root.get() as usize];
-        for (di, d) in child_frag.dynamics.iter().enumerate() {
-            let DynamicKind::Slot {
-                name: slot_name, ..
-            } = &d.kind
-            else {
-                continue;
-            };
-            for s in &use_site.ir.slots {
-                if s.name == *slot_name
-                    && let Some(fb) = s.fallback
-                {
-                    map.insert(
-                        fb.get(),
-                        Ctx::Fill {
-                            field: use_site.field.clone(),
-                            slot: di,
-                        },
-                    );
-                }
+        // Child side: root outlets (base Direct) and the child's own
+        // fallback contents (the composed fallback chain).
+        map_child_outlets(
+            module,
+            child_root,
+            &Ctx::Direct,
+            use_site,
+            &mut map,
+            &mut matched,
+        );
+        // Author side: nested outlets inside this use site's own fill
+        // contents — their fills come from the same use site.
+        let fill_ids: Vec<FragmentId> = use_site
+            .ir
+            .slots
+            .iter()
+            .filter_map(|s| s.fallback)
+            .collect();
+        for fill_id in fill_ids {
+            if let Some(ctx) = map.get(&fill_id.get()).cloned() {
+                map_fill_outlets(module, fill_id, &ctx, use_site, &mut map, &mut matched);
+            }
+        }
+    }
+    // Fail-closed backstop (M9): a use-site fill that matched no outlet the
+    // use can reach would silently never mount (the M6-era fail-open shape)
+    // — deny instead.
+    for use_site in uses {
+        for s in &use_site.ir.slots {
+            if let Some(fb) = s.fallback
+                && !matched.contains(&fb.get())
+            {
+                return Err(CodegenError::Unsupported(
+                    "use-site fill names no outlet the child declares on its root or reachable \
+                     fallback contents (the fill would never mount)",
+                ));
             }
         }
     }
@@ -1614,11 +1702,373 @@ fn build_content_ctx(
                 fallback: Some(fb), ..
             } = &d.kind
             {
-                map.insert(fb.get(), Ctx::Fallback { slot: di });
+                map.insert(
+                    fb.get(),
+                    Ctx::Fallback {
+                        slot: di,
+                        base: Box::new(Ctx::Direct),
+                    },
+                );
+                map_own_fallbacks(module, *fb, di, &mut map);
             }
         }
     }
-    map
+    Ok(map)
+}
+
+/// Walk the CHILD's tree for outlets the use site can fill: root outlets
+/// (base `Direct`), then recurse into the child's own fallback contents
+/// (base the composed `Fallback` chain). Branch/For fragments are not
+/// walked — outlets inside them mount with the branch (deferred).
+fn map_child_outlets(
+    module: &ViewModule,
+    frag_id: FragmentId,
+    base: &Ctx,
+    use_site: &ComponentUse,
+    map: &mut HashMap<u32, Ctx>,
+    matched: &mut HashSet<u32>,
+) {
+    let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
+        return;
+    };
+    for (di, d) in frag.dynamics.iter().enumerate() {
+        let DynamicKind::Slot {
+            name: slot_name,
+            fallback,
+        } = &d.kind
+        else {
+            continue;
+        };
+        if let Some(s) = use_site.ir.slots.iter().find(|s| s.name == *slot_name)
+            && let Some(fb) = s.fallback
+        {
+            map.insert(
+                fb.get(),
+                Ctx::Fill {
+                    field: use_site.field.clone(),
+                    slot: di,
+                    fill: true,
+                    base: Box::new(base.clone()),
+                },
+            );
+            matched.insert(fb.get());
+        }
+        if let Some(fb) = *fallback {
+            // Outlets inside the child's fallback content: the parent-side
+            // walk addresses the fallback THROUGH the child instance (the
+            // `fill: false` accessor), never through the child-side
+            // `Ctx::Fallback` shape (that addresses `self.frag`, the
+            // generating component's own fragment).
+            map_child_outlets(
+                module,
+                fb,
+                &Ctx::Fill {
+                    field: use_site.field.clone(),
+                    slot: di,
+                    fill: false,
+                    base: Box::new(base.clone()),
+                },
+                use_site,
+                map,
+                matched,
+            );
+        }
+    }
+}
+
+/// Walk one of the use site's OWN fill contents for nested outlets (M9):
+/// a fill of such an outlet composes over the fill's own context.
+fn map_fill_outlets(
+    module: &ViewModule,
+    frag_id: FragmentId,
+    base: &Ctx,
+    use_site: &ComponentUse,
+    map: &mut HashMap<u32, Ctx>,
+    matched: &mut HashSet<u32>,
+) {
+    let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
+        return;
+    };
+    for (di, d) in frag.dynamics.iter().enumerate() {
+        let DynamicKind::Slot {
+            name: slot_name,
+            fallback,
+        } = &d.kind
+        else {
+            continue;
+        };
+        if let Some(s) = use_site.ir.slots.iter().find(|s| s.name == *slot_name)
+            && let Some(fb) = s.fallback
+        {
+            map.insert(
+                fb.get(),
+                Ctx::Fill {
+                    field: use_site.field.clone(),
+                    slot: di,
+                    fill: true,
+                    base: Box::new(base.clone()),
+                },
+            );
+            matched.insert(fb.get());
+        }
+        if let Some(fb) = *fallback {
+            // The nested outlet's own fallback content (author-authored) —
+            // its dynamics address through the fallback accessor on the
+            // fill's content, so the fallback fragment's OWN ctx goes in
+            // the map too, and deeper outlets compose over it.
+            let fb_ctx = Ctx::Fill {
+                field: use_site.field.clone(),
+                slot: di,
+                fill: false,
+                base: Box::new(base.clone()),
+            };
+            map.insert(fb.get(), fb_ctx.clone());
+            map_fill_outlets(module, fb, &fb_ctx, use_site, map, matched);
+        }
+    }
+}
+
+/// Map the fallback fragments nested on THIS component's own fallback
+/// content (the child-side ctx for their dynamics): the walk recurses with
+/// the composed `Fallback` base.
+fn map_own_fallbacks(
+    module: &ViewModule,
+    frag_id: FragmentId,
+    outlet: usize,
+    map: &mut HashMap<u32, Ctx>,
+) {
+    let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
+        return;
+    };
+    for (di, d) in frag.dynamics.iter().enumerate() {
+        let DynamicKind::Slot {
+            fallback: Some(fb), ..
+        } = &d.kind
+        else {
+            continue;
+        };
+        map.insert(
+            fb.get(),
+            Ctx::Fallback {
+                slot: di,
+                base: Box::new(Ctx::Fallback {
+                    slot: outlet,
+                    base: Box::new(Ctx::Direct),
+                }),
+            },
+        );
+        map_own_fallbacks(module, *fb, di, map);
+    }
+}
+
+/// One mutable content-walk step: unwrap the receiver's content accessor
+/// (`fill` selects `slot_fill_mut` vs `slot_fallback_mut`) at outlet `slot`.
+type MutStep = (bool, usize);
+
+/// Emit the mutable walk: each step wraps the body in an accessor guard
+/// binding `c` (shadowing — the innermost `c` is the addressed fragment);
+/// the OUTERMOST step's receiver is `root`, inner steps' receiver is the
+/// `c` bound one level out.
+fn emit_mut_walk(
+    root: &proc_macro2::TokenStream,
+    steps: &[MutStep],
+    body: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let mut out = body;
+    for (i, (fill, slot)) in steps.iter().enumerate().rev() {
+        let acc = if *fill {
+            quote! { slot_fill_mut }
+        } else {
+            quote! { slot_fallback_mut }
+        };
+        let recv = if i == 0 { root.clone() } else { quote!(c) };
+        out = quote! { if let Some(c) = #recv.#acc(#slot) { #out } };
+    }
+    out
+}
+
+/// Emit the read-only walk to the same fragment (`Option<&Fragment>`): the
+/// first step reads the root receiver, later steps chain `and_then`.
+fn emit_read_walk(root: &proc_macro2::TokenStream, steps: &[MutStep]) -> proc_macro2::TokenStream {
+    let mut read: Option<proc_macro2::TokenStream> = None;
+    for (i, (fill, slot)) in steps.iter().enumerate() {
+        let acc = if *fill {
+            quote! { slot_fill }
+        } else {
+            quote! { slot_fallback }
+        };
+        read = Some(if i == 0 {
+            quote! { #root.#acc(#slot) }
+        } else {
+            let prev = read.expect("first step set the read");
+            quote! { #prev.and_then(|f| f.#acc(#slot)) }
+        });
+    }
+    read.expect("content walks carry at least one step")
+}
+
+/// The M9 recursive content walk (the mounting component's slot assembly):
+/// after a content mounts, its own dynamics compose — nested outlets mount
+/// their use-site fill or the outlet's own fallback through the composed
+/// accessor chain, grandchild roots insert into component holes, nested
+/// events attach across slabs (the record lands on the AUTHOR's fragment —
+/// tree membership decides `s.frag` vs the child instance's), and nested
+/// fallback refs capture into the author's field. `top` marks the
+/// top-level content (its events/refs the caller already emitted).
+#[allow(clippy::too_many_arguments)]
+fn walk_content_mounts(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    parent_prefix: &str,
+    component_field_map: &HashMap<(u32, u32), String>,
+    content_id: FragmentId,
+    root: &proc_macro2::TokenStream,
+    steps: &[MutStep],
+    use_slots: &[lig_ir::fragment::SlotIr],
+    child_prefix: &str,
+    child_field: &str,
+    top: bool,
+    depth: usize,
+    out: &mut Vec<proc_macro2::TokenStream>,
+) -> Result<(), CodegenError> {
+    if depth > 16 {
+        return Err(CodegenError::Unsupported(
+            "slot content nesting deeper than 16 levels (recursion guard)",
+        ));
+    }
+    let Some(frag) = module.fragments.get(content_id.get() as usize) else {
+        return Ok(());
+    };
+    let in_parent_tree = frags.iter().any(|f| f.id == content_id);
+    let author_acc = if in_parent_tree {
+        quote!(s)
+    } else {
+        let field = syn::Ident::new(child_field, Span::call_site());
+        quote!(s.#field)
+    };
+    let read = emit_read_walk(root, steps);
+    for (di, d) in frag.dynamics.iter().enumerate() {
+        match &d.kind {
+            DynamicKind::Slot {
+                name: slot_name,
+                fallback,
+            } => {
+                // The use-site fill for this nested outlet, else the
+                // outlet's own fallback; a use site filling nothing leaves
+                // the outlet empty.
+                let fill = use_slots
+                    .iter()
+                    .find(|s| s.name == *slot_name)
+                    .and_then(|s| s.fallback);
+                let (content2, origin, is_fallback) = if let Some(fill_id) = fill {
+                    (fill_id, quote!(::lig_runtime::SlotOrigin::Fill), false)
+                } else if let Some(fb) = *fallback {
+                    (fb, quote!(::lig_runtime::SlotOrigin::Fallback), true)
+                } else {
+                    continue;
+                };
+                let content_in_parent = frags.iter().any(|f| f.id == content2);
+                let prefix = if content_in_parent {
+                    parent_prefix
+                } else {
+                    child_prefix
+                };
+                let content2_frag = &module.fragments[content2.get() as usize];
+                let tpl = tpl_ident(prefix, content2_frag.template.get() as usize);
+                let holes = hole_ident(prefix, content2.get() as usize);
+                let branches = branch_ident(prefix, content2.get() as usize);
+                // The accessor reaching the freshly mounted content matches
+                // its ORIGIN (slot_fill vs slot_fallback accessors are
+                // origin-gated in the runtime).
+                let mut_steps: Vec<MutStep> = {
+                    let mut s = steps.to_vec();
+                    s.push((!is_fallback, di));
+                    s
+                };
+                out.push(emit_mut_walk(
+                    root,
+                    steps,
+                    quote! {
+                        c.mount_slot(h, #di, #origin, #tpl, #holes, #branches);
+                    },
+                ));
+                // Recurse into the freshly mounted content.
+                walk_content_mounts(
+                    module,
+                    frags,
+                    parent_prefix,
+                    component_field_map,
+                    content2,
+                    root,
+                    &mut_steps,
+                    use_slots,
+                    child_prefix,
+                    child_field,
+                    false,
+                    depth + 1,
+                    out,
+                )?;
+            }
+            DynamicKind::Component(c) => {
+                // Grandchild prop-pass (M9): the instance is the content
+                // author's struct field; the mount-time story inserts its
+                // DOM root into the content's component hole.
+                let Some(field) = component_field_map.get(&(content_id.get(), di as u32)) else {
+                    return Err(CodegenError::Unsupported(
+                        "component use inside slot content missing its instance field",
+                    ));
+                };
+                let field = syn::Ident::new(field, Span::call_site());
+                out.push(quote! {
+                    if let Some(c) = #read {
+                        h.insert(c.hole(#di), #author_acc.#field.frag.roots()[0], 0);
+                    }
+                });
+                let _ = c;
+            }
+            DynamicKind::Event { event, delegate } => {
+                if top {
+                    // The caller (the M7 slot assembly) attaches top-level
+                    // content events.
+                    continue;
+                }
+                let Some(rx_id) = d.reaction else { continue };
+                let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
+                let h = rx_id.get();
+                out.push(quote! {
+                    if let Some(n) = #read.map(|c| c.hole(#di)) {
+                        #author_acc.frag.attach_foreign(
+                            n,
+                            ::lig_runtime::EventKind::#ev,
+                            ::lig_runtime::HandlerId(#h),
+                            #delegate,
+                            h,
+                        );
+                    }
+                });
+            }
+            DynamicKind::Ref => {
+                if top {
+                    continue;
+                }
+                let Some(lig_ir::expr::Expr::Local(name)) = Some(module.exprs.get(d.expr).clone())
+                else {
+                    continue;
+                };
+                let rfield = syn::Ident::new(
+                    &format!("ref_{}", sanitize(module.strings.get(name))),
+                    Span::call_site(),
+                );
+                out.push(quote! {
+                    if let Some(c) = #read {
+                        #author_acc.#rfield = c.hole(#di);
+                    }
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// The addressing context of a reaction's owning fragment, composed (M8):
@@ -1658,7 +2108,9 @@ fn ctx_recv(ctx: &Ctx) -> proc_macro2::TokenStream {
 /// Wrap `inner` in the accessor guards `ctx` needs (Direct: nothing). The
 /// chain unwraps outermost-first, each level binding its receiver (`b` for
 /// branches, `c` for content); shadowing keeps every level's variable name
-/// stable, so [`ctx_recv`] is always the innermost binding.
+/// stable, so [`ctx_recv`] is always the innermost binding. `base = Direct`
+/// reproduces the M7 emission byte-for-byte (M9 composition composes
+/// base-first).
 fn ctx_scope(ctx: &Ctx, inner: proc_macro2::TokenStream) -> proc_macro2::TokenStream {
     match ctx {
         Ctx::Direct => inner,
@@ -1668,21 +2120,44 @@ fn ctx_scope(ctx: &Ctx, inner: proc_macro2::TokenStream) -> proc_macro2::TokenSt
             let wrapped = quote! { if let Some(b) = #recv.branch_mut(#slot) { #inner } };
             ctx_scope(base, wrapped)
         }
-        Ctx::Fill { field, slot } => {
+        Ctx::Fill {
+            field,
+            slot,
+            fill,
+            base,
+        } => {
             let slot = *slot;
             let field = syn::Ident::new(field, Span::call_site());
-            quote! { if let Some(c) = self.#field.frag.slot_fill_mut(#slot) { #inner } }
+            let acc = if *fill {
+                quote! { slot_fill_mut }
+            } else {
+                quote! { slot_fallback_mut }
+            };
+            if matches!(&**base, Ctx::Direct) {
+                quote! { if let Some(c) = self.#field.frag.#acc(#slot) { #inner } }
+            } else {
+                let recv = ctx_recv(base);
+                let step = quote! { if let Some(c) = #recv.#acc(#slot) { #inner } };
+                ctx_scope(base, step)
+            }
         }
-        Ctx::Fallback { slot } => {
+        Ctx::Fallback { slot, base } => {
             let slot = *slot;
-            quote! { if let Some(c) = self.frag.slot_fallback_mut(#slot) { #inner } }
+            if matches!(&**base, Ctx::Direct) {
+                quote! { if let Some(c) = self.frag.slot_fallback_mut(#slot) { #inner } }
+            } else {
+                let recv = ctx_recv(base);
+                let step = quote! { if let Some(c) = #recv.slot_fallback_mut(#slot) { #inner } };
+                ctx_scope(base, step)
+            }
         }
     }
 }
 
 /// A read-only walk expression to the fragment `ctx` addresses, as
 /// `Option<&Fragment>` (M8: mount-time attaches and ref captures read the
-/// hole through it without holding the mutable unwrap open).
+/// hole through it without holding the mutable unwrap open; M9: the fill
+/// base composes and the accessor follows the `fill` selector).
 fn ctx_frag_read(ctx: &Ctx) -> proc_macro2::TokenStream {
     match ctx {
         Ctx::Direct => quote!(::core::option::Option::Some(&self.frag)),
@@ -1691,14 +2166,38 @@ fn ctx_frag_read(ctx: &Ctx) -> proc_macro2::TokenStream {
             let base_read = ctx_frag_read(base);
             quote! { #base_read.and_then(|f| f.branch(#slot)) }
         }
-        Ctx::Fill { field, slot } => {
+        Ctx::Fill {
+            field,
+            slot,
+            fill,
+            base,
+        } => {
             let slot = *slot;
             let field = syn::Ident::new(field, Span::call_site());
-            quote! { self.#field.frag.slot_fill(#slot) }
+            if matches!(&**base, Ctx::Direct) {
+                if *fill {
+                    quote! { self.#field.frag.slot_fill(#slot) }
+                } else {
+                    quote! { self.#field.frag.slot_fallback(#slot) }
+                }
+            } else {
+                let acc = if *fill {
+                    quote! { slot_fill }
+                } else {
+                    quote! { slot_fallback }
+                };
+                let base_read = ctx_frag_read(base);
+                quote! { #base_read.and_then(|f| f.#acc(#slot)) }
+            }
         }
-        Ctx::Fallback { slot } => {
+        Ctx::Fallback { slot, base } => {
             let slot = *slot;
-            quote! { self.frag.slot_fallback(#slot) }
+            if matches!(&**base, Ctx::Direct) {
+                quote! { self.frag.slot_fallback(#slot) }
+            } else {
+                let base_read = ctx_frag_read(base);
+                quote! { #base_read.and_then(|f| f.slot_fallback(#slot)) }
+            }
         }
     }
 }
