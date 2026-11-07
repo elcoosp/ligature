@@ -1,0 +1,625 @@
+{
+  "version": 5,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "slots-nested.tsx",
+      "hash": 10670244887395553404
+    }
+  ],
+  "strings": {
+    "entries": [
+      "App",
+      "Bare",
+      "Panel",
+      "Status",
+      "b",
+      "class",
+      "div",
+      "em",
+      "h2",
+      "header",
+      "hl",
+      "in",
+      "inner",
+      "none",
+      "panel",
+      "section",
+      "slotfallback_1",
+      "slotfallback_4",
+      "slotfill_0",
+      "slotfill_2",
+      "slotfill_3",
+      "tag",
+      "title"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    },
+    {
+      "name": 2,
+      "root": 6,
+      "props": [
+        {
+          "name": 22,
+          "ty": "Str",
+          "optional": false
+        }
+      ]
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 6,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker",
+            "Marker"
+          ]
+        }
+      },
+      "hash": 3416635520077880178
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 15,
+          "static_attrs": [
+            {
+              "key": 5,
+              "value": {
+                "Str": 14
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            {
+              "Element": {
+                "tag": 8,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  "Marker"
+                ]
+              }
+            },
+            "Marker"
+          ]
+        }
+      },
+      "hash": 5356993060200812968
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 6,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 5576865117657793870
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 7,
+          "static_attrs": [
+            {
+              "key": 5,
+              "value": {
+                "Str": 13
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 6571457799120774499
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 4,
+          "static_attrs": [
+            {
+              "key": 5,
+              "value": {
+                "Str": 10
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 16573754613667678845
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Component": {
+              "component": 1,
+              "props": [
+                {
+                  "prop": 22,
+                  "value": 0
+                }
+              ],
+              "slots": [
+                {
+                  "name": 9,
+                  "fallback": 4
+                },
+                {
+                  "name": 12,
+                  "fallback": 3
+                }
+              ]
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            244,
+            404
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 1
+            }
+          ],
+          "kind": {
+            "Component": {
+              "component": 1,
+              "props": [
+                {
+                  "prop": 22,
+                  "value": 1
+                }
+              ],
+              "slots": [
+                {
+                  "name": 9,
+                  "fallback": 1
+                }
+              ]
+            }
+          },
+          "expr": 1,
+          "reaction": 1,
+          "span": [
+            411,
+            529
+          ]
+        }
+      ],
+      "children": [
+        4,
+        3,
+        1
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 20,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Slot": {
+              "name": 12,
+              "fallback": 2
+            }
+          },
+          "expr": 2,
+          "reaction": 2,
+          "span": [
+            460,
+            513
+          ]
+        }
+      ],
+      "children": [
+        2
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 17,
+      "template": 3,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 3,
+          "reaction": 3,
+          "span": [
+            497,
+            500
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 19,
+      "template": 4,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 4,
+          "reaction": 4,
+          "span": [
+            386,
+            389
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 18,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Slot": {
+              "name": 12,
+              "fallback": 5
+            }
+          },
+          "expr": 5,
+          "reaction": 5,
+          "span": [
+            295,
+            348
+          ]
+        }
+      ],
+      "children": [
+        5
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 16,
+      "template": 3,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 6,
+          "reaction": 6,
+          "span": [
+            332,
+            335
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 2,
+      "template": 1,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            },
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 7,
+          "reaction": 7,
+          "span": [
+            85,
+            90
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 1
+            }
+          ],
+          "kind": {
+            "Slot": {
+              "name": 9,
+              "fallback": null
+            }
+          },
+          "expr": 8,
+          "reaction": 8,
+          "span": [
+            103,
+            125
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "Lit": {
+          "Str": 3
+        }
+      },
+      {
+        "Lit": {
+          "Str": 1
+        }
+      },
+      {
+        "Lit": "Null"
+      },
+      {
+        "State": 21
+      },
+      {
+        "State": 21
+      },
+      {
+        "Lit": "Null"
+      },
+      {
+        "State": 21
+      },
+      {
+        "State": 22
+      },
+      {
+        "Lit": "Null"
+      },
+      {
+        "Lit": {
+          "Str": 11
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 497,
+        "end": 500
+      },
+      {
+        "start": 386,
+        "end": 389
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 332,
+        "end": 335
+      },
+      {
+        "start": 85,
+        "end": 90
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 210,
+        "end": 214
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 21,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Str",
+      "init": 9
+    },
+    {
+      "name": 22,
+      "owner": 6,
+      "kind": "prop",
+      "ty": "Str",
+      "init": null
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 1
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 1,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 2,
+      "owner": 1
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        21
+      ],
+      "writes": [],
+      "body": 3,
+      "owner": 2
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        21
+      ],
+      "writes": [],
+      "body": 4,
+      "owner": 3
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 5,
+      "owner": 4
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        21
+      ],
+      "writes": [],
+      "body": 6,
+      "owner": 5
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        22
+      ],
+      "writes": [],
+      "body": 7,
+      "owner": 6
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 1
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 8,
+      "owner": 6
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}
