@@ -1,97 +1,161 @@
-# Ligature
+<div align="center">
+  <img src="https://cdn.jsdelivr.net/gh/elcoosp/ligature@main/docs/logo.png" alt="Ligature Logo" width="300"/>
+  <p>
+    <strong>A Rust UI compiler that turns Solid TSX and Vue SFCs into no_std native components</strong><br/>
+    Both frontends — Solid TSX (the dom-expressions passes ported to Rust over the oxc parser)
+    and Vue SFC (<code>&lt;script setup&gt;</code> + <code>&lt;template&gt;</code>) — lower into one
+    canonical View IR, so the same component spelled twice compiles to byte-identical IR.
+    A Deny/Lint/Allow admission ladder, a const topological schedule, and a
+    <code>quote!</code> → <code>syn</code> → <code>prettyplease</code> pipeline emit readable Rust
+    that runs on a <code>#![no_std]</code> slab runtime behind an object-safe <code>Host</code> trait.
+    For teams that want a reactive UI layer with a known, enforced subset — embedded to web hosts —
+    CI byte-compares both frontend legs of 25 conformance fixtures against the committed contract on every push.
+  </p>
+  <p>
+    <a href="https://github.com/elcoosp/ligature/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/elcoosp/ligature/ci.yml?style=flat-square&label=CI" alt="CI status"/></a>
+    <a href="docs/adr/0012-msrv-and-dependency-pins.md"><img src="https://img.shields.io/badge/MSRV-1.97%2B-informational?style=flat-square" alt="MSRV 1.97+"/></a>
+    <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-informational?style=flat-square" alt="License: MIT OR Apache-2.0"/></a>
+    <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.0--m8-blue?style=flat-square" alt="Version 0.1.0-m8"/></a>
+    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-25%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="25 conformance fixtures, both frontend legs"/></a>
+  </p>
+</div>
 
-A dual-frontend (Solid TSX / Vue SFC → shared canonical View IR → const-scheduled Rust) UI compiler with a subsecond-derived hot-patch protocol. This repository implements the architecture in `ligature-architecture-v1.0.md`.
+<p align="center">
+  <a href="#quickstart">Quickstart</a> • <a href="#features">Features</a> • <a href="#how-it-works">How it works</a> • <a href="#usage">Usage</a> • <a href="#status">Status</a> • <a href="#learn-more">Learn more</a>
+</p>
 
-**Status: M8 milestone complete** — the structural-slot-content milestone:
-fills and fallbacks are full program surfaces (the M7 If/For-in-content
-denial lifted, the If/For half of its first known gap) — an If/For inside
-slot content mounts its branch/list tables ON the mounted content,
-addressed by composed `Ctx` walks (`Branch { base: Fill/Fallback }`, the
-base field ADR-020 reserved); the mount marks the fresh branch subtree's
-reactions so its binds initialize on every mount, branch events attach
-across slabs at mount, the composed For reconcile is a receiver-param
-associated fn over the content's own list table, and the fallback
-init-flush mask covers the whole fallback subtree; the composition also
-closes two M7-era latent holes (nested-If addressing and For-in-branch),
-and the Vue leg admits content-root `v-if`/`v-for` (`fragment_from_content_root`)
-while closing two content-root fail-opens (chain-tail directives and root
-`<slot>` tags) — on top of the M7 dynamic slot content (slot-scoped run
-arms `slot_fill_mut`/`slot_fallback_mut`, `attach_foreign`, the
-ref-capture split, exact per-member build masks), the M6 template surface
-(§7.4 named slots with `<slot>` fallback content, §7.6 `v-model` sugar,
-§7.1 multi-statement effect bodies, §7.5 `.map` children keys), the M5
-keyed `For` (§7.5 LIS-stable keyed reconciliation), the M4 contract
-hardening (the §14.2 budget ledger gate `lig budgets`, the §10 no_std
-proof `lig no-std`, Appendix A) and the M3 incremental pipeline (a
-salsa-style session engine `lig-incremental` with digest-gated re-emission
-(D-9), `lig watch`, build-order cycle recovery (LIG-E020), per-arm
-source-map attribution, the 128-reaction per-bit dispatch refinement, and
-the two-generation ThinLink patch engine with stub thunks — see
-`docs/m0/REPORT.md` through `docs/m8/REPORT.md`, and
-`docs/appendix-a.md`). One runtime concept total across M6–M8
-(`SlotOrigin`), no new crates/gates/error codes/dependencies, IR v5
-unchanged.
+## Quickstart
 
-## Workspace
-
-| Crate | Role |
-| --- | --- |
-| `lig-core` | Spans, u32 ids, string interning, FNV fingerprints, error-code registry |
-| `lig-ir` | View IR v2: templates, fragments, anchors, dynamics, expr forest, canonical JSON |
-| `lig-expr` | oxc AST → ExprIR lowering, `isDynamic` port, pure-builtin whitelist, small-lattice typer |
-| `lig-parse-solid` | Solid TSX frontend (dom-expressions passes ported to Rust) |
-| `lig-parse-vue` | Vue SFC frontend (`<script setup>` + `<template>` → the same canonical IR, ADR-014) |
-| `lig-reactivity` | Const topological schedule, reader/writer masks, static cycle deny |
-| `lig-style` + `lig-taffy-profile` | 25-property style schema; lightningcss → taffy const-fn emitter |
-| `lig-codegen` | `quote!` → `syn::File` → `prettyplease`, byte-reproducible (D-8) |
-| `lig-runtime` | `no_std` + alloc slab runtime, `Host` commit stream, keyed LIS reconcile |
-| `lig-patch` | S2 spike: jump-table hot-patch protocol, manifest, save→frame budget |
-| `lig-sourcemap` | Chained standard-VLQ source maps, IR-node names in `names[]` (§9.4) |
-| `lig-admission` | Deny/Lint/Allow ladder, `model!`/`native!` escapes, rule table ↔ fixtures |
-| `lig-incremental` | Salsa-style sessions: digest-gated memos (D-9), LIG-E020 cycle recovery, digest-gated emission, watch passes |
-| `lig-cli` | The `lig` binary: `check`, `build`, `watch`, `explain`, `resolve`, `inspect`, `doctor` **+ the CI gates** (§12.1, §13) |
-
-## Gates (all enforced in CI — they ship inside the `lig` CLI since M2)
+Prerequisites: Rust via rustup — `rust-toolchain.toml` pins 1.99.1 (MSRV 1.97); no other tooling required.
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings   # pedantic, day one
-cargo test --workspace                                   # TDD, day one
-cargo bench --workspace --no-run                         # benched, day one
-cargo run -p lig-cli -- fixtures verify                  # 25 fixtures × both frontend legs (§4)
-cargo run -p lig-cli -- fixtures admission               # NFR-5: 22 diagnostic cases
-cargo run -p lig-cli -- fixtures rules-sync              # rule table ↔ fixtures 1:1
-cargo run -p lig-cli -- reproducibility                  # D-8: byte-identical codegen
-cargo run -p lig-cli -- incremental                      # D-9: digest-gated re-emit + LIG-E020 (M3)
-cargo run -p lig-cli -- patch-spike                      # S2/M3: two generations, < 1 s per save
-cargo run -p lig-cli --release -- budgets                # §14.2: the budget ledger (M4 — release enforces)
-cargo run -p lig-cli -- no-std                           # §10: the no_std proof (M4; `rustup target add thumbv7em-none-eabihf aarch64-unknown-none-softfloat` first)
+git clone https://github.com/elcoosp/ligature && cd ligature
+
+# Print the canonical View IR for a fixture component
+cargo run -p lig-cli -- inspect fixtures/conformance/counter/input.vue
+
+# Admit-check both spellings of the same counter (Solid TSX and Vue SFC)
+cargo run -p lig-cli -- check fixtures/conformance/counter/input.solid.tsx \
+                          fixtures/conformance/counter/input.vue
+
+# Emit Rust, IR, source maps, and a manifest — fail-closed: a denial writes nothing
+cargo run -p lig-cli -- build fixtures/conformance/counter/input.solid.tsx --out dist
 ```
 
-The budget ledger is `docs/benchmarks/budgets.toml` — one ceiling per
-bench workload (≥ 5× the reference median; a regression tripwire, not a
-benchmark), with the generated-unit size budget enforced in every profile.
-The no_std proof is three legs: the structural contract (zero deps,
-`forbid(unsafe)`, std test-only), bare-metal builds of `lig-runtime`, and
-a generated unit compiled inside a `#![no_std]` scratch crate
-(ADR-017). Appendix A (`docs/appendix-a.md`) annotates the unit all of
-these gates pin.
+A successful build leaves this artifact set (verified by the CLI's own integration tests):
 
-Fixture regenerators (review diffs like code): `lig fixtures gen` and
-`lig fixtures parity-gen`; the error-catalog regenerator is `lig errors-gen`
-(registry **and** the embedded catalog `lig explain` serves offline).
+```text
+dist/
+├── counter.rs              # generated component (byte-reproducible)
+├── ir/counter.json         # canonical View IR JSON
+├── maps/counter.map.json   # chained VLQ source map, IR node names in names[]
+├── manifest.toml           # the unit manifest
+└── build-state.json        # per-unit digests powering incremental re-emission
+```
 
-Incremental development: `lig build` re-emits only digest-changed units
-(D-9, `dist/build-state.json`), `lig watch` re-runs digest-gated passes on
-save, and `lig doctor` checks the environment (embedded catalog, budget
-ledger, patch protocol, no_std targets, out-dir).
+`check` prints an admitted/denied summary per file and exits 1 on any Deny-tier diagnostic;
+`build` refuses to touch `dist/` unless every unit is admitted.
 
-Benchmarks (`cargo bench`): parse/lowering (both frontends), canonical IR, codegen, runtime reconcile, patch protocol — measured medians live in `docs/benchmarks/`, enforced ceilings in `docs/benchmarks/budgets.toml`. The Oxc-vs-SWC re-benchmark is feature-gated: `cargo bench -p lig-parse-solid --features bench-swc --bench swc_compare`.
+> [!TIP]
+> Run `cargo run -p lig-cli -- doctor` first: it reports the embedded error catalog,
+> the budget ledger, patch-protocol availability on your platform, and which no_std
+> proof targets are installed.
 
-## Releases
+## Features
 
-Conventional Commits → [git-cliff](https://git-cliff.org) (`cliff.toml`) → `CHANGELOG.md` + release notes, automated by `.github/workflows/release.yml` on `v*` tags.
+- **Two frontends, one contract.** Solid TSX and Vue SFC lower into the same canonical View IR; `lig fixtures verify` byte-compares both legs of 25 conformance fixtures in CI, and a fixture without both legs fails the gate.
+- **Fail-closed admission ladder.** Every construct lands in exactly one Deny/Lint/Allow tier — 11 rules in `docs/admission/rules.md`, each backed by an allow fixture and a deny/lint fixture, synced 1:1 by a CI gate. A Deny means zero output downstream.
+- **Byte-reproducible codegen.** `quote!` → `syn::File` → `prettyplease` emits Rust that is byte-identical across runs: `lig reproducibility` diffs the committed counter unit (7,437 B, component digest `0x85d06a5c087b3589`) against a fresh generation, and a readability budget is enforced by a syn visitor.
+- **no_std runtime with keyed reconciliation.** The runtime is `#![no_std]` + alloc with `forbid(unsafe_code)`: `Copy` node handles, an object-safe `Host` commit stream, LIS-stable keyed list diffs, and a const-scheduled flush loop. CI proves bare-metal builds for `thumbv7em-none-eabihf` and `aarch64-unknown-none-softfloat`.
+- **Incremental by construction.** FNV-1a digest-gated memos skip unchanged work in `lig build` and `lig watch`; build-order cycles surface as `LIG-E020` denials instead of hangs; chained source maps attribute every generated position back to source, per reaction arm.
+- **A hot-patch protocol with a budget.** One patch dylib, an atomically swapped jump table, never-`dlclose` semantics; `lig patch-spike` chains two patch generations with stub thunks and enforces save→frame under 1 second on Linux and macOS (measured ~125–140 ms).
+- **Performance budgets as a gate, not a vibe.** `docs/benchmarks/budgets.toml` pins one ceiling per bench workload — at least 5x headroom over the recorded reference median — enforced in release mode by `lig budgets` in CI.
 
-## License
+## How it works
 
-MIT OR Apache-2.0 (see `LICENSE-MIT` / `LICENSE-APACHE`).
+Each frontend lowers its input into the same canonical View IR; from there the pipeline is
+admission, scheduling, codegen, and emission, all wrapped in a digest-gated session engine
+so repeated builds and watch passes reuse unchanged work.
+
+```mermaid
+flowchart LR
+    subgraph frontends["Frontends"]
+        solid["lig-parse-solid<br/>Solid TSX over oxc"]
+        vue["lig-parse-vue<br/>Vue SFC"]
+    end
+    solid --> ir["lig-ir<br/>canonical View IR"]
+    vue --> ir
+    ir --> adm["lig-admission<br/>Deny / Lint / Allow"]
+    adm --> sched["lig-reactivity<br/>const topological schedule"]
+    sched --> gen["lig-codegen<br/>quote / syn / prettyplease"]
+    gen --> rt["lig-runtime<br/>no_std slab runtime"]
+    gen --> sm["lig-sourcemap<br/>chained VLQ maps"]
+    inc["lig-incremental<br/>digest-gated sessions"] -.-> ir
+    inc -.-> gen
+    pat["lig-patch<br/>jump-table hot patches"] --> rt
+    cli["lig-cli<br/>the lig binary"] -.drives.-> inc
+```
+
+Supporting crates round out the pipeline: `lig-expr` lowers the oxc AST into the expression
+forest and decides what counts as dynamic, `lig-style` and `lig-taffy-profile` normalize
+style into const-fn layout tables, and `lig-core` supplies spans, u32 ids, interning, and the
+error-code registry. Hosts implement the `Host` commit stream — the repo ships a `mock-host`
+adapter plus `tests/dummy-host` and `tests/compile-clean` harnesses, and the single `unsafe`
+module in the workspace is `lig-patch`, isolated by policy.
+
+## Usage
+
+The `lig` binary (crate `lig-cli`) is the primary interface. Common commands:
+
+| Command | Purpose |
+| --- | --- |
+| `lig check <paths>` | Admission over `.tsx`/`.vue` sources, no codegen; `--deny-warn` promotes lints to denials |
+| `lig build <paths>` | Emit Rust + IR + source maps + manifest to `--out dist` (fail-closed, digest-gated) |
+| `lig watch <paths>` | Rebuild on save (`--once` for a single pass); a denied pass never touches `dist/` |
+| `lig inspect <file>` | Print the canonical View IR JSON for one source file |
+| `lig explain <code>` | Long-form help for a diagnostic code, served from the embedded catalog |
+| `lig resolve <map> <line> <col>` | Map a generated-Rust position back to source through a `.map.json` |
+| `lig doctor` | Environment checks: catalog, budget ledger, patch protocol, no_std targets |
+| `lig fixtures verify` | The CI parity gate over `fixtures/conformance/**` (both frontend legs) |
+| `lig reproducibility` | Byte-diff committed codegen against a fresh generation |
+| `lig budgets`, `lig no-std`, `lig patch-spike`, `lig incremental` | The remaining CI gates, runnable locally |
+
+The same flow works from Rust through the incremental session API (this is what the CLI itself uses):
+
+```rust
+use lig_admission::Profile;
+use lig_incremental::Session;
+
+let mut session = Session::new();
+session.set_source(&path, source_text);
+let report = session.compile(Profile::Layout);
+
+let unit = session.unit(&path).expect("registered source");
+assert!(unit.admitted, "denied: {:?}", unit.diagnostics);
+```
+
+Generated units are plain Rust built on `lig_runtime`'s prelude — see the committed example
+at `fixtures/generated/counter.rs`, walked line by line in `docs/appendix-a.md`. The full
+generated shape: a component struct with state fields, generated setters as the only write
+path, a const `Schedule`, static template tables, and `build`/`fire_*` entry points.
+
+## Status
+
+> [!NOTE]
+> Pre-1.0 research toolchain at version 0.1.0 — milestone M8 complete, with the View IR
+> schema at v5 and the compiled subset deliberately small: constructs outside the contract
+> (component uses inside slot content, events in `For` bodies, callback calls, raw DOM
+> access) deny with a precise code rather than mis-compile. CI runs on Linux and macOS;
+> the patch protocol is unix-only `dlopen` (`lig doctor` reports it unavailable on Windows).
+> MSRV is 1.97, edition 2024, toolchain pinned at 1.99.1. The release workflow publishes
+> changelogs, not crates — build from source.
+
+## Learn more
+
+- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m8/REPORT.md`](docs/m8/REPORT.md) — what each milestone delivered and measured
+- [`docs/appendix-a.md`](docs/appendix-a.md) — the annotated generated unit every gate pins
+- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017)
+- [`docs/admission/rules.md`](docs/admission/rules.md) — the Deny/Lint/Allow rule table; the 15-doc diagnostic catalog under [`docs/errors/`](docs/errors/)
+- Benchmarks: [`docs/benchmarks/budgets.toml`](docs/benchmarks/budgets.toml) (enforced ceilings), [`docs/benchmarks/save-to-frame.md`](docs/benchmarks/save-to-frame.md) (patch protocol numbers), [`docs/benchmarks/oxc-vs-swc.md`](docs/benchmarks/oxc-vs-swc.md) (the parser re-benchmark)
+- [`fixtures/README.md`](fixtures/README.md) — the conformance contract both frontends must satisfy
+- [`CHANGELOG.md`](CHANGELOG.md) — git-cliff-generated release notes
