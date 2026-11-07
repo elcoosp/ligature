@@ -316,3 +316,129 @@ fn branch_nested_branches_compose_the_walk() {
         "nested branch binds walk branch → branch: {text}"
     );
 }
+
+#[test]
+fn content_components_insert_at_mount_and_pass_props() {
+    // M9 grandchild prop-pass: a component use inside slot content keeps the
+    // Direct ownership shape (the grandchild is the content author's struct
+    // field), and gains a MOUNT-TIME story — the parent's slot assembly
+    // inserts the grandchild's DOM root into the content's component hole
+    // through the composed read walk, and the prop-pass run arm (the
+    // content author's bind reaction) sets the props and flushes the
+    // grandchild instance.
+    let src = r#"export function App() {
+  const [n, setN] = createSignal(2);
+  return (
+    <Panel title="x" header={<Badge count={n()} />} />
+  );
+}
+
+export function Badge({ count }) {
+  return <b class="badge">{count}</b>;
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "grandchild.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The grandchild is the content author's struct field.
+    assert!(
+        text.contains("pub badge: Badge"),
+        "grandchild instance is the author's field: {text}"
+    );
+    // The insert rides the mounted content's component hole.
+    assert!(
+        text.contains("if let Some(c) = s.panel.frag.slot_fill(")
+            && text.contains("h.insert(c.hole(")
+            && text.contains("s.badge.frag.roots()[0]"),
+        "the grandchild root inserts into the mounted content: {text}"
+    );
+    // The prop-pass arm writes the grandchild's setters and flushes it.
+    assert!(
+        text.contains("self.badge.set_count(")
+            && text.contains("::lig_runtime::flush(&mut self.badge, h)"),
+        "the prop-pass arm addresses the grandchild instance: {text}"
+    );
+}
+
+#[test]
+fn nested_outlets_mount_through_the_composed_walk() {
+    // M9 composed fill contexts: a nested outlet on fill content mounts its
+    // use-site fill (or its own fallback) at content-mount time through the
+    // composed accessor chain, and a bind on the nested fill walks the
+    // two-level `slot_fill_mut` unwrap.
+    let src = r#"export function App() {
+  const [tag, setTag] = createSignal("in");
+  return (
+    <Panel
+      title="x"
+      header={<div><Slot name="inner"><em>none</em></Slot></div>}
+      inner={<b>{tag}</b>}
+    />
+  );
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "nested.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The nested fill mounts ON the mounted header fill (build body).
+    assert!(
+        text.contains("if let Some(c) = s.panel.frag.slot_fill_mut(0usize)")
+            && text.contains("c.mount_slot("),
+        "the nested outlet's fill mounts through the content walk: {text}"
+    );
+    // A bind on the nested fill composes the walk: content → nested fill.
+    assert!(
+        text.contains("if let Some(c) = self.panel.frag.slot_fill_mut(")
+            && text.contains("if let Some(c) = c.slot_fill_mut(")
+            && text.contains("c.set_text(h,"),
+        "the nested fill bind walks content → nested fill: {text}"
+    );
+}
+
+#[test]
+fn unfilled_nested_outlets_mount_their_own_fallback() {
+    // M9: a nested outlet the use site does not fill mounts the outlet's
+    // OWN fallback (author-side statics), still through the composed walk.
+    let src = r#"export function App() {
+  return <Panel title="x" header={<div><Slot name="inner"><em>none</em></Slot></div>} />;
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "nested_fb.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert!(
+        text.contains("if let Some(c) = s.panel.frag.slot_fill_mut(0usize)")
+            && text.contains("::lig_runtime::SlotOrigin::Fallback"),
+        "the unfilled nested outlet mounts its own fallback: {text}"
+    );
+}
+
+#[test]
+fn fills_matching_no_outlet_fail_closed() {
+    // M9 backstop: a fill whose name matches no outlet on the child's root
+    // or fallback contents is a compile error — the M6-era silent drop
+    // (the fill never mounted, nobody noticed) closes.
+    let src = r#"export function App() {
+  return <Panel title="x" nowhere={<b>lost</b>} />;
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="foot" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "lost.tsx").expect("lower");
+    let err = lig_codegen::generate_module(&module).expect_err("unmatched fill denies");
+    assert!(
+        matches!(err, lig_codegen::CodegenError::Unsupported(_)),
+        "unmatched fill is Unsupported: {err:?}"
+    );
+}
