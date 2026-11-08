@@ -61,11 +61,26 @@ fn bench_codegen_ref(c: &mut Criterion) {
     });
 }
 
+/// Lower the else-leg fixture once (M11: the else leg — the tracked-leg
+/// mounting arms, the per-leg assembly/marking emission, and the leg-guarded
+/// captures ride the module pipeline), then time repeated codegen of the
+/// same IR.
+fn bench_codegen_else(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/show-else/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "show-else.tsx").expect("fixture lowers");
+    c.bench_function("codegen/else", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module))).expect("else codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
     bench_codegen_composed,
     bench_codegen_branch,
-    bench_codegen_ref
+    bench_codegen_ref,
+    bench_codegen_else
 );
 criterion_main!(benches);
