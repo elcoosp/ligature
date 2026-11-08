@@ -7,3 +7,7 @@ coverage
 
 # excluded (out-of-workspace) spike crates keep their own target dirs
 tests/*/target
+
+# local ship delivery (the agent leaves these untracked; the user runs ship.sh)
+/ship.sh
+/.github/pr-body.md

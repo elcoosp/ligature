@@ -96,6 +96,7 @@ pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagn
         let (root, props) = lower_component(&mut module, source, section, &names[idx], &mut diags);
         module.components[idx].root = root;
         module.components[idx].props = props;
+        own_tree_contract(&module, root, &mut diags);
     }
 
     if diags
@@ -106,6 +107,57 @@ pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagn
     }
     module.canonicalize();
     Ok(module)
+}
+
+/// The M10 own-tree contract (mirrors the Solid leg): component uses and
+/// slot outlets inside v-for bodies of a component's own template deny with
+/// one precise reason. Before M10 both lowered silently broken: the item
+/// template carried a never-mounted outlet hole, and a v-for body carrying
+/// a component use built ONE eager instance field shared by every item, its
+/// root never attached. v-if branches admit (per-mount identity).
+fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigDiagnostic>) {
+    let mut stack = vec![(root, false)];
+    while let Some((frag_id, in_for)) = stack.pop() {
+        let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
+            continue;
+        };
+        for d in &frag.dynamics {
+            let why = match (&d.kind, in_for) {
+                (DynamicKind::Component(_), true) => Some(
+                    "component uses inside list item bodies are not admitted — per-item \
+                          instance identity is the keyed-component story (hoist the use out of \
+                          the body)",
+                ),
+                (DynamicKind::Slot { .. }, true) => Some(
+                    "slot outlets inside list item bodies are not admitted — per-item slot \
+                          assembly is the keyed-component story (hoist the outlet out of the \
+                          body)",
+                ),
+                _ => None,
+            };
+            if let Some(why) = why {
+                let span = d.span;
+                diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    why.to_string(),
+                    Span::new(span.0, span.1),
+                ));
+            }
+            match &d.kind {
+                DynamicKind::If(i) => {
+                    stack.push((i.then, in_for));
+                    if let Some(el) = i.else_ {
+                        stack.push((el, in_for));
+                    }
+                }
+                DynamicKind::For(fo) => stack.push((fo.body, true)),
+                _ => {}
+            }
+        }
+        for &c in &frag.children {
+            stack.push((c, in_for));
+        }
+    }
 }
 
 /// The component name of one section: `defineOptions({ name })` or the
@@ -1004,7 +1056,18 @@ impl ComponentLowering<'_> {
             children: vec![],
         });
         let mut path = Vec::new();
-        let root = self.lower_element(el, &mut path);
+        // M10: the branch/body ROOT dispatches component and slot tags —
+        // `lower_element` does not dispatch the tag, so a `v-if` on a
+        // component use (or an outlet) lowered the branch root as a plain
+        // element and the use/outlet silently vanished (the fail-open shape
+        // the M9 content-root dispatch closed for content roots).
+        let root = if is_component_tag(&el.tag) {
+            self.lower_component_use(el, &[])
+        } else if el.tag == "slot" {
+            self.lower_slot(el, &[])
+        } else {
+            self.lower_element(el, &mut path)
+        };
         let tpl = self.module.intern_template(TemplateIr::new(root));
         let fi = frag.get() as usize;
         self.module.fragments[fi].template = tpl;
@@ -1083,16 +1146,12 @@ impl ComponentLowering<'_> {
                 }
                 TplNode::Elem(el) => {
                     roots += 1;
-                    if el.tag == "slot" {
-                        out.push(self.lower_slot(el, &[]));
-                        i += 1;
-                        continue;
-                    }
-                    if is_component_tag(&el.tag) {
-                        out.push(self.lower_component_use(el, &[]));
-                        i += 1;
-                        continue;
-                    }
+                    // M10: structural directives dispatch FIRST — on ANY tag
+                    // (element, component, slot). Before M10 a `v-if`/`v-for`
+                    // on a component or slot tag fell through to the
+                    // component/outlet dispatch and the directive silently
+                    // dropped (the same fail-open shape the content-root
+                    // dispatch closed in M9).
                     if let Some(TplAttr::For { item, index, list }) =
                         el.attrs.iter().find(|a| matches!(a, TplAttr::For { .. }))
                     {
@@ -1107,6 +1166,16 @@ impl ComponentLowering<'_> {
                         let expr = *expr;
                         let consumed = self.lower_if_chain(el, expr, nodes, i, &[], &mut out);
                         i += consumed;
+                        continue;
+                    }
+                    if el.tag == "slot" {
+                        out.push(self.lower_slot(el, &[]));
+                        i += 1;
+                        continue;
+                    }
+                    if is_component_tag(&el.tag) {
+                        out.push(self.lower_component_use(el, &[]));
+                        i += 1;
                         continue;
                     }
                     let mut path = Vec::new();
@@ -1141,22 +1210,8 @@ impl ComponentLowering<'_> {
                     i += 1;
                 }
                 TplNode::Elem(el) => {
-                    if el.tag == "slot" {
-                        path.push(out.len() as u32);
-                        let node = self.lower_slot(el, path);
-                        path.pop();
-                        out.push(node);
-                        i += 1;
-                        continue;
-                    }
-                    if is_component_tag(&el.tag) {
-                        path.push(out.len() as u32);
-                        let node = self.lower_component_use(el, path);
-                        path.pop();
-                        out.push(node);
-                        i += 1;
-                        continue;
-                    }
+                    // M10: structural directives dispatch FIRST — on ANY tag
+                    // (element, component, slot); see lower_root.
                     if let Some(TplAttr::For { item, index, list }) =
                         el.attrs.iter().find(|a| matches!(a, TplAttr::For { .. }))
                     {
@@ -1176,6 +1231,22 @@ impl ComponentLowering<'_> {
                         let consumed = self.lower_if_chain(el, expr, nodes, i, path, out);
                         path.pop();
                         i += consumed;
+                        continue;
+                    }
+                    if el.tag == "slot" {
+                        path.push(out.len() as u32);
+                        let node = self.lower_slot(el, path);
+                        path.pop();
+                        out.push(node);
+                        i += 1;
+                        continue;
+                    }
+                    if is_component_tag(&el.tag) {
+                        path.push(out.len() as u32);
+                        let node = self.lower_component_use(el, path);
+                        path.pop();
+                        out.push(node);
+                        i += 1;
                         continue;
                     }
                     path.push(out.len() as u32);
@@ -2247,37 +2318,31 @@ impl ComponentLowering<'_> {
     /// refs, If/For dynamics (M8), AND component uses and nested outlets
     /// (M9: grandchild prop-pass rides the author's field + a mount-time
     /// insert; nested outlets mount their fills/own fallbacks through the
-    /// composed `Ctx` walks). Still fail-closed inside the content's
-    /// STRUCTURAL bodies (branch/list fragments): component uses and
-    /// outlets there need per-mount/per-item instance identity — a
-    /// remounted branch would re-insert a root the previous teardown
-    /// destroyed. Children/prop-pass/whole-style dynamics stay denied (M2),
-    /// and event handlers inside list item bodies stay denied (the
-    /// LIG-E118 discipline — per-item dispatch needs keyed components).
+    /// composed `Ctx` walks). Component uses and nested outlets admit inside
+    /// BRANCH bodies of content since M10 (per-mount instance identity + the
+    /// branch-time slot assembly). Still fail-closed inside LIST bodies:
+    /// per-item instance identity is the keyed-component story.
+    /// Children/prop-pass/whole-style dynamics stay denied (M2), and event
+    /// handlers inside list item bodies stay denied (the LIG-E118 discipline
+    /// — per-item dispatch needs keyed components).
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: (u32, u32)) {
-        self.content_contract(frag, false, false, span);
+        self.content_contract(frag, false, span);
     }
 
     /// The recursive content walk: `in_list_item` marks fragments mounted as
     /// For bodies (their binds are the per-item replay's; events there are
-    /// the LIG-E118 denial); `in_branch` marks fragments mounted by an If
-    /// branch or For body (instances there are per-mount).
-    fn content_contract(
-        &mut self,
-        frag: FragmentId,
-        in_list_item: bool,
-        in_branch: bool,
-        span: (u32, u32),
-    ) {
+    /// the LIG-E118 denial; components and outlets there are the per-item
+    /// identity denial).
+    fn content_contract(&mut self, frag: FragmentId, in_list_item: bool, span: (u32, u32)) {
         let (dynamics, children) = {
             let f = &self.module.fragments[frag.get() as usize];
             (f.dynamics.clone(), f.children.clone())
         };
         for d in &dynamics {
             let denied: Option<String> = match &d.kind {
-                // Scalar binds, refs, the structural constructs (M8), and
-                // (M9) component uses + nested outlets are admitted on
-                // content.
+                // Scalar binds, refs, the structural constructs (M8),
+                // component uses + nested outlets on content (M9) and inside
+                // content BRANCHES (M10 — per-mount identity) are admitted.
                 DynamicKind::Text
                 | DynamicKind::Html
                 | DynamicKind::Attr { .. }
@@ -2291,16 +2356,16 @@ impl ComponentLowering<'_> {
                      handler to the list level (the LIG-E118 discipline)"
                         .to_string()
                 }),
-                DynamicKind::Component(_) => in_branch.then(|| {
-                    "component uses inside branch/list bodies of slot content are not admitted \
-                     — a remounted branch would need per-mount instance identity (rebuild per \
-                     mount, not re-insertion)"
+                DynamicKind::Component(_) => in_list_item.then(|| {
+                    "component uses inside list item bodies of slot content are not admitted — \
+                     per-item instance identity is the keyed-component story (hoist the use out \
+                     of the body)"
                         .to_string()
                 }),
-                DynamicKind::Slot { .. } => in_branch.then(|| {
-                    "slot outlets inside branch/list bodies of slot content are not admitted — \
-                     the outlet mounts with its branch, which needs branch-mount-time fill \
-                     coordination"
+                DynamicKind::Slot { .. } => in_list_item.then(|| {
+                    "slot outlets inside list item bodies of slot content are not admitted — \
+                     per-item slot assembly is the keyed-component story (hoist the outlet out \
+                     of the body)"
                         .to_string()
                 }),
                 DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
@@ -2318,8 +2383,8 @@ impl ComponentLowering<'_> {
             }
         }
         // Structural bodies recurse: If branches and For bodies keep the
-        // scalar content contract (binds, events, refs compose) but deny
-        // component uses and outlets (per-mount/per-item identity).
+        // scalar content contract (binds, events, refs compose); For bodies
+        // additionally keep the per-item instance denials.
         let mut structural: Vec<(FragmentId, bool)> = Vec::new();
         {
             let f = &self.module.fragments[frag.get() as usize];
@@ -2338,9 +2403,9 @@ impl ComponentLowering<'_> {
         }
         for child in children {
             if let Some((_, child_in_list)) = structural.iter().find(|(id, _)| *id == child) {
-                self.content_contract(child, *child_in_list, true, span);
+                self.content_contract(child, *child_in_list, span);
             } else {
-                self.content_contract(child, in_list_item, in_branch, span);
+                self.content_contract(child, in_list_item, span);
             }
         }
     }
@@ -3059,31 +3124,14 @@ defineOptions({ name: "Panel" });
         );
     }
 
-    /// The M9 fail-closed boundary (Vue leg): component uses and nested
-    /// outlets inside BRANCH or LIST bodies of content stay denied with
-    /// LIG-E001 — per-mount/per-item instance identity is deferred.
+    /// The M10 fail-closed boundary (Vue leg): component uses and nested
+    /// outlets inside LIST bodies of content stay denied with LIG-E001 —
+    /// per-item instance identity remains the keyed-component story. The
+    /// BRANCH cases M9 denied admit since M10 (per-mount identity + the
+    /// branch-time slot assembly).
     #[test]
     fn slot_content_stays_fail_closed_on_structural_instances() {
-        let cases: [(&str, &str); 3] = [
-            // Component use inside a v-if branch hanging on content
-            (
-                r#"<script setup lang="ts">
-defineOptions({ name: "App" });
-const on = ref(true);
-</script>
-<template>
-  <Panel title="x">
-    <template #header><Badge v-if="on" :count="1" /></template>
-  </Panel>
-</template>
-<script setup lang="ts">
-defineOptions({ name: "Badge" });
-const { count } = defineProps<{ count: number }>();
-</script>
-<template><b>{{ count }}</b></template>
-"#,
-                "Component in content branch",
-            ),
+        let cases: [(&str, &str); 2] = [
             // Component use inside a v-for body on content
             (
                 r#"<script setup lang="ts">
@@ -3103,19 +3151,19 @@ const { count } = defineProps<{ count: number }>();
 "#,
                 "Component in content list",
             ),
-            // Nested outlet inside a v-if branch hanging on content
+            // Nested outlet inside a v-for body on content
             (
                 r#"<script setup lang="ts">
 defineOptions({ name: "App" });
-const on = ref(true);
+const rows = ref(["a"]);
 </script>
 <template>
   <Panel title="x">
-    <template #header><slot v-if="on" name="inner" /></template>
+    <template #header><slot v-for="r in rows" name="inner" /></template>
   </Panel>
 </template>
 "#,
-                "Outlet in content branch",
+                "Outlet in content list",
             ),
         ];
         for (body, what) in cases {
@@ -3129,6 +3177,114 @@ const on = ref(true);
                     diags.iter().any(|d| d.code == "LIG-E001"),
                     "{what}: expected LIG-E001, got {diags:?}"
                 ),
+            }
+        }
+    }
+
+    /// The M10 lift (Vue leg): component uses and nested outlets admit
+    /// DIRECTLY inside v-if branch bodies of slot content — a remounted
+    /// branch rebuilds its per-mount component instance, and the outlet
+    /// mounts its fill/fallback with the branch.
+    #[test]
+    fn content_branches_admit_components_and_outlets() {
+        let cases: [(&str, &str); 2] = [
+            // Component use inside a v-if branch hanging on content
+            (
+                r#"<script setup lang="ts">
+defineOptions({ name: "App" });
+const on = ref(true);
+</script>
+<template>
+  <Panel title="x">
+    <template #header><span v-if="on"><Badge :count="1" /></span></template>
+  </Panel>
+</template>
+<script setup lang="ts">
+defineOptions({ name: "Badge" });
+const { count } = defineProps<{ count: number }>();
+</script>
+<template><b>{{ count }}</b></template>
+"#,
+                "Component in content branch",
+            ),
+            // Nested outlet inside a v-if branch hanging on content
+            (
+                r#"<script setup lang="ts">
+defineOptions({ name: "App" });
+const on = ref(true);
+</script>
+<template>
+  <Panel title="x">
+    <template #header><span v-if="on"><slot name="inner" /></span></template>
+  </Panel>
+</template>
+"#,
+                "Outlet in content branch",
+            ),
+        ];
+        for (body, what) in cases {
+            let src = format!(
+                "{body}\n<script setup>defineOptions({{ name: \"Panel\" }});</script>\n<template><section><slot name=\"foot\" /></section></template>\n"
+            );
+            let src = src.replace("\\n", "\n");
+            lower_module(&src, "branch.vue")
+                .unwrap_or_else(|diags| panic!("{what}: expected admission, got {diags:?}"));
+        }
+    }
+
+    /// The M10 own-tree contract (Vue leg): component uses and outlets
+    /// inside v-for bodies of the component's OWN template deny with one
+    /// precise reason (per-item identity is the keyed-component story) —
+    /// closing two silent fail-opens where the item template lowered with a
+    /// never-mounted outlet hole and a single detached component instance.
+    #[test]
+    fn own_tree_for_bodies_deny_components_and_outlets() {
+        let cases: [(&str, &str); 2] = [
+            // Outlet inside a v-for body of the component's own template
+            (
+                r#"<script setup lang="ts">
+defineOptions({ name: "Inner" });
+const items = ref(["a"]);
+</script>
+<template>
+  <ul>
+    <span v-for="item in items" :key="item"><slot name="a"><em>{{ item }}</em></slot></span>
+  </ul>
+</template>
+"#,
+                "Outlet in own-tree list",
+            ),
+            // Component use inside a v-for body of the component's own template
+            (
+                r#"<script setup lang="ts">
+defineOptions({ name: "App" });
+const items = ref(["a"]);
+</script>
+<template>
+  <main><span v-for="item in items" :key="item"><Badge :count="item" /></span></main>
+</template>
+<script setup lang="ts">
+defineOptions({ name: "Badge" });
+const { count } = defineProps<{ count: string }>();
+</script>
+<template><b>{{ count }}</b></template>
+"#,
+                "Component in own-tree list",
+            ),
+        ];
+        for (src, what) in cases {
+            match lower_module(src, "own_list.vue") {
+                Ok(_) => panic!("{what}: expected LIG-E001, got success"),
+                Err(diags) => {
+                    assert!(
+                        diags.iter().any(|d| d.code == "LIG-E001"),
+                        "{what}: expected LIG-E001, got {diags:?}"
+                    );
+                    assert!(
+                        diags.iter().any(|d| d.message.contains("per-item")),
+                        "{what}: expected the per-item reason, got {diags:?}"
+                    );
+                }
             }
         }
     }

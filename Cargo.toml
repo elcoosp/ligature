@@ -23,7 +23,7 @@ members = [
 exclude = ["tests/patch-tip"]
 
 [workspace.package]
-version = "0.1.0"
+version = "1.0.0"
 edition = "2024"
 rust-version = "1.97"
 license = "MIT OR Apache-2.0"
@@ -100,8 +100,8 @@ unsafe_code = "deny"
 missing_docs = "warn"
 
 [workspace.lints.clippy]
-# Pedantic from day one (CI gate: -D warnings).
-pedantic = { level = "deny", priority = -1 }
+# Pedantic from day one (CI gate: -D warnings escalates the warns).
+pedantic = { level = "warn", priority = -1 }
 # Documented allowlist — each with rationale:
 module_name_repetitions = "allow"     # crate-internal module paths repeat by design (lig_core::span::Span)
 missing_errors_doc = "allow"          # infallible compiler-internal APIs dominate; Result docs added where they exist
@@ -113,6 +113,8 @@ cast_precision_loss = "allow"         # style lengths f32 by contract (taffy)
 too_many_arguments = "allow"          # push_dynamic takes the full dynamic+reaction descriptor (§5); every caller supplies all of it
 too_many_lines = "allow"              # codegen emitters are table-like token builders (§9.2/§9.3); splitting would scatter the IR→token mapping
 doc_markdown = "allow"                # CamelCase identifiers (TSX, LIS, dom-expressions) pervade docs
+type_complexity = "allow"             # generate_component_pieces returns the shared (pieces, ident, digest, path, links) core of unit+module generation (§9)
+needless_range_loop = "allow"         # the keyed plan walks live-index steps — index arithmetic IS the algorithm (§7.5); mirrors the generated plan loops
 
 [profile.release]
 lto = "thin"

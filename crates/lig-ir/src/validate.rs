@@ -22,7 +22,6 @@ pub struct Violation {
 
 /// Validate a module; empty result means all invariants hold.
 // One violation per rule keeps the checker flat and auditable.
-#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn validate(m: &ViewModule) -> Vec<Violation> {
     let mut v: Vec<Violation> = Vec::new();

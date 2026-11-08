@@ -102,7 +102,6 @@ struct RxInfo<'m> {
 /// [`CodegenError`] for constructs outside the M1 subset, invalid schedules,
 /// or readability-budget violations.
 // One arm per dynamic kind keeps the §9.2 emission auditable end-to-end.
-#[allow(clippy::too_many_lines)]
 pub fn generate_component(
     module: &ViewModule,
     component: ComponentId,
@@ -117,15 +116,6 @@ pub fn generate_component(
     let doc = syn::LitStr::new(&header, Span::call_site());
     let all: proc_macro2::TokenStream = quote! {
         #[doc = #doc]
-        #[allow(
-            clippy::all,
-            clippy::pedantic,
-            missing_docs,
-            non_upper_case_globals,
-            unused_parens,
-            unused_variables,
-            dead_code
-        )]
         pub mod generated {
             use ::lig_runtime::prelude::*;
             #(#pieces)*
@@ -148,7 +138,6 @@ pub fn generate_component(
 /// Build the item tokens for one component (the shared core of
 /// [`generate_component`] and [`generate_module`]). Returns the pieces, the
 /// component struct ident, the surface digest, and the source path.
-#[allow(clippy::type_complexity)]
 fn generate_component_pieces(
     module: &ViewModule,
     component: ComponentId,
@@ -372,10 +361,22 @@ fn generate_component_pieces(
         let fname = syn::Ident::new(field, Span::call_site());
         let child_ty = syn::Ident::new(&child_name, Span::call_site());
         let props_ty = syn::Ident::new(&format!("{child_name}Props"), Span::call_site());
-        struct_fields.push(quote! { pub #fname: #child_ty });
-        init_fields.push(quote! {
-            #fname: #child_ty::build(h, #props_ty::default())
-        });
+        // M10 per-mount identity: a use on a BRANCH fragment (If/Show body —
+        // any base, author or child side) rebuilds its instance per mount,
+        // so the field is `Option<Child>` (built in the mounting arm,
+        // disposed on unmount). Direct uses keep the eager M0 field.
+        if matches!(
+            ctx_of(module, &frags, &ctx_map, use_site.owner),
+            Ctx::Branch { .. }
+        ) {
+            struct_fields.push(quote! { pub #fname: Option<#child_ty> });
+            init_fields.push(quote! { #fname: None });
+        } else {
+            struct_fields.push(quote! { pub #fname: #child_ty });
+            init_fields.push(quote! {
+                #fname: #child_ty::build(h, #props_ty::default())
+            });
+        }
     }
 
     // --- StyleProp prev slots (per-dynamic prev diff, §8.2/C5) ----------------------
@@ -498,38 +499,216 @@ fn generate_component_pieces(
                         // inside slot content mounts its branch on the
                         // content (M7), not on the parent's slab.
                         let content_rooted = ctx.content_rooted();
-                        let mount_flag = content_rooted.then(|| quote! { did_mount = true; });
+                        // M10 branch-time assembly: the branch carries
+                        // component uses (per-mount identity — rebuild per
+                        // mount, dispose per unmount) or slot outlets
+                        // (their fills/fallbacks mount WITH the branch).
+                        let branch_frag_ir = module.fragments.get(if_ir.then.get() as usize);
+                        let branch_has_components = branch_frag_ir.is_some_and(|bf| {
+                            bf.dynamics
+                                .iter()
+                                .any(|d| matches!(d.kind, DynamicKind::Component(_)))
+                        });
+                        let branch_has_slots = branch_frag_ir.is_some_and(|bf| {
+                            bf.dynamics
+                                .iter()
+                                .any(|d| matches!(d.kind, DynamicKind::Slot { .. }))
+                        });
+                        let needs_assembly =
+                            content_rooted || branch_has_components || branch_has_slots;
+                        let mount_flag = needs_assembly.then(|| quote! { did_mount = true; });
+                        // The mounted branch hangs on the fragment `ctx`
+                        // addresses, at this dynamic's branch slot.
+                        let branch_read = {
+                            let base_read = ctx_frag_read(&ctx);
+                            quote! { (#base_read).and_then(|f| f.branch(#slot)) }
+                        };
+                        // Per-mount instance rebuild (mount path) and dispose
+                        // (unmount path) for the branch's component uses.
+                        let mut rebuilds: Vec<proc_macro2::TokenStream> = Vec::new();
+                        let mut disposes: Vec<proc_macro2::TokenStream> = Vec::new();
+                        if let Some(bf) = branch_frag_ir {
+                            for (di, d) in bf.dynamics.iter().enumerate() {
+                                let DynamicKind::Component(c) = &d.kind else {
+                                    continue;
+                                };
+                                if owner_is_list_body(module, &frags, if_ir.then) {
+                                    return Err(CodegenError::Unsupported(
+                                        "component uses inside list item bodies need per-item \
+                                         instance identity (the keyed-component story)",
+                                    ));
+                                }
+                                let field_name = component_field_map
+                                    .get(&(if_ir.then.get(), di as u32))
+                                    .cloned()
+                                    .unwrap_or_else(|| field_name_for(module, c.component));
+                                let field = syn::Ident::new(&field_name, Span::call_site());
+                                let child_name = module
+                                    .components
+                                    .get(c.component.get() as usize)
+                                    .map_or_else(
+                                        || "Child".to_string(),
+                                        |decl| sanitize(module.strings.get(decl.name)),
+                                    );
+                                let child_ty = syn::Ident::new(&child_name, Span::call_site());
+                                let props_ty = syn::Ident::new(
+                                    &format!("{child_name}Props"),
+                                    Span::call_site(),
+                                );
+                                rebuilds.push(quote! {
+                                    self.#field =
+                                        Some(#child_ty::build(h, #props_ty::default()));
+                                });
+                                rebuilds.push(quote! {
+                                    if let Some(n) = (#branch_read).map(|b| b.hole(#di)) {
+                                        if let Some(inst) = self.#field.as_ref() {
+                                            h.insert(n, inst.frag.roots()[0], 0);
+                                        }
+                                    }
+                                });
+                                disposes.push(quote! {
+                                    if let Some(inst) = self.#field.take() {
+                                        inst.frag.teardown(h);
+                                    }
+                                });
+                            }
+                        }
+                        // The branch-time slot assembly (M10): outlets on the
+                        // branch mount their use-site fill (author-side
+                        // content) or their own fallback (any branch) at
+                        // mount time, then the walk recurses into the freshly
+                        // mounted content.
+                        let mut assembly: Vec<proc_macro2::TokenStream> = Vec::new();
+                        let mut assembly_mask: u64 = 0;
+                        if branch_has_slots && let Some(bf) = branch_frag_ir {
+                            // The owning use site: author-side content
+                            // names it through the ctx chain's innermost
+                            // Fill field; child-side branches mount
+                            // fallbacks only.
+                            let use_site: Option<&ComponentUse> = ctx_content_field(&ctx)
+                                .and_then(|field| component_uses.iter().find(|u| u.field == field));
+                            for (di, d) in bf.dynamics.iter().enumerate() {
+                                let DynamicKind::Slot {
+                                    name: slot_name,
+                                    fallback,
+                                } = &d.kind
+                                else {
+                                    continue;
+                                };
+                                let mounted = use_site.and_then(|u| {
+                                    u.ir.slots
+                                        .iter()
+                                        .find(|s| s.name == *slot_name)
+                                        .and_then(|s| s.fallback)
+                                        .map(|fb| (fb, false))
+                                });
+                                let (content_id, is_fallback) = match mounted {
+                                    Some((fb, _)) => (fb, false),
+                                    None => match fallback {
+                                        Some(fb) => (*fb, true),
+                                        None => continue,
+                                    },
+                                };
+                                let origin = if is_fallback {
+                                    quote!(::lig_runtime::SlotOrigin::Fallback)
+                                } else {
+                                    quote!(::lig_runtime::SlotOrigin::Fill)
+                                };
+                                // Statics follow tree membership: author
+                                // content rides this component's prefix,
+                                // child content the child's.
+                                let content_in_parent = frags.iter().any(|f| f.id == content_id);
+                                let owner_prefix = if content_in_parent {
+                                    prefix.clone()
+                                } else {
+                                    let child_name = use_site
+                                        .and_then(|u| module.components.get(u.comp_idx))
+                                        .map_or_else(
+                                            || "Child".to_string(),
+                                            |decl| module.strings.get(decl.name).to_string(),
+                                        );
+                                    format!("{}_", sanitize(&child_name))
+                                };
+                                let content_frag = &module.fragments[content_id.get() as usize];
+                                let c_tpl =
+                                    tpl_ident(&owner_prefix, content_frag.template.get() as usize);
+                                let c_holes = hole_ident(&owner_prefix, content_id.get() as usize);
+                                let c_branches =
+                                    branch_ident(&owner_prefix, content_id.get() as usize);
+                                // The mount lands on the BRANCH itself
+                                // (the outlet's owner fragment); the
+                                // content step addresses the freshly
+                                // mounted content for the recursion.
+                                let steps = vec![MutStep::Content {
+                                    fill: !is_fallback,
+                                    slot: di,
+                                }];
+                                // Recurse into the freshly mounted content
+                                // (nested outlets, grandchild holes,
+                                // events, refs) inside the same guards.
+                                let mut rec: Vec<proc_macro2::TokenStream> = Vec::new();
+                                walk_content_mounts(
+                                    module,
+                                    &frags,
+                                    &prefix,
+                                    &component_field_map,
+                                    content_id,
+                                    &quote!(b),
+                                    &steps,
+                                    use_site.map_or(&[], |u| &u.ir.slots),
+                                    &owner_prefix,
+                                    use_site.map_or("", |u| u.field.as_str()),
+                                    false,
+                                    0,
+                                    &mut rec,
+                                )?;
+                                let body = quote! {
+                                    b.mount_slot(h, #di, #origin, #c_tpl, #c_holes, #c_branches);
+                                    #(#rec)*
+                                };
+                                assembly.push(emit_assembly_walk(
+                                    &ctx_frag_mut(&ctx),
+                                    slot,
+                                    &[],
+                                    body,
+                                ));
+                                // Author-side fills are NOT under the
+                                // branch subtree: their reactions join the
+                                // mount mask so the fresh content's binds
+                                // initialize on the next flush pass.
+                                if !is_fallback {
+                                    assembly_mask |= subtree_init_mask(module, content_id);
+                                }
+                            }
+                        }
                         let inner = quote! {
                             let on = #cond;
                             if #recv.branch_is(#slot) != on {
                                 if on {
                                     #recv.mount_branch(h, #slot, #b_tpl, #b_holes, #b_branches);
                                     #mount_flag
+                                    #(#rebuilds)*
                                 } else {
                                     #recv.unmount_branch(h, #slot);
+                                    #(#disposes)*
                                 }
                             }
                         };
                         let scoped = ctx_scope(&ctx, inner);
-                        if content_rooted {
-                            // Content-rooted branches (M8): the fresh branch's
-                            // own binds initialize on the NEXT flush pass (the
-                            // mount marks them; the loop re-enters through
-                            // `produced.union(&rx.dirty().take())`), events
-                            // attach across slabs with the record on the
-                            // authoring component's fragment, and content refs
-                            // capture the fresh hole per mount. The mark and
-                            // the captures sit OUTSIDE the unwrap so the
-                            // fallback root (`self.frag`) stays borrowable.
-                            let branch_mask = subtree_init_mask(module, if_ir.then);
+                        if needs_assembly {
+                            // The mount marks (M8, widened in M10): the fresh
+                            // branch's own binds initialize on the NEXT flush
+                            // pass (the loop re-enters through
+                            // `produced.union(&rx.dirty().take())`); M10 adds
+                            // the branch-mounted fills' reactions (per-mount
+                            // identity: the prop-pass arms initialize the
+                            // fresh instances) and the branch-time assembly's
+                            // content. The mark, the assembly, and the
+                            // captures sit OUTSIDE the unwrap so the fallback
+                            // root (`self.frag`) stays borrowable.
+                            let branch_mask = subtree_init_mask(module, if_ir.then) | assembly_mask;
                             let mask_lo_lit =
                                 syn::LitInt::new(&format!("{branch_mask:#x}"), Span::call_site());
-                            // The mounted branch hangs on the fragment `ctx`
-                            // addresses, at this dynamic's branch slot.
-                            let branch_read = {
-                                let base_read = ctx_frag_read(&ctx);
-                                quote! { #base_read.and_then(|f| f.branch(#slot)) }
-                            };
                             let mut mount_attaches = Vec::new();
                             if let Some(bf) = module.fragments.get(if_ir.then.get() as usize) {
                                 for (edi, ed) in bf.dynamics.iter().enumerate() {
@@ -573,6 +752,7 @@ fn generate_component_pieces(
                                     #scoped
                                     if did_mount {
                                         self.frag.mark_mask(#mask_lo_lit);
+                                        #(#assembly)*
                                         #(#mount_attaches)*
                                         #(#mount_refs)*
                                     }
@@ -678,16 +858,17 @@ fn generate_component_pieces(
                     DynamicKind::Component(c) => {
                         // Prop-pass (§7.6): direct writes on the child's
                         // state + a child flush; the child's own reactions
-                        // run from its schedule. M9: the arm is
-                        // ctx-independent (the instance is the content
-                        // author's field), but a component inside a
-                        // content-rooted BRANCH would need per-mount
-                        // instance identity — the frontends deny it, and
-                        // codegen stays fail-closed.
-                        if ctx.content_rooted() && matches!(ctx, Ctx::Branch { .. }) {
+                        // run from its schedule. M10 per-mount identity: a
+                        // use on a BRANCH fragment owns an Option field —
+                        // the arm guards on the instance (a remounted branch
+                        // rebuilt it; an unmounted one is `None`). Uses on
+                        // For (list item) bodies stay fail-closed: per-item
+                        // instance identity is the keyed-component story.
+                        let per_mount = matches!(ctx, Ctx::Branch { .. });
+                        if per_mount && owner_is_list_body(module, &frags, rx.decl.owner) {
                             return Err(CodegenError::Unsupported(
-                                "component uses inside branch/list bodies of slot content need \
-                                 per-mount instance identity (deferred)",
+                                "component uses inside list item bodies need per-item instance \
+                                 identity (the keyed-component story)",
                             ));
                         }
                         let field = syn::Ident::new(
@@ -722,10 +903,24 @@ fn generate_component_pieces(
                                 ) => raw,
                                 _ => quote!((#raw).clone()),
                             };
-                            sets.push(quote! { self.#field.#setter(#v); });
+                            let recv_expr = if per_mount {
+                                quote!(c)
+                            } else {
+                                quote!(self.#field)
+                            };
+                            sets.push(quote! { #recv_expr.#setter(#v); });
                         }
                         if sets.is_empty() {
                             // No dynamic props: nothing to do per update.
+                        } else if per_mount {
+                            run_arms.push(quote! {
+                                #cname => {
+                                    if let Some(c) = self.#field.as_mut() {
+                                        #(#sets)*
+                                        ::lig_runtime::flush(c, h);
+                                    }
+                                }
+                            });
                         } else {
                             run_arms.push(quote! {
                                 #cname => {
@@ -960,6 +1155,25 @@ fn generate_component_pieces(
     // tree, fallback fragments in the child's — both sets of statics are
     // emitted into the same generated module scope.
     let mut slot_fills: Vec<proc_macro2::TokenStream> = Vec::new();
+    // M10: the universal attach contract — every DIRECT component use's root
+    // enters its owner's tree at the use hole before anything mounts into
+    // it. Before M10 the child's DOM never attached (the M2-era silent drop:
+    // Create commits existed, the positioning insert did not). Content uses
+    // insert at content mount (M9's walk), branch uses per mount (M10).
+    let mut child_attaches: Vec<proc_macro2::TokenStream> = Vec::new();
+    for use_site in &component_uses {
+        if !matches!(
+            ctx_of(module, &frags, &ctx_map, use_site.owner),
+            Ctx::Direct
+        ) {
+            continue;
+        }
+        let fname = syn::Ident::new(&use_site.field, Span::call_site());
+        let di = use_site.dyn_idx as usize;
+        child_attaches.push(quote! {
+            h.insert(s.frag.hole(#di), s.#fname.frag.roots()[0], 0);
+        });
+    }
     for use_site in &component_uses {
         let Some(child_root) =
             module.component_root(lig_core::id::ComponentId::new(use_site.comp_idx as u32))
@@ -1079,7 +1293,10 @@ fn generate_component_pieces(
             // mounted nested content).
             {
                 let root_recv = quote! { s.#fname.frag };
-                let steps: Vec<MutStep> = vec![(!is_fallback, di)];
+                let steps: Vec<MutStep> = vec![MutStep::Content {
+                    fill: !is_fallback,
+                    slot: di,
+                }];
                 walk_content_mounts(
                     module,
                     &frags,
@@ -1281,17 +1498,19 @@ fn generate_component_pieces(
             #(#list_methods)*
 
             /// Run-once build (C4): executes top-to-bottom; reactivity lives
-            /// exclusively in reactions. M7 phases: slot assembly (mounts,
-            /// content attaches, fallback init-flush) → direct ref captures
-            /// → direct attaches → the initial flush (memos + binds) →
-            /// branch attaches + branch ref captures (branch content exists
-            /// only after the flush).
+            /// exclusively in reactions. M7 phases: child attach (M10 — each
+            /// direct use's root enters the owner tree at its use hole) →
+            /// slot assembly (mounts, content attaches, fallback init-flush)
+            /// → direct ref captures → direct attaches → the initial flush
+            /// (memos + binds) → branch attaches + branch ref captures
+            /// (branch content exists only after the flush).
             pub fn build(h: &mut dyn Host, props: #props_ty) -> Self {
                 let mut s = Self {
                     #(#init_fields,)*
                     #(#group_inits,)*
                     frag: ::lig_runtime::Fragment::new(h, #root_tpl, #root_holes, #root_branches),
                 };
+                #(#child_attaches)*
                 #(#slot_fills)*
                 #(#ref_inits)*
                 #(#content_ref_inits)*
@@ -1668,7 +1887,9 @@ fn build_content_ctx(
             &mut matched,
         );
         // Author side: nested outlets inside this use site's own fill
-        // contents — their fills come from the same use site.
+        // contents — their fills come from the same use site — and (M10)
+        // outlets inside the fill contents' If BRANCHES: the branch mounts
+        // its outlets' fills/fallbacks with it (branch-time assembly).
         let fill_ids: Vec<FragmentId> = use_site
             .ir
             .slots
@@ -1677,7 +1898,7 @@ fn build_content_ctx(
             .collect();
         for fill_id in fill_ids {
             if let Some(ctx) = map.get(&fill_id.get()).cloned() {
-                map_fill_outlets(module, fill_id, &ctx, use_site, &mut map, &mut matched);
+                map_fill_outlets(module, fill_id, &ctx, use_site, &mut map, &mut matched, 0);
             }
         }
     }
@@ -1776,8 +1997,10 @@ fn map_child_outlets(
     }
 }
 
-/// Walk one of the use site's OWN fill contents for nested outlets (M9):
-/// a fill of such an outlet composes over the fill's own context.
+/// Walk one of the use site's OWN fill contents for nested outlets (M9)
+/// and for outlets inside its If BRANCHES (M10): a fill of such an outlet
+/// composes over the fill's own context (nested) or over the branch context
+/// (branch-time assembly — the outlet mounts with its branch).
 fn map_fill_outlets(
     module: &ViewModule,
     frag_id: FragmentId,
@@ -1785,7 +2008,11 @@ fn map_fill_outlets(
     use_site: &ComponentUse,
     map: &mut HashMap<u32, Ctx>,
     matched: &mut HashSet<u32>,
+    depth: usize,
 ) {
+    if depth > 16 {
+        return;
+    }
     let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
         return;
     };
@@ -1810,6 +2037,20 @@ fn map_fill_outlets(
                 },
             );
             matched.insert(fb.get());
+            map_fill_outlets(
+                module,
+                fb,
+                &Ctx::Fill {
+                    field: use_site.field.clone(),
+                    slot: di,
+                    fill: true,
+                    base: Box::new(base.clone()),
+                },
+                use_site,
+                map,
+                matched,
+                depth + 1,
+            );
         }
         if let Some(fb) = *fallback {
             // The nested outlet's own fallback content (author-authored) —
@@ -1823,7 +2064,106 @@ fn map_fill_outlets(
                 base: Box::new(base.clone()),
             };
             map.insert(fb.get(), fb_ctx.clone());
-            map_fill_outlets(module, fb, &fb_ctx, use_site, map, matched);
+            map_fill_outlets(module, fb, &fb_ctx, use_site, map, matched, depth + 1);
+        }
+    }
+    // M10: outlets inside the fill's If branches mount with their branch —
+    // their fills come from the same use site, composed over the branch ctx.
+    for (j, d) in frag.dynamics.iter().enumerate() {
+        let DynamicKind::If(i) = &d.kind else {
+            continue;
+        };
+        let Some(bs) = branch_slot_of_dynamic(frag, j as u32) else {
+            continue;
+        };
+        map_branch_outlets(module, i.then, bs, base, use_site, map, matched, depth + 1);
+        if let Some(el) = i.else_ {
+            map_branch_outlets(module, el, bs, base, use_site, map, matched, depth + 1);
+        }
+    }
+}
+
+/// Walk ONE If-branch fragment for outlets (M10): an outlet on the branch
+/// mounts its use-site fill (or its own fallback) when the branch mounts —
+/// the fill/fallback content's ctx composes `Branch { base }` over the ctx
+/// of the fragment the If hangs on. Deeper Ifs recurse.
+fn map_branch_outlets(
+    module: &ViewModule,
+    frag_id: FragmentId,
+    branch_slot: usize,
+    owner_base: &Ctx,
+    use_site: &ComponentUse,
+    map: &mut HashMap<u32, Ctx>,
+    matched: &mut HashSet<u32>,
+    depth: usize,
+) {
+    if depth > 16 {
+        return;
+    }
+    let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
+        return;
+    };
+    let branch_ctx = Ctx::Branch {
+        slot: branch_slot,
+        base: Box::new(owner_base.clone()),
+    };
+    for (di, d) in frag.dynamics.iter().enumerate() {
+        let DynamicKind::Slot {
+            name: slot_name,
+            fallback,
+        } = &d.kind
+        else {
+            continue;
+        };
+        if let Some(s) = use_site.ir.slots.iter().find(|s| s.name == *slot_name)
+            && let Some(fb) = s.fallback
+        {
+            let fill_ctx = Ctx::Fill {
+                field: use_site.field.clone(),
+                slot: di,
+                fill: true,
+                base: Box::new(branch_ctx.clone()),
+            };
+            map.insert(fb.get(), fill_ctx.clone());
+            matched.insert(fb.get());
+            map_fill_outlets(module, fb, &fill_ctx, use_site, map, matched, depth + 1);
+        } else if let Some(fb) = *fallback {
+            let fb_ctx = Ctx::Fallback {
+                slot: di,
+                base: Box::new(branch_ctx.clone()),
+            };
+            map.insert(fb.get(), fb_ctx.clone());
+            map_fill_outlets(module, fb, &fb_ctx, use_site, map, matched, depth + 1);
+        }
+    }
+    for (j, d) in frag.dynamics.iter().enumerate() {
+        let DynamicKind::If(i) = &d.kind else {
+            continue;
+        };
+        let Some(bs) = branch_slot_of_dynamic(frag, j as u32) else {
+            continue;
+        };
+        map_branch_outlets(
+            module,
+            i.then,
+            bs,
+            &branch_ctx,
+            use_site,
+            map,
+            matched,
+            depth + 1,
+        );
+        if let Some(el) = i.else_ {
+            map_branch_outlets(
+                module,
+                el,
+                bs,
+                &branch_ctx,
+                use_site,
+                map,
+                matched,
+                depth + 1,
+            );
         }
     }
 }
@@ -1863,19 +2203,26 @@ fn map_own_fallbacks(
 
 /// One mutable content-walk step: unwrap the receiver's content accessor
 /// (`fill` selects `slot_fill_mut` vs `slot_fallback_mut`) at outlet `slot`.
-type MutStep = (bool, usize);
+/// The branch-time assembly (M10) unwraps the branch itself in
+/// [`emit_assembly_walk`]; the recursion composes content steps only.
+#[derive(Debug, Clone)]
+enum MutStep {
+    /// Unwrap a mounted slot content at outlet `slot`.
+    Content { fill: bool, slot: usize },
+}
 
 /// Emit the mutable walk: each step wraps the body in an accessor guard
-/// binding `c` (shadowing — the innermost `c` is the addressed fragment);
-/// the OUTERMOST step's receiver is `root`, inner steps' receiver is the
-/// `c` bound one level out.
+/// binding `c` (shadowing — the innermost `c` is the addressed fragment;
+/// branch steps bind `b`); the OUTERMOST step's receiver is `root`, inner
+/// steps' receiver is the binding one level out.
 fn emit_mut_walk(
     root: &proc_macro2::TokenStream,
     steps: &[MutStep],
     body: proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
     let mut out = body;
-    for (i, (fill, slot)) in steps.iter().enumerate().rev() {
+    for (i, step) in steps.iter().enumerate().rev() {
+        let MutStep::Content { fill, slot } = step;
         let acc = if *fill {
             quote! { slot_fill_mut }
         } else {
@@ -1891,7 +2238,8 @@ fn emit_mut_walk(
 /// first step reads the root receiver, later steps chain `and_then`.
 fn emit_read_walk(root: &proc_macro2::TokenStream, steps: &[MutStep]) -> proc_macro2::TokenStream {
     let mut read: Option<proc_macro2::TokenStream> = None;
-    for (i, (fill, slot)) in steps.iter().enumerate() {
+    for (i, step) in steps.iter().enumerate() {
+        let MutStep::Content { fill, slot } = step;
         let acc = if *fill {
             quote! { slot_fill }
         } else {
@@ -1907,6 +2255,35 @@ fn emit_read_walk(root: &proc_macro2::TokenStream, steps: &[MutStep]) -> proc_ma
     read.expect("content walks carry at least one step")
 }
 
+/// The M10 branch-assembly walk: `steps` start at the freshly mounted
+/// BRANCH (the first step addresses an outlet on the branch); `owner_read`
+/// is the `Option<&Fragment>` expression for the fragment the If hangs on.
+/// Emits the branch unwrap (binding `b`) plus the content steps (binding
+/// `c`, shadowing), so the body and any recursion into the freshly mounted
+/// content share one guard chain.
+fn emit_assembly_walk(
+    owner_read: &proc_macro2::TokenStream,
+    branch_slot: usize,
+    steps: &[MutStep],
+    body: proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let mut out = body;
+    let mut first = true;
+    for step in steps.iter().rev() {
+        let MutStep::Content { fill, slot } = step;
+        let acc = if *fill {
+            quote! { slot_fill_mut }
+        } else {
+            quote! { slot_fallback_mut }
+        };
+        let recv = if first { quote!(b) } else { quote!(c) };
+        first = false;
+        out = quote! { if let Some(c) = #recv.#acc(#slot) { #out } };
+    }
+    let slot = branch_slot;
+    quote! { if let Some(b) = (#owner_read).and_then(|f| f.branch_mut(#slot)) { #out } }
+}
+
 /// The M9 recursive content walk (the mounting component's slot assembly):
 /// after a content mounts, its own dynamics compose — nested outlets mount
 /// their use-site fill or the outlet's own fallback through the composed
@@ -1915,7 +2292,6 @@ fn emit_read_walk(root: &proc_macro2::TokenStream, steps: &[MutStep]) -> proc_ma
 /// tree membership decides `s.frag` vs the child instance's), and nested
 /// fallback refs capture into the author's field. `top` marks the
 /// top-level content (its events/refs the caller already emitted).
-#[allow(clippy::too_many_arguments)]
 fn walk_content_mounts(
     module: &ViewModule,
     frags: &[FragInfo],
@@ -1982,7 +2358,10 @@ fn walk_content_mounts(
                 // origin-gated in the runtime).
                 let mut_steps: Vec<MutStep> = {
                     let mut s = steps.to_vec();
-                    s.push((!is_fallback, di));
+                    s.push(MutStep::Content {
+                        fill: !is_fallback,
+                        slot: di,
+                    });
                     s
                 };
                 out.push(emit_mut_walk(
@@ -2202,6 +2581,80 @@ fn ctx_frag_read(ctx: &Ctx) -> proc_macro2::TokenStream {
     }
 }
 
+/// Whether the fragment is the BODY of a `For` (a list item): per-item
+/// instance identity is the keyed-component story, so component uses there
+/// stay fail-closed (M10 codegen backstop — the frontends deny it first).
+fn owner_is_list_body(module: &ViewModule, frags: &[FragInfo], owner: FragmentId) -> bool {
+    for info in frags {
+        let Some(parent) = module.fragments.get(info.id.get() as usize) else {
+            continue;
+        };
+        for d in &parent.dynamics {
+            if let DynamicKind::For(fo) = &d.kind
+                && fo.body == owner
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// The innermost content field of a ctx chain (M10): the use-site child
+/// field a content-rooted branch belongs to (`Some` only under a
+/// `Ctx::Fill`; `Ctx::Fallback` addresses `self.frag`, so child-side
+/// branches mount fallbacks only).
+fn ctx_content_field(ctx: &Ctx) -> Option<&str> {
+    match ctx {
+        Ctx::Branch { base, .. } => ctx_content_field(base),
+        Ctx::Fill { field, .. } => Some(field),
+        Ctx::Direct | Ctx::Fallback { .. } => None,
+    }
+}
+
+/// The mutable twin of [`ctx_frag_read`]: the fragment `ctx` addresses, as
+/// `Option<&mut Fragment>` (M10 — the branch-time assembly mounts content
+/// INTO the freshly mounted branch, so the walk to it is mutable).
+fn ctx_frag_mut(ctx: &Ctx) -> proc_macro2::TokenStream {
+    match ctx {
+        Ctx::Direct => quote!(::core::option::Option::Some(&mut self.frag)),
+        Ctx::Branch { slot, base } => {
+            let slot = *slot;
+            let base_read = ctx_frag_mut(base);
+            quote! { #base_read.and_then(|f| f.branch_mut(#slot)) }
+        }
+        Ctx::Fill {
+            field,
+            slot,
+            fill,
+            base,
+        } => {
+            let slot = *slot;
+            let field = syn::Ident::new(field, Span::call_site());
+            let acc = if *fill {
+                quote! { slot_fill_mut }
+            } else {
+                quote! { slot_fallback_mut }
+            };
+            if matches!(&**base, Ctx::Direct) {
+                quote! { self.#field.frag.#acc(#slot) }
+            } else {
+                let base_read = ctx_frag_mut(base);
+                quote! { #base_read.and_then(|f| f.#acc(#slot)) }
+            }
+        }
+        Ctx::Fallback { slot, base } => {
+            let slot = *slot;
+            if matches!(&**base, Ctx::Direct) {
+                quote! { self.frag.slot_fallback_mut(#slot) }
+            } else {
+                let base_read = ctx_frag_mut(base);
+                quote! { #base_read.and_then(|f| f.slot_fallback_mut(#slot)) }
+            }
+        }
+    }
+}
+
 /// Branch slot of a fragment: the branch-slot index of the If/For dynamic
 /// that owns it as `then`/`body` — not the raw children position (fill
 /// fragments are tree children too, and would shift the index, M7) — paired
@@ -2255,7 +2708,6 @@ fn emit_apply_fns(module: &ViewModule, frags: &[FragInfo]) -> Vec<proc_macro2::T
 /// live list at apply time, then a full bind replay so index-driven binds
 /// track the new positions); unkeyed lists keep the Index diff (mount new
 /// items, remove tails, refresh survivors).
-#[allow(clippy::too_many_arguments)]
 fn emit_list_method(
     module: &ViewModule,
     for_ir: &lig_ir::fragment::ForIr,
@@ -2346,7 +2798,6 @@ fn emit_list_method(
         }
     } else {
         quote! {
-            #[allow(clippy::needless_range_loop)]
             fn #method(&mut self, h: &mut dyn Host, slot: usize) {
                 let items: ::alloc::vec::Vec<#item_ty_lit> = ::core::clone::Clone::clone(&(#src));
                 let old = self.frag.list_len(slot);
@@ -2423,7 +2874,6 @@ fn emit_list_method_composed(
     if for_ir.key.is_some() {
         let key_fn = syn::Ident::new(&format!("key_of_f{}", for_ir.body.get()), Span::call_site());
         quote! {
-            #[allow(clippy::needless_range_loop)]
             fn #method(
                 h: &mut dyn Host,
                 recv: &mut ::lig_runtime::Fragment,
@@ -2471,7 +2921,6 @@ fn emit_list_method_composed(
         }
     } else {
         quote! {
-            #[allow(clippy::needless_range_loop)]
             fn #method(
                 h: &mut dyn Host,
                 recv: &mut ::lig_runtime::Fragment,
@@ -2823,15 +3272,6 @@ pub fn generate_module(module: &ViewModule) -> Result<GeneratedModule, CodegenEr
     );
     let all: proc_macro2::TokenStream = quote! {
         #[doc = #doc]
-        #[allow(
-            clippy::all,
-            clippy::pedantic,
-            missing_docs,
-            non_upper_case_globals,
-            unused_parens,
-            unused_variables,
-            dead_code
-        )]
         pub mod generated {
             use ::lig_runtime::prelude::*;
             #(#all_pieces)*

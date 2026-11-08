@@ -28,7 +28,11 @@
 // The exported patchable symbols must carry stable names for the jump-table
 // protocol (`dlsym` by name, §2.4). `#[no_mangle]` is the whole point of this
 // binary; the captured-address call is the documented never-dlclose proof.
-#![allow(unsafe_code)]
+// The exported patchable symbols must carry stable, no-mangled names for the
+// jump-table protocol (`dlsym` by name, §2.4) — `#[unsafe(no_mangle)]` is the
+// whole point of this binary. `expect` keeps the workspace
+// `unsafe_code = "deny"` honest: it warns if the unsafe attribute ever dries up.
+#![expect(unsafe_code)]
 
 use std::hint::black_box;
 use std::time::Instant;

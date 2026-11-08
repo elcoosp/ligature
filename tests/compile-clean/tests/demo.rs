@@ -4,7 +4,8 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    slots_component, slots_dynamic, slots_named, slots_nested, slots_structural, v_model,
+    slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic, slots_named,
+    slots_nested, slots_structural, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::MockHost;
@@ -432,5 +433,133 @@ fn nested_outlets_mount_fills_and_fallbacks_through_the_composed_walk() {
             .unwrap()
             .slot_fallback(0)
             .is_none()
+    );
+}
+
+/// The M10 per-mount instance identity, end to end: a component use inside a
+/// branch body of slot content builds as an Option field; the mounting arm
+/// rebuilds the instance, inserts its root into the branch's component hole,
+/// and the mount marking initializes the fresh instance's prop-pass — a
+/// signal written while the branch was absent lands on the NEXT mount. The
+/// unmount arm disposes the instance (teardown + None), so a remount cycle
+/// never reuses a stale instance or leaks its slab.
+#[test]
+fn branch_components_rebuild_and_dispose_per_mount() {
+    let mut h = MockHost::new();
+    let mut app =
+        slots_branch_component::App::build(&mut h, slots_branch_component::AppProps::default());
+    // The badge built inside the initial flush's mount arm, its root
+    // inserted into the branch's component hole, its prop initialized
+    // through the mount marking (initial flush, second pass).
+    let badge = app.badge.as_ref().expect("instance built at mount");
+    assert_eq!(badge.count, "two", "prop initialized on the fresh instance");
+    assert_eq!(
+        h.text_of(badge.frag.hole(0)),
+        Some("two"),
+        "the grandchild's bind re-rendered the prop"
+    );
+    // The toggle unmounts the branch AND disposes the instance.
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(
+        app.badge.is_none(),
+        "the unmount arm disposed the per-mount instance"
+    );
+    // A signal write while the branch is absent must not touch anything:
+    // the prop-pass arm guards on the Option field.
+    app.set_n("three".into());
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(app.badge.is_none(), "no instance to write while absent");
+    // The remount builds a FRESH instance and the mount marking re-runs the
+    // prop-pass — the write made while absent lands on it.
+    app.set_on(true);
+    lig_runtime::flush(&mut app, &mut h);
+    let badge = app.badge.as_ref().expect("fresh instance at remount");
+    assert_eq!(
+        badge.count, "three",
+        "the late write landed on the fresh instance"
+    );
+    assert_eq!(
+        h.text_of(badge.frag.hole(0)),
+        Some("three"),
+        "the fresh instance's bind re-rendered"
+    );
+}
+
+/// The M10 branch-time slot assembly, end to end: an outlet inside a branch
+/// body of slot content mounts its use-site fill (composed
+/// `slot_fill_mut` → `branch_mut` → `slot_fill_mut`) or — when the use site
+/// does not fill it — its own fallback (`… → slot_fallback_mut`) at
+/// BRANCH-MOUNT time, and the mounted content's binds initialize through the
+/// mount marking and track updates through the composed walks.
+#[test]
+fn branch_outlets_mount_fills_and_fallbacks_with_the_branch() {
+    let mut h = MockHost::new();
+    let mut app = slots_branch_outlet::App::build(&mut h, slots_branch_outlet::AppProps::default());
+    // Use 1 fills the branch-internal outlet: the fill mounts ON the mounted
+    // branch, its bind initialized through the mount marking.
+    let fill1 = app
+        .panel
+        .frag
+        .slot_fill(1)
+        .expect("header fill mounted (use 1)");
+    let branch1 = fill1.branch(0).expect("the content branch mounted");
+    assert!(
+        branch1.slot_is(0),
+        "the branch-internal outlet carries the use-site fill"
+    );
+    let inner = branch1.slot_fill(0).expect("branch fill mounted");
+    assert_eq!(
+        h.text_of(inner.hole(0)),
+        Some("in"),
+        "the branch fill bind initialized at branch mount"
+    );
+    // Use 2 does not fill `inner`: the outlet's own fallback mounts with the
+    // branch.
+    let fill2 = app
+        .panel_2
+        .frag
+        .slot_fill(1)
+        .expect("header fill mounted (use 2)");
+    let branch2 = fill2.branch(0).expect("the content branch mounted");
+    let fb2 = branch2.slot_fallback(0).expect("branch fallback mounted");
+    assert_eq!(
+        h.text_of(fb2.hole(0)),
+        Some("in"),
+        "the branch fallback bind initialized at branch mount"
+    );
+    // Updates flow through the composed walks (content → branch → fill /
+    // fallback).
+    app.set_tag("next".into());
+    lig_runtime::flush(&mut app, &mut h);
+    let branch1 = app
+        .panel
+        .frag
+        .slot_fill(1)
+        .and_then(|f| f.branch(0))
+        .expect("branch 1");
+    assert_eq!(
+        h.text_of(branch1.slot_fill(0).expect("branch fill").hole(0)),
+        Some("next"),
+        "the branch fill bind walked the composed chain"
+    );
+    let branch2 = app
+        .panel_2
+        .frag
+        .slot_fill(1)
+        .and_then(|f| f.branch(0))
+        .expect("branch 2");
+    assert_eq!(
+        h.text_of(branch2.slot_fallback(0).expect("branch fb").hole(0)),
+        Some("next"),
+        "the branch fallback bind walked the composed chain"
+    );
+    // Unmounting the branch takes the mounted content with it.
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    let fill1 = app.panel.frag.slot_fill(1).expect("header fill stays");
+    assert!(
+        fill1.branch(0).is_none(),
+        "the branch unmounted with its fills"
     );
 }
