@@ -446,28 +446,14 @@ export function Panel({ title }) {
     );
 }
 
-/// The M9 fail-closed boundary (Solid leg): component uses and nested
-/// outlets inside BRANCH or LIST bodies of content stay denied with
-/// LIG-E001 — a remounted branch would need per-mount instance identity,
-/// and per-item instances remain the keyed-component story.
+/// The M10 fail-closed boundary (Solid leg): component uses and nested
+/// outlets inside LIST bodies of content stay denied with LIG-E001 —
+/// per-item instance identity remains the keyed-component story. The
+/// BRANCH cases M9 denied admit since M10 (per-mount identity + the
+/// branch-time slot assembly).
 #[test]
 fn slot_content_stays_fail_closed_on_structural_instances() {
-    let cases: [(&str, &str); 3] = [
-        // Component use inside a branch hanging on content
-        (
-            r#"export function App() {
-  const [on, setOn] = createSignal(true);
-  return (
-    <Panel title="x" header={<Show when={on()}><Badge count={1} /></Show>} />
-  );
-}
-
-export function Badge({ count }) {
-  return <b>{count}</b>;
-}
-"#,
-            "Component in content branch",
-        ),
+    let cases: [(&str, &str); 2] = [
         // Component use inside a For body on content
         (
             r#"import { For } from "solid-js";
@@ -485,6 +471,58 @@ export function Badge({ count }) {
 }
 "#,
             "Component in content list",
+        ),
+        // Nested outlet inside a For body on content
+        (
+            r#"import { For } from "solid-js";
+export function App() {
+  return (
+    <Panel
+      title="x"
+      header={<For each={["a"]}>{(t) => <Slot name="inner" />}</For>}
+    />
+  );
+}
+"#,
+            "Outlet in content list",
+        ),
+    ];
+    for (body, what) in cases {
+        let src = format!(
+            "{body}\nexport function Panel({{ title }}) {{\n  return <section><Slot name=\"foot\" /></section>;\n}}\n"
+        );
+        let src = src.replace("\\n", "\n");
+        match lig_parse_solid::lower_module(&src, "bad.tsx") {
+            Ok(_) => panic!("{what}: expected LIG-E001, got success"),
+            Err(diags) => assert!(
+                diags.iter().any(|d| d.code == "LIG-E001"),
+                "{what}: expected LIG-E001, got {diags:?}"
+            ),
+        }
+    }
+}
+
+/// The M10 lift (Solid leg): component uses and nested outlets admit
+/// DIRECTLY inside BRANCH bodies of slot content — a remounted branch
+/// rebuilds its per-mount component instance, and the outlet mounts its
+/// fill/fallback with the branch (branch-time slot assembly).
+#[test]
+fn content_branches_admit_components_and_outlets() {
+    let cases: [(&str, &str); 2] = [
+        // Component use inside a branch hanging on content
+        (
+            r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  return (
+    <Panel title="x" header={<Show when={on()}><Badge count={1} /></Show>} />
+  );
+}
+
+export function Badge({ count }) {
+  return <b>{count}</b>;
+}
+"#,
+            "Component in content branch",
         ),
         // Nested outlet inside a branch hanging on content
         (
@@ -506,12 +544,64 @@ export function Badge({ count }) {
             "{body}\nexport function Panel({{ title }}) {{\n  return <section><Slot name=\"foot\" /></section>;\n}}\n"
         );
         let src = src.replace("\\n", "\n");
-        match lig_parse_solid::lower_module(&src, "bad.tsx") {
+        lig_parse_solid::lower_module(&src, "branch.tsx")
+            .unwrap_or_else(|diags| panic!("{what}: expected admission, got {diags:?}"));
+    }
+}
+
+/// The M10 own-tree contract (Solid leg): component uses and outlets inside
+/// FOR bodies of the component's OWN template deny with one precise reason
+/// (per-item identity is the keyed-component story) — closing two silent
+/// fail-opens where the item template lowered with a never-mounted outlet
+/// hole and a single detached component instance. If branches admit (the
+/// per-mount identity story).
+#[test]
+fn own_tree_for_bodies_deny_components_and_outlets() {
+    let cases: [(&str, &str); 2] = [
+        // Outlet inside a For body of the component's own template
+        (
+            r#"import { For } from "solid-js";
+export function Inner({ items }) {
+  return (
+    <ul>
+      <For each={items()}>{(item) => <Slot name="a"><em>{item}</em></Slot>}</For>
+    </ul>
+  );
+}
+"#,
+            "Outlet in own-tree list",
+        ),
+        // Component use inside a For body of the component's own template
+        (
+            r#"import { For } from "solid-js";
+export function App({ items }) {
+  return (
+    <main>
+      <For each={items()}>{(item) => <Badge count={item} />}</For>
+    </main>
+  );
+}
+
+export function Badge({ count }) {
+  return <b>{count}</b>;
+}
+"#,
+            "Component in own-tree list",
+        ),
+    ];
+    for (src, what) in cases {
+        match lig_parse_solid::lower_module(src, "own_list.tsx") {
             Ok(_) => panic!("{what}: expected LIG-E001, got success"),
-            Err(diags) => assert!(
-                diags.iter().any(|d| d.code == "LIG-E001"),
-                "{what}: expected LIG-E001, got {diags:?}"
-            ),
+            Err(diags) => {
+                assert!(
+                    diags.iter().any(|d| d.code == "LIG-E001"),
+                    "{what}: expected LIG-E001, got {diags:?}"
+                );
+                assert!(
+                    diags.iter().any(|d| d.message.contains("per-item")),
+                    "{what}: expected the per-item reason, got {diags:?}"
+                );
+            }
         }
     }
 }
