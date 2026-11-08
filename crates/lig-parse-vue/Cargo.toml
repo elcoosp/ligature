@@ -20,6 +20,10 @@ oxc_span = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 serde_json = { workspace = true }
+# M12: the template-ref contract pins one canonical IR across both legs —
+# the parity assertions lower the Solid spelling against the Vue one.
+# (Dev-only: neither frontend links the other at runtime.)
+lig-parse-solid = { workspace = true }
 
 [[bench]]
 name = "parse"

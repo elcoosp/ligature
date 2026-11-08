@@ -414,6 +414,19 @@ struct Frame {
     children: Vec<FragmentId>,
 }
 
+/// The `ref` attribute's target spelling (M12): the static form names the
+/// placeholder local, the bound form lowers an expression, the bare form
+/// has nothing to bind.
+enum RefTarget {
+    /// `ref="x"` — the target names the placeholder local directly.
+    Name(String),
+    /// `:ref="expr"` / `v-bind:ref="expr"` — the target is a bound
+    /// expression (a plain identifier only).
+    Expr((usize, usize)),
+    /// Bare `ref` — no target; fail-closed.
+    Bare,
+}
+
 /// A collected script declaration (source order, span-based so the script
 /// parse can drop before materialization).
 enum ScriptDecl {
@@ -427,6 +440,10 @@ enum ScriptDecl {
     Effect((u32, u32)),
     /// A named single-expression handler.
     Handler(String, Option<String>, (u32, u32)),
+    /// `let x;` (M12) — a template-ref placeholder local. No state: the
+    /// generated unit captures the element's `NodeId` into a dedicated
+    /// `ref_x` field, exactly what the Solid leg's bare `let x;` skips to.
+    Placeholder(String),
 }
 
 /// The per-component lowering state (mirrors the Solid frontend's frame
@@ -535,6 +552,14 @@ fn lower_component(
     for decl in decls {
         match decl {
             ScriptDecl::Props(_) => {}
+            // M12: a placeholder local joins the non-reactive locals — the
+            // template's `ref` attribute validates its target against this
+            // set, and the expression lowering already resolves locals to
+            // `Expr::Local` (the shape the codegen Ref arm captures). No
+            // state, no reactions: the generated unit owns the capture.
+            ScriptDecl::Placeholder(name) => {
+                comp.local.insert(name);
+            }
             ScriptDecl::Ref(name, init_span) => {
                 let name_id = comp.module.strings.intern(name.clone());
                 comp.state.insert(name.clone());
@@ -766,12 +791,21 @@ fn collect_declarator(
     out: &mut Vec<ScriptDecl>,
     diags: &mut Vec<LigDiagnostic>,
 ) {
+    // `let x;` — the template-ref placeholder (M12). The Solid leg's bare
+    // `let x;` lowers to nothing (the ref capture owns the name); the Vue
+    // leg admits the declarator explicitly and records the local so the
+    // template's `ref` attribute can validate its target against a real
+    // declaration instead of silently accepting any spelling.
     let Some(init) = &d.init else {
-        diags.push(LigDiagnostic::error(
-            "LIG-E001",
-            "declarations without initializers are outside the admitted subset",
-            to_span(d.span),
-        ));
+        let BindingPattern::BindingIdentifier(name_id) = &d.id else {
+            diags.push(LigDiagnostic::error(
+                "LIG-E001",
+                "declarations without initializers are outside the admitted subset",
+                to_span(d.span),
+            ));
+            return;
+        };
+        out.push(ScriptDecl::Placeholder(name_id.name.as_str().to_string()));
         return;
     };
     let Expression::CallExpression(call) = init else {
@@ -1498,6 +1532,21 @@ impl ComponentLowering<'_> {
 
         for attr in &el.attrs {
             match attr {
+                // M12: the template-ref attribute binds the element to a
+                // placeholder local — the same `Ref` dynamic the Solid
+                // leg's `ref={local}` lowers to. Both spellings (static
+                // `ref="x"` and bound `:ref="expr"`) land here; the static
+                // attribute must never render.
+                TplAttr::Static { name, value, span } if name == "ref" => {
+                    let target = value
+                        .as_deref()
+                        .map_or(RefTarget::Bare, |v| RefTarget::Name(v.to_string()));
+                    self.lower_template_ref(target, (span.0 as u32, span.1 as u32), path);
+                }
+                TplAttr::Bind { name, expr } if name == "ref" => {
+                    let espan = (expr.0 as u32, expr.1 as u32);
+                    self.lower_template_ref(RefTarget::Expr(*expr), espan, path);
+                }
                 TplAttr::Static { name, value, .. } => {
                     let key = self.intern(name.clone());
                     let value = match value {
@@ -1566,6 +1615,97 @@ impl ComponentLowering<'_> {
             style,
             children: children_out,
         }
+    }
+
+    /// The `ref` attribute lowers to the capture contract (M12): a plain
+    /// `Local` read of a declared placeholder — never a rendered attribute,
+    /// never a signal. Both spellings converge here; every other shape is
+    /// fail-closed with the precise code (the codegen Ref arm admits only
+    /// `Local` targets, so admission owns the diagnosis).
+    fn lower_template_ref(&mut self, target: RefTarget, span: (u32, u32), path: &[u32]) {
+        let expr: ExprId = match target {
+            RefTarget::Bare => {
+                self.diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    "the `ref` attribute requires a target — `ref=\"x\"` or `:ref=\"x\"` naming a \
+                     placeholder local",
+                    Span::new(span.0, span.1),
+                ));
+                return;
+            }
+            RefTarget::Name(n) => {
+                if self.state.contains(&n) {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        format!(
+                            "template ref `{n}` targets a signal — refs capture elements; state \
+                             writes go through the generated setters"
+                        ),
+                        Span::new(span.0, span.1),
+                    ));
+                    return;
+                }
+                if !self.local.contains(&n) {
+                    self.diags.push(
+                        LigDiagnostic::error(
+                            "LIG-E100",
+                            format!("unknown identifier `{n}` in view position"),
+                            Span::new(span.0, span.1),
+                        )
+                        .with_help(
+                            "declare the placeholder local in <script setup> (`let x;`) — the \
+                             Solid leg's bare binding is the same declaration",
+                        ),
+                    );
+                    return;
+                }
+                let name_id = self.intern(n);
+                self.module.insert_expr(Expr::Local(name_id))
+            }
+            RefTarget::Expr(espan) => {
+                let espan = (espan.0 as u32, espan.1 as u32);
+                let e = match self.lower_expr_at(espan, None) {
+                    Ok(e) => e,
+                    Err(d) => {
+                        self.diags.push(d);
+                        return;
+                    }
+                };
+                let Expr::Local(id) = self.module.exprs.get(e).clone() else {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        "template refs bind a placeholder local (`:ref=\"x\"` with `let x;` in \
+                         <script setup>) — signals, members, and calls are outside the capture \
+                         contract",
+                        Span::new(espan.0, espan.1),
+                    ));
+                    return;
+                };
+                let n = self.module.strings.get(id).to_string();
+                if self.state.contains(&n) {
+                    self.diags.push(LigDiagnostic::error(
+                        "LIG-E001",
+                        format!(
+                            "template ref `{n}` targets a signal — refs capture elements; state \
+                             writes go through the generated setters"
+                        ),
+                        Span::new(espan.0, espan.1),
+                    ));
+                    return;
+                }
+                e
+            }
+        };
+        let reads = lig_ir::expr::collect_reads(self.module, expr);
+        self.push_dynamic(
+            DynamicKind::Ref,
+            expr,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            span,
+        );
     }
 
     /// `:k="expr"` — static literals inline into the template (the
@@ -3287,5 +3427,300 @@ const { count } = defineProps<{ count: string }>();
                 }
             }
         }
+    }
+
+    // -- M12: template refs on the Vue leg ----------------------------------
+
+    /// The static spelling `ref="box"` binds the element to a placeholder
+    /// local declared in `<script setup>` (`let box;`) — the same `Ref`
+    /// dynamic the Solid leg's `ref={box}` lowers to: the target is a plain
+    /// `Local` read, no state is created for the name, and the element
+    /// carries no static `ref` attribute (the pre-M12 fail-open).
+    /// Collect the static attribute keys of a template tree (the fail-open
+    /// check walks every element of every template).
+    fn attr_keys(node: &lig_ir::NodeIr, out: &mut Vec<lig_ir::StrId>) {
+        if let lig_ir::NodeIr::Element {
+            static_attrs,
+            children,
+            ..
+        } = node
+        {
+            out.extend(static_attrs.iter().map(|a| a.key));
+            for c in children {
+                attr_keys(c, out);
+            }
+        }
+    }
+
+    #[test]
+    fn template_ref_static_binds_a_placeholder_local() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "Marked" });
+
+let box;
+</script>
+
+<template>
+  <section>
+    <input ref="box" />
+    <p>static</p>
+  </section>
+</template>
+"#;
+        let m = lower_module(src, "template-ref.vue").expect("lowers");
+        assert!(
+            !m.states.iter().any(|s| m.strings.get(s.name) == "box"),
+            "the placeholder must not become a state"
+        );
+        let refs: Vec<lig_ir::ExprId> = m
+            .fragments
+            .iter()
+            .flat_map(|f| f.dynamics.iter())
+            .filter_map(|d| match &d.kind {
+                lig_ir::DynamicKind::Ref => Some(d.expr),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(refs.len(), 1, "one Ref dynamic: {refs:?}");
+        let lig_ir::expr::Expr::Local(name) = m.exprs.get(refs[0]) else {
+            panic!(
+                "the ref target must be a Local read, got {:?}",
+                m.exprs.get(refs[0])
+            );
+        };
+        assert_eq!(m.strings.get(*name), "box");
+        // The element must not carry the fail-open static `ref` attribute.
+        let mut keys: Vec<lig_ir::StrId> = Vec::new();
+        for t in &m.templates {
+            attr_keys(&t.root, &mut keys);
+        }
+        let templates = keys.iter().filter(|k| m.strings.get(**k) == "ref").count();
+        assert_eq!(templates, 0, "the static `ref` attribute must not render");
+        assert_eq!(
+            lig_ir::validate::validate(&m),
+            [] as [lig_ir::validate::Violation; 0]
+        );
+    }
+
+    /// `:ref="box"` and `v-bind:ref="box"` are the same construct spelled
+    /// longhand — identical IR to the static `ref="box"` form.
+    #[test]
+    fn template_ref_bound_spelling_lowers_the_same_dynamic() {
+        let base = r#"<script setup lang="ts">
+defineOptions({ name: "Marked" });
+
+let box;
+</script>
+
+<template>
+  <input {}="box" />
+</template>
+"#;
+        let ref_of = |m: &lig_ir::module::ViewModule| {
+            m.fragments
+                .iter()
+                .flat_map(|f| f.dynamics.iter())
+                .find(|d| matches!(d.kind, lig_ir::DynamicKind::Ref))
+                .expect("one Ref dynamic")
+                .expr
+        };
+        let static_form = lower_module(&base.replace("{}", "ref"), "t.vue").expect("lowers");
+        let bound_form = lower_module(&base.replace("{}", ":ref"), "t.vue").expect("lowers");
+        let longhand = lower_module(&base.replace("{}", "v-bind:ref"), "t.vue").expect("lowers");
+        for (what, m) in [("bound", &bound_form), ("longhand", &longhand)] {
+            let lig_ir::expr::Expr::Local(name) = m.exprs.get(ref_of(m)) else {
+                panic!("{what}: ref target must be a Local read");
+            };
+            assert_eq!(m.strings.get(*name), "box");
+        }
+        let lig_ir::expr::Expr::Local(sname) = static_form.exprs.get(ref_of(&static_form)) else {
+            panic!("static: ref target must be a Local read");
+        };
+        assert_eq!(static_form.strings.get(*sname), "box");
+    }
+
+    /// A placeholder local is admitted with no initializer and creates no
+    /// state — the Vue spelling of the Solid leg's bare `let box;`.
+    #[test]
+    fn placeholder_declarator_needs_no_initializer() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "Solo" });
+
+let box;
+</script>
+
+<template>
+  <p>ok</p>
+</template>
+"#;
+        let m = lower_module(src, "solo.vue").expect("lowers");
+        assert_eq!(m.states.len(), 0, "a placeholder declares no state");
+    }
+
+    /// A template ref targeting a signal is a category error (the capture
+    /// would shadow the setter write path) — fail-closed with LIG-E001.
+    #[test]
+    fn template_ref_targeting_a_state_is_e001() {
+        let src = r#"<script setup lang="ts">
+import { ref } from "vue";
+
+const box = ref(0);
+</script>
+
+<template>
+  <input ref="box" />
+</template>
+"#;
+        let err = lower_module(src, "bad.vue").expect_err("must fail");
+        assert!(
+            err.iter().any(|d| d.code == "LIG-E001"),
+            "expected LIG-E001, got {err:?}"
+        );
+    }
+
+    /// An unknown template-ref target is the unknown-identifier denial —
+    /// the same code the bound form's expression lowering produces.
+    #[test]
+    fn template_ref_unknown_target_is_e100() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "Ghost" });
+</script>
+
+<template>
+  <input ref="ghost" />
+</template>
+"#;
+        let err = lower_module(src, "ghost.vue").expect_err("must fail");
+        assert!(
+            err.iter().any(|d| d.code == "LIG-E100"),
+            "expected LIG-E100, got {err:?}"
+        );
+    }
+
+    /// A bound template ref must be a plain identifier — a computed-over or
+    /// state-shaped expression is outside the capture contract (codegen
+    /// admits only `Local` targets; admission denies with the precise shape
+    /// instead of the pre-M12 silent `Attr` mis-lowering).
+    #[test]
+    fn template_ref_non_local_expr_is_e001() {
+        let binary = r#"<script setup lang="ts">
+defineOptions({ name: "Marked" });
+
+let box;
+</script>
+
+<template>
+  <input :ref="box + ''" />
+</template>
+"#;
+        let err = lower_module(binary, "bad.vue").expect_err("must fail");
+        assert!(
+            err.iter().any(|d| d.code == "LIG-E001"),
+            "expected LIG-E001 for the binary target, got {err:?}"
+        );
+        let state = r#"<script setup lang="ts">
+import { ref } from "vue";
+
+const box = ref(0);
+</script>
+
+<template>
+  <input :ref="box" />
+</template>
+"#;
+        let err = lower_module(state, "bad.vue").expect_err("must fail");
+        assert!(
+            err.iter().any(|d| d.code == "LIG-E001"),
+            "expected LIG-E001 for the state target, got {err:?}"
+        );
+    }
+
+    /// A bare `ref` attribute carries no target — fail-closed.
+    #[test]
+    fn template_ref_bare_attr_is_e001() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "Bare" });
+
+let box;
+</script>
+
+<template>
+  <input ref />
+</template>
+"#;
+        let err = lower_module(src, "bare.vue").expect_err("must fail");
+        assert!(
+            err.iter()
+                .any(|d| d.code == "LIG-E001" && d.message.contains("target")),
+            "expected the bare-ref LIG-E001, got {err:?}"
+        );
+    }
+
+    /// The end-to-end parity pair: the Vue template-ref spelling lowers to
+    /// exactly the IR the Solid leg's `ref={box}` produces (modulo the
+    /// parity-ignored fields) — the contract the fixture pins.
+    #[test]
+    fn template_ref_both_legs_parity() {
+        fn parity_view(m: &lig_ir::module::ViewModule) -> String {
+            fn strip(v: &mut serde_json::Value) {
+                match v {
+                    serde_json::Value::Object(map) => {
+                        map.remove("span");
+                        map.remove("spans");
+                        map.insert("frontend".into(), "x".into());
+                        map.insert("source_files".into(), serde_json::Value::Array(vec![]));
+                        for (_, child) in map.iter_mut() {
+                            strip(child);
+                        }
+                    }
+                    serde_json::Value::Array(items) => {
+                        for item in items {
+                            strip(item);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut val: serde_json::Value =
+                serde_json::from_str(&m.canonical_json()).expect("canonical json");
+            strip(&mut val);
+            val.to_string()
+        }
+        let solid = lig_parse_solid::lower_module(
+            r"export function Marked() {
+  let box;
+  return (
+    <section>
+      <input ref={box} />
+      <p>static</p>
+    </section>
+  );
+}
+",
+            "template-ref.tsx",
+        )
+        .expect("lowers");
+        let vue = lower_module(
+            r#"<script setup lang="ts">
+defineOptions({ name: "Marked" });
+
+let box;
+</script>
+
+<template>
+  <section>
+    <input ref="box" />
+    <p>static</p>
+  </section>
+</template>
+"#,
+            "template-ref.vue",
+        )
+        .expect("lowers");
+        assert_eq!(
+            parity_view(&solid),
+            parity_view(&vue),
+            "both legs must agree on the template-ref IR"
+        );
     }
 }
