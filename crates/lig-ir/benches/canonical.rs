@@ -12,7 +12,6 @@ use lig_ir::{ExprId, FragmentId, Frontend, Ty};
 /// A counter-sized module: 1 component, 3 templates, 2 dynamics, 4 states,
 /// 4 reactions — the M0 reference shape (§9.2).
 // Fixture-sized module builder; length is fixture description.
-#[allow(clippy::too_many_lines)]
 fn counter_module() -> ViewModule {
     let mut m = ViewModule::new(Frontend::Solid);
     let name = m.strings.intern("Counter");
