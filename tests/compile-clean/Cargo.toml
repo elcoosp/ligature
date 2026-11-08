@@ -13,5 +13,53 @@ lig-runtime = { workspace = true }
 [dev-dependencies]
 mock-host = { workspace = true }
 
-[lints]
-workspace = true
+# Local lints (not workspace inheritance): this crate compiles the GENERATED
+# units verbatim (include! of tests/compile-clean/src/gen — §13). Generated
+# code is a table-like emission artifact (§9.2): its hygiene suppression
+# lives HERE, reviewed, instead of a #[allow] blanket the generator emits
+# (M10: the tree carries zero #[allow]/#![allow] attributes).
+[lints.rust]
+# Generated units are emitted without doc comments; the readability budget
+# (syn visitor, §9.2) owns generated-code clarity.
+missing_docs = "allow"
+# The generated arms bind schedule-widened parameters (`props`, `index`)
+# that not every shape consumes.
+unused_variables = "allow"
+# prettyplease output keeps author-parenthesization in a few bind arms.
+unused_parens = "allow"
+# Reaction/static names compose `Component_NAME` (CamelCase prefix + UPPER
+# suffix) by the §9.2 naming contract.
+non_upper_case_globals = "allow"
+# Schedule-wide constants (N_REACTIONS) are emitted even when a unit's
+# dispatch set is empty.
+dead_code = "allow"
+
+[lints.clippy]
+# Pedantic holds here too (the workspace ladder applies to generated code).
+pedantic = { level = "warn", priority = -1 }
+# Setters take state by value (the §7.6 write path) even when a fixture's
+# arm only reads through the field.
+needless_pass_by_value = "allow"
+# Per-dynamic run arms emit one `match`-shaped dispatch per reaction kind.
+single_match = "allow"
+# The generated plan loops index templates by construction (§7.5).
+unnecessary_cast = "allow"
+cast_possible_wrap = "allow"
+needless_range_loop = "allow"
+# Mount arms compose `if let` guards (branch → content → hole) — collapsible
+# only by obscuring the addressing chain the ADRs narrate.
+collapsible_if = "allow"
+# The generated fold of single-use matches keeps the dispatch shape uniform.
+match_like_matches_macro = "allow"
+infallible_destructuring_match = "allow"
+# Generated setters clone-on-assign to keep the write path uniform (§7.6).
+assigning_clones = "allow"
+# A few emitted guards take references the compiler auto-derefs.
+needless_borrow = "allow"
+# Event arms wrap the handler expression in one preserved paren pair; empty
+# dispatch sets emit the uniform `match r { _ => {} }` shape.
+double_parens = "allow"
+match_single_binding = "allow"
+# The generated run() is a table-like dispatch (one arm per reaction, §9.2) —
+# the M10 branch-assembly arms pushed the widest fixture past 100 lines.
+too_many_lines = "allow"
