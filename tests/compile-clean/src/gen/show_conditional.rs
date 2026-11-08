@@ -5,6 +5,7 @@ pub mod generated {
         pub open: bool,
         pub ev: ::lig_runtime::EvData,
         pub frag: ::lig_runtime::Fragment,
+        leg_f0_d0: u8,
     }
     #[derive(Default)]
     pub struct GateProps {}
@@ -66,6 +67,7 @@ pub mod generated {
             let mut s = Self {
                 open: true,
                 ev: ::lig_runtime::EvData::new(),
+                leg_f0_d0: 0u8,
                 frag: ::lig_runtime::Fragment::new(
                     h,
                     Gate_TPL_T1,
@@ -88,9 +90,11 @@ pub mod generated {
         fn run(&mut self, h: &mut dyn Host, r: u8) {
             match r {
                 Gate_R0_BIND_D0 => {
+                    let mut mounted_leg: u8 = 0u8;
                     let on = self.open;
-                    if self.frag.branch_is(0usize) != on {
-                        if on {
+                    if on {
+                        if !(self.frag.branch_is(0usize) && self.leg_f0_d0 == 1u8) {
+                            self.frag.unmount_branch(h, 0usize);
                             self.frag
                                 .mount_branch(
                                     h,
@@ -99,9 +103,29 @@ pub mod generated {
                                     Gate_HOLE_ANCHORS_F2,
                                     Gate_BRANCH_ANCHORS_F2,
                                 );
-                        } else {
-                            self.frag.unmount_branch(h, 0usize);
+                            self.leg_f0_d0 = 1u8;
+                            mounted_leg = 1u8;
                         }
+                    } else {
+                        if !(self.frag.branch_is(0usize) && self.leg_f0_d0 == 2u8) {
+                            self.frag.unmount_branch(h, 0usize);
+                            self.frag
+                                .mount_branch(
+                                    h,
+                                    0usize,
+                                    Gate_TPL_T0,
+                                    Gate_HOLE_ANCHORS_F1,
+                                    Gate_BRANCH_ANCHORS_F1,
+                                );
+                            self.leg_f0_d0 = 2u8;
+                            mounted_leg = 2u8;
+                        }
+                    }
+                    if mounted_leg == 1u8 {
+                        self.frag.mark_mask(0x0);
+                    }
+                    if mounted_leg == 2u8 {
+                        self.frag.mark_mask(0x0);
                     }
                 }
                 _ => {}
