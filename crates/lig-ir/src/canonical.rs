@@ -21,7 +21,6 @@ impl ViewModule {
     /// Rewrite the module into canonical form (idempotent).
     // Mechanical five-phase rewrite; split further and the borrow graph
     // fragments into redundant pre-passes. Length is inherent, not risk.
-    #[allow(clippy::too_many_lines)]
     pub fn canonicalize(&mut self) {
         // Phase 1 — strings: sort, collect remap.
         let str_remap: Vec<StrId> = self.strings.canonicalize();
