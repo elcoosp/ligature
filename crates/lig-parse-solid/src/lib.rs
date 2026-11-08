@@ -103,6 +103,7 @@ pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagn
         let root = lower_component(&mut module, f, &mut diags);
         module.components[idx].root = root;
         module.components[idx].props = props_of(&mut module, f);
+        own_tree_contract(&module, root, &mut diags);
     }
 
     if diags
@@ -114,6 +115,61 @@ pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagn
     unify_prop_types(&mut module);
     module.canonicalize();
     Ok(module)
+}
+
+/// The M10 own-tree contract: component uses and slot outlets inside FOR
+/// bodies of a component's own template deny with one precise reason.
+/// Before M10 both lowered silently broken: the item template carried a
+/// never-mounted outlet hole (nothing mounts fills/fallbacks per item), and
+/// a `.map` body carrying a component use built ONE eager instance field
+/// shared by every item, its root never attached. If branches admit — the
+/// per-mount identity story (rebuilt per mount, disposed on unmount).
+/// Branch bodies recurse with `in_for` sticky: once inside a list body the
+/// denial holds through nested branches (an If inside a list item is still
+/// per-item).
+fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigDiagnostic>) {
+    let mut stack = vec![(root, false)];
+    while let Some((frag_id, in_for)) = stack.pop() {
+        let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
+            continue;
+        };
+        for d in &frag.dynamics {
+            let why = match (&d.kind, in_for) {
+                (DynamicKind::Component(_), true) => Some(
+                    "component uses inside list item bodies are not admitted — per-item \
+                          instance identity is the keyed-component story (hoist the use out of \
+                          the body)",
+                ),
+                (DynamicKind::Slot { .. }, true) => Some(
+                    "slot outlets inside list item bodies are not admitted — per-item slot \
+                          assembly is the keyed-component story (hoist the outlet out of the \
+                          body)",
+                ),
+                _ => None,
+            };
+            if let Some(why) = why {
+                let span = d.span;
+                diags.push(LigDiagnostic::error(
+                    "LIG-E001",
+                    why.to_string(),
+                    Span::new(span.0, span.1),
+                ));
+            }
+            match &d.kind {
+                DynamicKind::If(i) => {
+                    stack.push((i.then, in_for));
+                    if let Some(el) = i.else_ {
+                        stack.push((el, in_for));
+                    }
+                }
+                DynamicKind::For(fo) => stack.push((fo.body, true)),
+                _ => {}
+            }
+        }
+        for &c in &frag.children {
+            stack.push((c, in_for));
+        }
+    }
 }
 
 fn props_of(module: &mut ViewModule, f: &Function<'_>) -> Vec<PropDecl> {
@@ -553,7 +609,6 @@ impl ComponentLowering<'_, '_> {
     /// `createSignal(0)` / `createMemo(() => ...)` / `createEffect(() => ...)`
     /// normalize to StateDecls + Reactions (§6.3).
     // One arm per reactive declaration (§6.3 normalization table).
-    #[allow(clippy::too_many_lines)]
     fn lower_declarator(&mut self, d: &VariableDeclarator<'_>) {
         let Some(init) = &d.init else { return };
         let Expression::CallExpression(call) = init else {
@@ -1559,42 +1614,35 @@ impl ComponentLowering<'_, '_> {
         Ok(Some(fill))
     }
 
-    /// The M9 slot-content contract: fills and fallbacks mount as live
+    /// The M10 slot-content contract: fills and fallbacks mount as live
     /// fragments — scalar binds (text/class/attr/style-prop/html), events,
-    /// refs, If/For dynamics (M8), AND component uses and nested outlets
-    /// (M9: grandchild prop-pass rides the author's field + a mount-time
-    /// insert; nested outlets mount their fills/own fallbacks through the
-    /// composed `Ctx` walks). Still fail-closed inside the content's
-    /// STRUCTURAL bodies (branch/list fragments): component uses and
-    /// outlets there need per-mount/per-item instance identity — a
-    /// remounted branch would re-insert a root the previous teardown
-    /// destroyed. Children/prop-pass/whole-style dynamics stay denied (M2),
-    /// and event handlers inside list item bodies stay denied (the
-    /// LIG-E118 discipline — per-item dispatch needs keyed components).
+    /// refs, If/For dynamics (M8), component uses and nested outlets (M9),
+    /// AND (M10) component uses and nested outlets inside BRANCH bodies of
+    /// content: a remounted branch rebuilds its per-mount component instance
+    /// (Option field, dispose on unmount), and the branch mounts its
+    /// outlets' fills/fallbacks with it (branch-time slot assembly). Still
+    /// fail-closed inside LIST bodies: per-item instance identity is the
+    /// keyed-component story. Children/prop-pass/whole-style dynamics stay
+    /// denied (M2), and event handlers inside list item bodies stay denied
+    /// (the LIG-E118 discipline — per-item dispatch needs keyed components).
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: oxc_span::Span) {
-        self.content_contract(frag, false, false, span);
+        self.content_contract(frag, false, span);
     }
 
     /// The recursive content walk: `in_list_item` marks fragments mounted as
     /// For bodies (their binds are the per-item replay's; events there are
-    /// the LIG-E118 denial); `in_branch` marks fragments mounted by an If
-    /// branch or For body (instances there are per-mount).
-    fn content_contract(
-        &mut self,
-        frag: FragmentId,
-        in_list_item: bool,
-        in_branch: bool,
-        span: oxc_span::Span,
-    ) {
+    /// the LIG-E118 denial; components and outlets there are the per-item
+    /// identity denial).
+    fn content_contract(&mut self, frag: FragmentId, in_list_item: bool, span: oxc_span::Span) {
         let (dynamics, children) = {
             let f = &self.module.fragments[frag.get() as usize];
             (f.dynamics.clone(), f.children.clone())
         };
         for d in &dynamics {
             let denied: Option<String> = match &d.kind {
-                // Scalar binds, refs, the structural constructs (M8), and
-                // (M9) component uses + nested outlets are admitted on
-                // content.
+                // Scalar binds, refs, the structural constructs (M8),
+                // component uses + nested outlets on content (M9) and inside
+                // content BRANCHES (M10 — per-mount identity) are admitted.
                 DynamicKind::Text
                 | DynamicKind::Html
                 | DynamicKind::Attr { .. }
@@ -1608,16 +1656,16 @@ impl ComponentLowering<'_, '_> {
                      handler to the list level (the LIG-E118 discipline)"
                         .to_string()
                 }),
-                DynamicKind::Component(_) => in_branch.then(|| {
-                    "component uses inside branch/list bodies of slot content are not admitted \
-                     — a remounted branch would need per-mount instance identity (rebuild per \
-                     mount, not re-insertion)"
+                DynamicKind::Component(_) => in_list_item.then(|| {
+                    "component uses inside list item bodies of slot content are not admitted — \
+                     per-item instance identity is the keyed-component story (hoist the use out \
+                     of the body)"
                         .to_string()
                 }),
-                DynamicKind::Slot { .. } => in_branch.then(|| {
-                    "slot outlets inside branch/list bodies of slot content are not admitted — \
-                     the outlet mounts with its branch, which needs branch-mount-time fill \
-                     coordination"
+                DynamicKind::Slot { .. } => in_list_item.then(|| {
+                    "slot outlets inside list item bodies of slot content are not admitted — \
+                     per-item slot assembly is the keyed-component story (hoist the outlet out \
+                     of the body)"
                         .to_string()
                 }),
                 DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
@@ -1635,8 +1683,8 @@ impl ComponentLowering<'_, '_> {
             }
         }
         // Structural bodies recurse: If branches and For bodies keep the
-        // scalar content contract (binds, events, refs compose) but deny
-        // component uses and outlets (per-mount/per-item identity).
+        // scalar content contract (binds, events, refs compose); For bodies
+        // additionally keep the per-item instance denials.
         let mut structural: Vec<(FragmentId, bool)> = Vec::new();
         {
             let f = &self.module.fragments[frag.get() as usize];
@@ -1655,9 +1703,9 @@ impl ComponentLowering<'_, '_> {
         }
         for child in children {
             if let Some((_, child_in_list)) = structural.iter().find(|(id, _)| *id == child) {
-                self.content_contract(child, *child_in_list, true, span);
+                self.content_contract(child, *child_in_list, span);
             } else {
-                self.content_contract(child, in_list_item, in_branch, span);
+                self.content_contract(child, in_list_item, span);
             }
         }
     }
