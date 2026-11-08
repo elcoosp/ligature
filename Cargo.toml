@@ -67,24 +67,24 @@ libc = "0.2.191"
 # (Declared inline there — workspace deps cannot be optional.)
 
 # internal crates
-lig-admission = { path = "crates/lig-admission", version = "0.1.0" }
-lig-codegen = { path = "crates/lig-codegen", version = "0.1.0" }
-lig-cli = { path = "crates/lig-cli", version = "0.1.0" }
-lig-core = { path = "crates/lig-core", version = "0.1.0" }
-lig-expr = { path = "crates/lig-expr", version = "0.1.0" }
-lig-incremental = { path = "crates/lig-incremental", version = "0.1.0" }
-lig-ir = { path = "crates/lig-ir", version = "0.1.0" }
-lig-parse-solid = { path = "crates/lig-parse-solid", version = "0.1.0" }
-lig-parse-vue = { path = "crates/lig-parse-vue", version = "0.1.0" }
-lig-patch = { path = "crates/lig-patch", version = "0.1.0" }
-lig-reactivity = { path = "crates/lig-reactivity", version = "0.1.0" }
-lig-runtime = { path = "crates/lig-runtime", version = "0.1.0" }
-lig-sourcemap = { path = "crates/lig-sourcemap", version = "0.1.0" }
-lig-style = { path = "crates/lig-style", version = "0.1.0" }
-lig-taffy-profile = { path = "crates/lig-taffy-profile", version = "0.1.0" }
+lig-admission = { path = "crates/lig-admission" }
+lig-codegen = { path = "crates/lig-codegen" }
+lig-cli = { path = "crates/lig-cli" }
+lig-core = { path = "crates/lig-core" }
+lig-expr = { path = "crates/lig-expr" }
+lig-incremental = { path = "crates/lig-incremental" }
+lig-ir = { path = "crates/lig-ir" }
+lig-parse-solid = { path = "crates/lig-parse-solid" }
+lig-parse-vue = { path = "crates/lig-parse-vue" }
+lig-patch = { path = "crates/lig-patch" }
+lig-reactivity = { path = "crates/lig-reactivity" }
+lig-runtime = { path = "crates/lig-runtime" }
+lig-sourcemap = { path = "crates/lig-sourcemap" }
+lig-style = { path = "crates/lig-style" }
+lig-taffy-profile = { path = "crates/lig-taffy-profile" }
 
 # host adapters
-mock-host = { path = "adapters/mock-host", version = "0.1.0" }
+mock-host = { path = "adapters/mock-host" }
 
 # M1 CLI (lig check/build): verified latest on crates.io 2026-11-05
 clap = { version = "4.6.7", features = ["derive"] }
