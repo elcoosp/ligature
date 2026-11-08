@@ -470,7 +470,6 @@ impl Fragment {
     /// sees `insert(anchor, root, index)`.
     // (host, slot, index, key, tpl, holes, branches) — the template triple is
     // one logical unit (the mounted-fragment descriptor).
-    #[allow(clippy::too_many_arguments)]
     pub fn list_insert(
         &mut self,
         host: &mut dyn Host,
