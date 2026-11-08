@@ -20,6 +20,9 @@ syn = { workspace = true }
 insta = { workspace = true }
 criterion = { workspace = true }
 lig-parse-solid = { workspace = true }
+# M12: the template-ref contract is a both-legs story — codegen tests lower
+# the Vue spelling against the same pipeline. (Dev-only.)
+lig-parse-vue = { workspace = true }
 lig-reactivity = { workspace = true }
 
 [[bench]]

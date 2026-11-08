@@ -604,3 +604,80 @@ export function Badge({ count }) {
         "the frontend denial fires: {module:?}"
     );
 }
+
+#[test]
+fn template_ref_generates_the_node_field_and_capture() {
+    // M12: the Vue template-ref spelling rides the existing Ref machinery —
+    // the generated unit declares the sentinel-initialized `ref_<name>`
+    // field and captures the element's hole NodeId in the build body.
+    let src = r#"<script setup lang="ts">
+defineOptions({ name: "Marked" });
+
+let box;
+</script>
+
+<template>
+  <section>
+    <input ref="box" />
+    <p>static</p>
+  </section>
+</template>
+"#;
+    let module = lig_parse_vue::lower_module(src, "template-ref.vue").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert!(
+        text.contains("pub ref_box: ::lig_runtime::NodeId"),
+        "{text}"
+    );
+    assert!(
+        text.contains("ref_box: ::lig_runtime::NodeId(u32::MAX)"),
+        "the field starts as the absent sentinel: {text}"
+    );
+    assert!(
+        text.contains("s.ref_box = s.frag.hole("),
+        "the build body captures the element hole: {text}"
+    );
+}
+
+#[test]
+fn template_ref_codegen_matches_the_solid_leg() {
+    // The two spellings ride one Ref contract — the generated text is the
+    // same modulo the source-file identity the doc comment carries.
+    let vue = r#"<script setup lang="ts">
+defineOptions({ name: "Marked" });
+
+let box;
+</script>
+
+<template>
+  <section>
+    <input ref="box" />
+  </section>
+</template>
+"#;
+    let solid = r"export function Marked() {
+  let box;
+  return <section><input ref={box} /></section>;
+}
+";
+    let vue_module = lig_parse_vue::lower_module(vue, "template-ref.vue").expect("lower");
+    let solid_module = lig_parse_solid::lower_module(solid, "template-ref.tsx").expect("lower");
+    let vue_text = lig_codegen::generate_module(&vue_module)
+        .expect("codegen")
+        .text;
+    let solid_text = lig_codegen::generate_module(&solid_module)
+        .expect("codegen")
+        .text;
+    let source_line = |t: &str| {
+        t.lines()
+            .filter(|l| l.contains("template-ref."))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let strip = |t: &str| t.replace(&source_line(t), "");
+    assert_eq!(
+        strip(&vue_text),
+        strip(&solid_text),
+        "one Ref contract, one generated shape"
+    );
+}

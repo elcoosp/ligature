@@ -48,10 +48,24 @@ fn bench_codegen_branch(c: &mut Criterion) {
     });
 }
 
+/// Lower the template-ref fixture once (M12: the Ref capture contract —
+/// the ref-field declaration, the sentinel init, and the build-body capture
+/// ride the module pipeline), then time repeated codegen of the same IR.
+fn bench_codegen_ref(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/template-ref/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "template-ref.tsx").expect("fixture lowers");
+    c.bench_function("codegen/ref", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module))).expect("ref codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
     bench_codegen_composed,
-    bench_codegen_branch
+    bench_codegen_branch,
+    bench_codegen_ref
 );
 criterion_main!(benches);
