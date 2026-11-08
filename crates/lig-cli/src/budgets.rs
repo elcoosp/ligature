@@ -49,7 +49,8 @@ struct BudgetRow {
 #[derive(Debug, Deserialize)]
 struct Ledger {
     /// Ledger schema version (1 — the M4 shape).
-    #[allow(dead_code)] // parsed for forward-compat; the gate is v1
+    /// Ledger schema version (1 — the M4 shape; the gate fails closed on
+    /// any newer schema it cannot measure).
     schema: u32,
     /// One row per workload.
     budget: Vec<BudgetRow>,
@@ -218,7 +219,7 @@ fn samples_for(name: &str) -> usize {
         "lower_solid_counter" | "lower_vue_counter" => 120,
         "canonical_json_counter" => 200,
         "codegen_counter" => 60,
-        "codegen_composed" => 40,
+        "codegen_composed" | "codegen_branch" => 40,
         "runtime_instantiate" | "runtime_update_mask" | "patch_apply_1" | "patch_dispatch_hit" => {
             800
         }
@@ -241,6 +242,15 @@ fn counter_vue_source(root: &Path) -> String {
 /// committed fixture so the gate and the parity harness share one source.
 fn slots_component_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/slots-component/input.solid.tsx");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The branch-assembly fixture (the M10 codegen bench's workload: per-mount
+/// component identity + branch-time slot assembly — the Option-field
+/// rebuild/dispose arms and the assembly walk), read from the committed
+/// fixture so the gate and the parity harness share one source.
+fn slots_branch_component_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/slots-branch-component/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -277,6 +287,15 @@ fn measure(name: &str, root: &Path) -> f64 {
         "codegen_composed" => {
             let src = slots_component_source(root);
             let m = lig_parse_solid::lower_module(&src, "slots-component.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
+                black_box(u);
+            })
+        }
+        "codegen_branch" => {
+            let src = slots_branch_component_source(root);
+            let m =
+                lig_parse_solid::lower_module(&src, "slots-branch-component.tsx").expect("lower");
             median_us(samples_for(name), || {
                 let u = lig_codegen::generate_module(&m).expect("codegen");
                 black_box(u);
@@ -335,6 +354,7 @@ const REGISTRY: &[&str] = &[
     "canonical_json_counter",
     "codegen_counter",
     "codegen_composed",
+    "codegen_branch",
     "runtime_instantiate",
     "runtime_update_mask",
     "runtime_list_diff_keyed",
@@ -386,6 +406,17 @@ pub fn budgets_gate() -> i32 {
             return 1;
         }
     };
+
+    // Forward-compat guard (fail closed): the gate measures the v1 ledger —
+    // a newer schema must be opted into by a reviewed gate change, not
+    // silently mis-measured.
+    if ledger.schema != 1 {
+        eprintln!(
+            "budgets: ledger schema {} is newer than the v1 gate",
+            ledger.schema
+        );
+        return 1;
+    }
 
     // Sync check (the rules-sync discipline, applied to the ledger): every
     // registered measurement has exactly one row, and no row names anything
@@ -497,8 +528,8 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 11 rows, all named, no dupes.
-        assert_eq!(REGISTRY.len(), 11);
+        // The registry is the sync contract: 12 rows, all named, no dupes.
+        assert_eq!(REGISTRY.len(), 12);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
