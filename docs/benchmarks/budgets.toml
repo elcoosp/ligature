@@ -111,3 +111,12 @@ name = "codegen_ref"
 metric = "time"
 budget = 1200.0
 note = "M12 reference median 234 µs (codegen/ref bench, release); ≈5.1× headroom"
+
+# Codegen over the else-leg surface (M11): the tracked-leg mounting arms
+# (leg fields, per-leg statics, leg-guarded post-flush captures) and the
+# per-leg assembly/marking emission ride generate_module.
+[[budget]]
+name = "codegen_else"
+metric = "time"
+budget = 6000.0
+note = "M11 reference median 1067 µs (codegen/else bench, release, Linux x86_64); ≈5.6× headroom"
