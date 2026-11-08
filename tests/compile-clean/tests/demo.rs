@@ -4,8 +4,8 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic, slots_named,
-    slots_nested, slots_structural, v_model,
+    show_else, slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic,
+    slots_named, slots_nested, slots_structural, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::MockHost;
@@ -561,5 +561,65 @@ fn branch_outlets_mount_fills_and_fallbacks_with_the_branch() {
     assert!(
         fill1.branch(0).is_none(),
         "the branch unmounted with its fills"
+    );
+}
+
+/// The M11 else-leg contract, end to end: the else branch mounts when the
+/// condition is false (the M2-era fail-open rendered nothing — the emitted
+/// else template was dead), its bind initializes through the mount marking
+/// and updates live, the per-mount Badge rebuilds on the else mount with its
+/// prop initialized, and the whole leg disposes on the flip back.
+#[test]
+fn show_else_mounts_binds_and_disposes_per_mount() {
+    let mut h = MockHost::new();
+    let mut app = show_else::App::build(&mut h, show_else::AppProps::default());
+    // on = true: the then legs are up, the else component is absent.
+    assert!(
+        app.badge.is_none(),
+        "the else leg's component is unmounted while then is up"
+    );
+    let then = app.frag.branch(0).expect("then leg mounted at build");
+    assert_eq!(h.text_of(then.hole(0)), Some("in"), "then bind initialized");
+    assert!(
+        app.frag.branch(1).is_some(),
+        "the second Show's then leg mounted"
+    );
+    // Flip off: the else legs mount — nothing rendered here before M11.
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    let else_leg = app.frag.branch(0).expect("else leg mounted");
+    assert_eq!(
+        h.text_of(else_leg.hole(0)),
+        Some("in"),
+        "else bind initialized through the mount marking"
+    );
+    let badge = app.badge.as_ref().expect("else Badge rebuilt per mount");
+    assert_eq!(
+        h.text_of(badge.frag.hole(0)),
+        Some("off"),
+        "the fresh instance's prop initialized"
+    );
+    // The else bind is live: a late write lands while the else is mounted.
+    app.set_tag("late".into());
+    lig_runtime::flush(&mut app, &mut h);
+    let else_leg = app.frag.branch(0).expect("else leg");
+    assert_eq!(
+        h.text_of(else_leg.hole(0)),
+        Some("late"),
+        "the else bind updates through its branch ctx"
+    );
+    // Flip on: the else leg (and its instance) disposes; the then leg
+    // remounts fresh and re-initializes through the mount marking.
+    app.set_on(true);
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(
+        app.badge.is_none(),
+        "the else instance disposed with its branch"
+    );
+    let then = app.frag.branch(0).expect("then leg remounted");
+    assert_eq!(
+        h.text_of(then.hole(0)),
+        Some("late"),
+        "the remounted then leg re-initializes through the mount marking"
     );
 }
