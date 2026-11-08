@@ -9,14 +9,14 @@
     <code>quote!</code> → <code>syn</code> → <code>prettyplease</code> pipeline emit readable Rust
     that runs on a <code>#![no_std]</code> slab runtime behind an object-safe <code>Host</code> trait.
     For teams that want a reactive UI layer with a known, enforced subset — embedded to web hosts —
-    CI byte-compares both frontend legs of 29 conformance fixtures against the committed contract on every push.
+    CI byte-compares both frontend legs of 30 conformance fixtures against the committed contract on every push.
   </p>
   <p>
     <a href="https://github.com/elcoosp/ligature/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/elcoosp/ligature/ci.yml?style=flat-square&label=CI" alt="CI status"/></a>
     <a href="docs/adr/0012-msrv-and-dependency-pins.md"><img src="https://img.shields.io/badge/MSRV-1.97%2B-informational?style=flat-square" alt="MSRV 1.97+"/></a>
     <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-informational?style=flat-square" alt="License: MIT OR Apache-2.0"/></a>
-    <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-0.1.0--m9-blue?style=flat-square" alt="Version 0.1.0-m9"/></a>
-    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-29%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="29 conformance fixtures, both frontend legs"/></a>
+    <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.2.0-blue?style=flat-square" alt="Version 1.2.0"/></a>
+    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-30%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="30 conformance fixtures, both frontend legs"/></a>
   </p>
 </div>
 
@@ -63,7 +63,7 @@ dist/
 
 ## Features
 
-- **Two frontends, one contract.** Solid TSX and Vue SFC lower into the same canonical View IR; `lig fixtures verify` byte-compares both legs of 29 conformance fixtures in CI, and a fixture without both legs fails the gate.
+- **Two frontends, one contract.** Solid TSX and Vue SFC lower into the same canonical View IR; `lig fixtures verify` byte-compares both legs of 30 conformance fixtures in CI, and a fixture without both legs fails the gate. Template refs are the M12 parity addition: `ref={box}` and `ref="box"` / `:ref="box"` lower to the same `Ref` capture, byte-identical across legs.
 - **Fail-closed admission ladder.** Every construct lands in exactly one Deny/Lint/Allow tier — 11 rules in `docs/admission/rules.md`, each backed by an allow fixture and a deny/lint fixture, synced 1:1 by a CI gate. A Deny means zero output downstream.
 - **Byte-reproducible codegen.** `quote!` → `syn::File` → `prettyplease` emits Rust that is byte-identical across runs: `lig reproducibility` diffs the committed counter unit (7,385 B, component digest `0x85d06a5c087b3589`) against a fresh generation, and a readability budget is enforced by a syn visitor.
 - **no_std runtime with keyed reconciliation.** The runtime is `#![no_std]` + alloc with `forbid(unsafe_code)`: `Copy` node handles, an object-safe `Host` commit stream, LIS-stable keyed list diffs, and a const-scheduled flush loop. CI proves bare-metal builds for `thumbv7em-none-eabihf` and `aarch64-unknown-none-softfloat`.
@@ -143,19 +143,23 @@ path, a const `Schedule`, static template tables, and `build`/`fire_*` entry poi
 ## Status
 
 > [!NOTE]
-> Research toolchain at 1.0.0 — milestone M10 complete, with the View IR
-> schema at v5 and the compiled subset deliberately small: constructs outside the contract
+> Research toolchain at 1.0.0 — milestone M12 complete (template refs on the
+> Vue leg: the placeholder-local declaration, the `ref`/`:ref` template
+> spelling, and the fail-closed denials that replaced the pre-M12 silent
+> attribute mis-lowering), with the View IR schema at v5 and the compiled subset
+> deliberately small: constructs outside the contract
 > (component/outlet uses inside list bodies, events in `For` bodies,
 > callback calls, raw DOM access) deny with a precise code rather than mis-compile. CI runs on Linux and macOS;
 > the patch protocol is unix-only `dlopen` (`lig doctor` reports it unavailable on Windows).
 > MSRV is 1.97, edition 2024, toolchain pinned at 1.99.1. The release workflow publishes
-> changelogs, not crates — build from source.
+> changelogs, not crates — build from source. M11 (the `else` leg of
+> `Show`/`v-if` chains) is in flight on its own branch and not part of this tree.
 
 ## Learn more
 
-- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m10/REPORT.md`](docs/m10/REPORT.md) — what each milestone delivered and measured
+- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m12/REPORT.md`](docs/m12/REPORT.md) — what each milestone delivered and measured (M11, the else leg, is in flight on its own branch)
 - [`docs/appendix-a.md`](docs/appendix-a.md) — the annotated generated unit every gate pins
-- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023)
+- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023), template refs on the Vue leg (0025)
 - [`docs/admission/rules.md`](docs/admission/rules.md) — the Deny/Lint/Allow rule table; the 15-doc diagnostic catalog under [`docs/errors/`](docs/errors/)
 - Benchmarks: [`docs/benchmarks/budgets.toml`](docs/benchmarks/budgets.toml) (enforced ceilings), [`docs/benchmarks/save-to-frame.md`](docs/benchmarks/save-to-frame.md) (patch protocol numbers), [`docs/benchmarks/oxc-vs-swc.md`](docs/benchmarks/oxc-vs-swc.md) (the parser re-benchmark)
 - [`fixtures/README.md`](fixtures/README.md) — the conformance contract both frontends must satisfy
