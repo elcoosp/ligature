@@ -29,7 +29,8 @@ fn patchable_v0() -> u64 {
 }
 
 /// A distinct same-signature body standing in for freshly patched code.
-#[allow(dead_code)] // reachable only through the routed (transmuted) call
+/// Reachable only through the routed (transmuted) call — the reachability
+/// analysis sees the route, so no dead-code suppression is needed.
 fn patchable_v1() -> u64 {
     1
 }
