@@ -83,7 +83,7 @@ note = "M0 patch-dispatch/hit bench ~2.1 ns (M4 re-measure: ~30 ns); ≈30× hea
 name = "gen_counter_bytes"
 metric = "bytes"
 budget = 8192.0
-note = "M3 delivery: 7 146 B counter unit; 8 KiB ceiling (≈15% headroom)"
+note = "M10 delivery: 7 385 B counter unit (the generated lint blanket moved to the compile-clean crate's [lints]; the build phases doc names the M10 child-attach phase); 8 KiB ceiling (≈10% headroom)"
 
 # Codegen over the composed slot-content surface (M9): component-in-content
 # (grandchild prop-pass) + nested outlets — the ctx classification walk, the
@@ -93,3 +93,12 @@ name = "codegen_composed"
 metric = "time"
 budget = 6000.0
 note = "M9 reference median 1001 µs (codegen/composed bench, release); ≈6× headroom"
+
+# Codegen over the branch-assembly surface (M10): per-mount component
+# identity (Option-field rebuild/dispose arms) + branch-time slot assembly —
+# the If-arm walk emission and the widened mount masks ride generate_module.
+[[budget]]
+name = "codegen_branch"
+metric = "time"
+budget = 6000.0
+note = "M10 reference median 1065 µs (codegen/branch bench, release); ≈5.6× headroom"
