@@ -309,7 +309,6 @@ impl Session {
 
     /// Compute (not memoize) the `generated` query: stage-by-stage, storing
     /// the resulting [`CompiledUnit`] on the memo entry.
-    #[allow(clippy::too_many_lines)] // one arm per pipeline stage, table-like
     fn compute_generated(
         &mut self,
         path: &Path,
