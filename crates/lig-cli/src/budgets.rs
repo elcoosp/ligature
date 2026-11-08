@@ -219,7 +219,7 @@ fn samples_for(name: &str) -> usize {
         "lower_solid_counter" | "lower_vue_counter" => 120,
         "canonical_json_counter" => 200,
         "codegen_counter" => 60,
-        "codegen_composed" | "codegen_branch" => 40,
+        "codegen_composed" | "codegen_branch" | "codegen_else" => 40,
         "runtime_instantiate" | "runtime_update_mask" | "patch_apply_1" | "patch_dispatch_hit" => {
             800
         }
@@ -251,6 +251,14 @@ fn slots_component_source(root: &Path) -> String {
 /// fixture so the gate and the parity harness share one source.
 fn slots_branch_component_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/slots-branch-component/input.solid.tsx");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The else-leg fixture (the M11 codegen bench's workload: the tracked-leg
+/// mounting arms and the per-leg assembly/marking emission), read from the
+/// committed fixture so the gate and the parity harness share one source.
+fn show_else_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/show-else/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -296,6 +304,14 @@ fn measure(name: &str, root: &Path) -> f64 {
             let src = slots_branch_component_source(root);
             let m =
                 lig_parse_solid::lower_module(&src, "slots-branch-component.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
+                black_box(u);
+            })
+        }
+        "codegen_else" => {
+            let src = show_else_source(root);
+            let m = lig_parse_solid::lower_module(&src, "show-else.tsx").expect("lower");
             median_us(samples_for(name), || {
                 let u = lig_codegen::generate_module(&m).expect("codegen");
                 black_box(u);
@@ -355,6 +371,7 @@ const REGISTRY: &[&str] = &[
     "codegen_counter",
     "codegen_composed",
     "codegen_branch",
+    "codegen_else",
     "runtime_instantiate",
     "runtime_update_mask",
     "runtime_list_diff_keyed",
@@ -528,8 +545,8 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 12 rows, all named, no dupes.
-        assert_eq!(REGISTRY.len(), 12);
+        // The registry is the sync contract: 13 rows, all named, no dupes.
+        assert_eq!(REGISTRY.len(), 13);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
