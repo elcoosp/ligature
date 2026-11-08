@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (27)
+## Behavior fixtures (30)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -57,6 +57,9 @@ table).
 | `map-keyed` | keyed `.map` children (M6): `key={item}` on the mapped element / `:key="item"` on the `v-for` element — the key stripped from the item fragment, `ForIr.key = Local(item)` |
 | `memo-derived` | `createMemo`/`computed` read in a text hole |
 | `show-conditional` | `Show` with `fallback` / `v-if`/`v-else` at the template root |
+| `show-else` | the else leg (M11): `fallback`/`v-else` content mounts when the condition is false — a dynamic bind on the else branch walks its branch ctx like its then twin, and a component use on the else branch rebuilds per mount (`Option<Child>`), inserts its root into the branch hole, and disposes on the flip back |
+| `slots-branch-component` | per-mount component identity in content branches (M10): a `<Badge count={n()} />` inside an If branch on a fill — the instance rebuilds per mount, inserts into the branch's component hole, initializes through the mount marking, disposes on unmount, and rebuilds fresh on remount (a late write lands on the next mount) |
+| `slots-branch-outlet` | branch-time slot assembly (M10): a `<Slot name="inner">` outlet INSIDE an If branch on the header fill — the use-site fill (or the outlet's own fallback) mounts WITH the branch through the composed accessor chain, and the fresh content's binds initialize on the next pass |
 | `slots-component` | component-in-content (M9): a fill carrying a `<Badge count={n()} />` use — the grandchild builds as the content author's field, inserts into the mounted content's component hole, and receives reactive props through the content author's prop-pass arm; the default `<Slot />` outlet carries the element-children fill |
 | `slots-dynamic` | dynamic slot content (M7): a fill carrying a live text bind + a delegated event and a fallback carrying its own text bind — slot-scoped run arms address the mounted content (`slot_fill_mut`/`slot_fallback_mut`), the fill event attaches across slabs (`attach_foreign`), and the fallback bind initializes through the parent-driven init-flush |
 | `slots-named` | named slots + fallback (M6): `<slot name="header">`/`<Slot name="header">` outlets with `<em>` fallback, `<template #header>` / element-valued-prop fills, two use sites in one parent (fill on one, fallback on the other) |
