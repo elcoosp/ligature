@@ -33,5 +33,25 @@ fn bench_codegen_composed(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_codegen, bench_codegen_composed);
+/// Lower the branch-assembly fixture once (M10: per-mount component identity
+/// plus branch-time slot assembly — the Option-field rebuild/dispose arms,
+/// the assembly walk emission, and the widened mount masks ride the module
+/// pipeline), then time repeated codegen of the same IR.
+fn bench_codegen_branch(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/slots-branch-component/input.solid.tsx");
+    let module =
+        lig_parse_solid::lower_module(src, "slots-branch-component.tsx").expect("fixture lowers");
+    c.bench_function("codegen/branch", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module))).expect("branch codegens");
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_codegen,
+    bench_codegen_composed,
+    bench_codegen_branch
+);
 criterion_main!(benches);
