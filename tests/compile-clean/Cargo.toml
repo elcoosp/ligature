@@ -63,3 +63,11 @@ match_single_binding = "allow"
 # The generated run() is a table-like dispatch (one arm per reaction, §9.2) —
 # the M10 branch-assembly arms pushed the widest fixture past 100 lines.
 too_many_lines = "allow"
+# The M11 tracked-leg transition emits a uniform guarded-else block: the
+# compound `branch_is` + leg-field guard reads as one decision, and keeping
+# the block form makes both legs' transitions token-parallel.
+collapsible_else_if = "allow"
+# Two legs of one conditional can lower to textually identical bind arms
+# (same slot, same hole, same expression) while remaining distinct
+# reactions — the arms are per-reaction by construction, not duplicates.
+match_same_arms = "allow"
