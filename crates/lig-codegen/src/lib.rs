@@ -393,6 +393,25 @@ fn generate_component_pieces(
     struct_fields.extend(prev_fields);
     init_fields.extend(prev_inits);
 
+    // --- branch leg trackers (M11): one u8 per If dynamic that carries an
+    // else leg — the mounting arm records which leg is mounted (0 = none,
+    // 1 = then, 2 = else) so the arm can swap legs; the then-only shape
+    // stays tracker-free and byte-stable.
+    for f in &frags {
+        let frag_ir = &module.fragments[f.id.get() as usize];
+        for (di, d) in frag_ir.dynamics.iter().enumerate() {
+            let DynamicKind::If(i) = &d.kind else {
+                continue;
+            };
+            if i.else_.is_none() {
+                continue;
+            }
+            let fname = syn::Ident::new(&format!("leg_f{}_d{}", f.id.get(), di), Span::call_site());
+            struct_fields.push(quote! { #fname: u8 });
+            init_fields.push(quote! { #fname: 0u8 });
+        }
+    }
+
     // --- apply functions (grouped by (fragment, anchor) — C5) ---------------------
     let apply_fns = emit_apply_fns(module, &frags);
     let group_state_fields: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -402,7 +421,7 @@ fn generate_component_pieces(
     let mut list_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut item_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut key_methods: Vec<proc_macro2::TokenStream> = Vec::new();
-    let mut ref_captures: Vec<(String, usize, Ctx)> = Vec::new();
+    let mut ref_captures: Vec<(String, usize, Ctx, FragmentId)> = Vec::new();
     for rx in &rxs {
         let cname = syn::Ident::new(&format!("{prefix}{}", rx.const_name), Span::call_site());
         match rx.decl.kind {
@@ -488,35 +507,69 @@ fn generate_component_pieces(
                         let cond = gen_expr(module, if_ir.cond)?;
                         let slot = branch_slot_of_dynamic(frag, dynamic);
                         let Some(slot) = slot else { continue };
-                        let branch_info = frags.iter().find(|f| f.id == if_ir.then);
-                        let Some(branch_info) = branch_info else {
-                            continue;
-                        };
-                        let b_tpl = tpl_ident(&prefix, branch_info.template_id);
-                        let b_holes = hole_ident(&prefix, branch_info.id.get() as usize);
-                        let b_branches = branch_ident(&prefix, branch_info.id.get() as usize);
+                        // M11 the else leg: both branch legs participate —
+                        // then first, else second. The frontends lowered
+                        // else since M2, but the mounting arm never mounted
+                        // it (the emitted else template was dead and dynamic
+                        // else content had no honest addressing).
+                        let mut leg_ids: Vec<FragmentId> = vec![if_ir.then];
+                        if let Some(el) = if_ir.else_ {
+                            leg_ids.push(el);
+                        }
+                        let has_else = if_ir.else_.is_some();
+                        let leg_field = has_else.then(|| {
+                            syn::Ident::new(
+                                &format!("leg_f{}_d{}", rx.decl.owner.get(), dynamic),
+                                Span::call_site(),
+                            )
+                        });
+                        let mut leg_statics: Vec<(syn::Ident, syn::Ident, syn::Ident)> =
+                            Vec::with_capacity(leg_ids.len());
+                        for &lid in &leg_ids {
+                            let Some(info) = frags.iter().find(|f| f.id == lid) else {
+                                return Err(CodegenError::Unsupported(
+                                    "If branch fragment missing from the component tree",
+                                ));
+                            };
+                            leg_statics.push((
+                                tpl_ident(&prefix, info.template_id),
+                                hole_ident(&prefix, info.id.get() as usize),
+                                branch_ident(&prefix, info.id.get() as usize),
+                            ));
+                        }
                         // The mount rides the owner fragment's receiver: an If
                         // inside slot content mounts its branch on the
                         // content (M7), not on the parent's slab.
                         let content_rooted = ctx.content_rooted();
-                        // M10 branch-time assembly: the branch carries
+                        // M10/M11 branch-time assembly: any leg carrying
                         // component uses (per-mount identity — rebuild per
-                        // mount, dispose per unmount) or slot outlets
-                        // (their fills/fallbacks mount WITH the branch).
-                        let branch_frag_ir = module.fragments.get(if_ir.then.get() as usize);
-                        let branch_has_components = branch_frag_ir.is_some_and(|bf| {
-                            bf.dynamics
-                                .iter()
-                                .any(|d| matches!(d.kind, DynamicKind::Component(_)))
+                        // mount, dispose per unmount) or slot outlets (their
+                        // fills/fallbacks mount WITH the branch). An else leg
+                        // always carries the marking story: its fresh binds
+                        // initialize through the mount marking like a then
+                        // branch's do.
+                        let leg_frag_irs: Vec<Option<&FragmentIr>> = leg_ids
+                            .iter()
+                            .map(|lid| module.fragments.get(lid.get() as usize))
+                            .collect();
+                        let branch_has_components = leg_frag_irs.iter().any(|bf| {
+                            bf.is_some_and(|f| {
+                                f.dynamics
+                                    .iter()
+                                    .any(|d| matches!(d.kind, DynamicKind::Component(_)))
+                            })
                         });
-                        let branch_has_slots = branch_frag_ir.is_some_and(|bf| {
-                            bf.dynamics
-                                .iter()
-                                .any(|d| matches!(d.kind, DynamicKind::Slot { .. }))
+                        let branch_has_slots = leg_frag_irs.iter().any(|bf| {
+                            bf.is_some_and(|f| {
+                                f.dynamics
+                                    .iter()
+                                    .any(|d| matches!(d.kind, DynamicKind::Slot { .. }))
+                            })
                         });
                         let needs_assembly =
-                            content_rooted || branch_has_components || branch_has_slots;
-                        let mount_flag = needs_assembly.then(|| quote! { did_mount = true; });
+                            content_rooted || branch_has_components || branch_has_slots || has_else;
+                        let mount_flag =
+                            (!has_else && needs_assembly).then(|| quote! { did_mount = true; });
                         // The mounted branch hangs on the fragment `ctx`
                         // addresses, at this dynamic's branch slot.
                         let branch_read = {
@@ -524,22 +577,28 @@ fn generate_component_pieces(
                             quote! { (#base_read).and_then(|f| f.branch(#slot)) }
                         };
                         // Per-mount instance rebuild (mount path) and dispose
-                        // (unmount path) for the branch's component uses.
-                        let mut rebuilds: Vec<proc_macro2::TokenStream> = Vec::new();
-                        let mut disposes: Vec<proc_macro2::TokenStream> = Vec::new();
-                        if let Some(bf) = branch_frag_ir {
+                        // (unmount path) for each leg's component uses (M10
+                        // per-mount identity, generalized to the else leg).
+                        let mut leg_rebuilds: Vec<Vec<proc_macro2::TokenStream>> =
+                            leg_frag_irs.iter().map(|_| Vec::new()).collect();
+                        let mut leg_disposes: Vec<Vec<proc_macro2::TokenStream>> =
+                            leg_frag_irs.iter().map(|_| Vec::new()).collect();
+                        for (li, lid) in leg_ids.iter().enumerate() {
+                            let Some(bf) = leg_frag_irs[li] else {
+                                continue;
+                            };
                             for (di, d) in bf.dynamics.iter().enumerate() {
                                 let DynamicKind::Component(c) = &d.kind else {
                                     continue;
                                 };
-                                if owner_is_list_body(module, &frags, if_ir.then) {
+                                if owner_is_list_body(module, &frags, *lid) {
                                     return Err(CodegenError::Unsupported(
                                         "component uses inside list item bodies need per-item \
                                          instance identity (the keyed-component story)",
                                     ));
                                 }
                                 let field_name = component_field_map
-                                    .get(&(if_ir.then.get(), di as u32))
+                                    .get(&(lid.get(), di as u32))
                                     .cloned()
                                     .unwrap_or_else(|| field_name_for(module, c.component));
                                 let field = syn::Ident::new(&field_name, Span::call_site());
@@ -555,147 +614,282 @@ fn generate_component_pieces(
                                     &format!("{child_name}Props"),
                                     Span::call_site(),
                                 );
-                                rebuilds.push(quote! {
+                                leg_rebuilds[li].push(quote! {
                                     self.#field =
                                         Some(#child_ty::build(h, #props_ty::default()));
                                 });
-                                rebuilds.push(quote! {
+                                leg_rebuilds[li].push(quote! {
                                     if let Some(n) = (#branch_read).map(|b| b.hole(#di)) {
                                         if let Some(inst) = self.#field.as_ref() {
                                             h.insert(n, inst.frag.roots()[0], 0);
                                         }
                                     }
                                 });
-                                disposes.push(quote! {
+                                leg_disposes[li].push(quote! {
                                     if let Some(inst) = self.#field.take() {
                                         inst.frag.teardown(h);
                                     }
                                 });
                             }
                         }
-                        // The branch-time slot assembly (M10): outlets on the
-                        // branch mount their use-site fill (author-side
+                        // The branch-time slot assembly (M10/M11): outlets
+                        // on either leg mount their use-site fill (author-side
                         // content) or their own fallback (any branch) at
                         // mount time, then the walk recurses into the freshly
                         // mounted content.
-                        let mut assembly: Vec<proc_macro2::TokenStream> = Vec::new();
-                        let mut assembly_mask: u64 = 0;
-                        if branch_has_slots && let Some(bf) = branch_frag_ir {
+                        let mut leg_assembly: Vec<Vec<proc_macro2::TokenStream>> =
+                            leg_frag_irs.iter().map(|_| Vec::new()).collect();
+                        let mut leg_assembly_masks: Vec<u64> =
+                            leg_frag_irs.iter().map(|_| 0u64).collect();
+                        if branch_has_slots {
                             // The owning use site: author-side content
                             // names it through the ctx chain's innermost
                             // Fill field; child-side branches mount
                             // fallbacks only.
                             let use_site: Option<&ComponentUse> = ctx_content_field(&ctx)
                                 .and_then(|field| component_uses.iter().find(|u| u.field == field));
-                            for (di, d) in bf.dynamics.iter().enumerate() {
-                                let DynamicKind::Slot {
-                                    name: slot_name,
-                                    fallback,
-                                } = &d.kind
-                                else {
+                            for (li, bf) in leg_frag_irs.iter().enumerate() {
+                                let Some(bf) = bf else {
                                     continue;
                                 };
-                                let mounted = use_site.and_then(|u| {
-                                    u.ir.slots
-                                        .iter()
-                                        .find(|s| s.name == *slot_name)
-                                        .and_then(|s| s.fallback)
-                                        .map(|fb| (fb, false))
-                                });
-                                let (content_id, is_fallback) = match mounted {
-                                    Some((fb, _)) => (fb, false),
-                                    None => match fallback {
-                                        Some(fb) => (*fb, true),
-                                        None => continue,
-                                    },
-                                };
-                                let origin = if is_fallback {
-                                    quote!(::lig_runtime::SlotOrigin::Fallback)
-                                } else {
-                                    quote!(::lig_runtime::SlotOrigin::Fill)
-                                };
-                                // Statics follow tree membership: author
-                                // content rides this component's prefix,
-                                // child content the child's.
-                                let content_in_parent = frags.iter().any(|f| f.id == content_id);
-                                let owner_prefix = if content_in_parent {
-                                    prefix.clone()
-                                } else {
-                                    let child_name = use_site
-                                        .and_then(|u| module.components.get(u.comp_idx))
-                                        .map_or_else(
-                                            || "Child".to_string(),
-                                            |decl| module.strings.get(decl.name).to_string(),
-                                        );
-                                    format!("{}_", sanitize(&child_name))
-                                };
-                                let content_frag = &module.fragments[content_id.get() as usize];
-                                let c_tpl =
-                                    tpl_ident(&owner_prefix, content_frag.template.get() as usize);
-                                let c_holes = hole_ident(&owner_prefix, content_id.get() as usize);
-                                let c_branches =
-                                    branch_ident(&owner_prefix, content_id.get() as usize);
-                                // The mount lands on the BRANCH itself
-                                // (the outlet's owner fragment); the
-                                // content step addresses the freshly
-                                // mounted content for the recursion.
-                                let steps = vec![MutStep::Content {
-                                    fill: !is_fallback,
-                                    slot: di,
-                                }];
-                                // Recurse into the freshly mounted content
-                                // (nested outlets, grandchild holes,
-                                // events, refs) inside the same guards.
-                                let mut rec: Vec<proc_macro2::TokenStream> = Vec::new();
-                                walk_content_mounts(
-                                    module,
-                                    &frags,
-                                    &prefix,
-                                    &component_field_map,
-                                    content_id,
-                                    &quote!(b),
-                                    &steps,
-                                    use_site.map_or(&[], |u| &u.ir.slots),
-                                    &owner_prefix,
-                                    use_site.map_or("", |u| u.field.as_str()),
-                                    false,
-                                    0,
-                                    &mut rec,
-                                )?;
-                                let body = quote! {
-                                    b.mount_slot(h, #di, #origin, #c_tpl, #c_holes, #c_branches);
-                                    #(#rec)*
-                                };
-                                assembly.push(emit_assembly_walk(
-                                    &ctx_frag_mut(&ctx),
-                                    slot,
-                                    &[],
-                                    body,
-                                ));
-                                // Author-side fills are NOT under the
-                                // branch subtree: their reactions join the
-                                // mount mask so the fresh content's binds
-                                // initialize on the next flush pass.
-                                if !is_fallback {
-                                    assembly_mask |= subtree_init_mask(module, content_id);
+                                for (di, d) in bf.dynamics.iter().enumerate() {
+                                    let DynamicKind::Slot {
+                                        name: slot_name,
+                                        fallback,
+                                    } = &d.kind
+                                    else {
+                                        continue;
+                                    };
+                                    let mounted = use_site.and_then(|u| {
+                                        u.ir.slots
+                                            .iter()
+                                            .find(|s| s.name == *slot_name)
+                                            .and_then(|s| s.fallback)
+                                            .map(|fb| (fb, false))
+                                    });
+                                    let (content_id, is_fallback) = match mounted {
+                                        Some((fb, _)) => (fb, false),
+                                        None => match fallback {
+                                            Some(fb) => (*fb, true),
+                                            None => continue,
+                                        },
+                                    };
+                                    let origin = if is_fallback {
+                                        quote!(::lig_runtime::SlotOrigin::Fallback)
+                                    } else {
+                                        quote!(::lig_runtime::SlotOrigin::Fill)
+                                    };
+                                    // Statics follow tree membership: author
+                                    // content rides this component's prefix,
+                                    // child content the child's.
+                                    let content_in_parent =
+                                        frags.iter().any(|f| f.id == content_id);
+                                    let owner_prefix = if content_in_parent {
+                                        prefix.clone()
+                                    } else {
+                                        let child_name = use_site
+                                            .and_then(|u| module.components.get(u.comp_idx))
+                                            .map_or_else(
+                                                || "Child".to_string(),
+                                                |decl| module.strings.get(decl.name).to_string(),
+                                            );
+                                        format!("{}_", sanitize(&child_name))
+                                    };
+                                    let content_frag = &module.fragments[content_id.get() as usize];
+                                    let c_tpl = tpl_ident(
+                                        &owner_prefix,
+                                        content_frag.template.get() as usize,
+                                    );
+                                    let c_holes =
+                                        hole_ident(&owner_prefix, content_id.get() as usize);
+                                    let c_branches =
+                                        branch_ident(&owner_prefix, content_id.get() as usize);
+                                    // The mount lands on the BRANCH itself
+                                    // (the outlet's owner fragment); the
+                                    // content step addresses the freshly
+                                    // mounted content for the recursion.
+                                    let steps = vec![MutStep::Content {
+                                        fill: !is_fallback,
+                                        slot: di,
+                                    }];
+                                    // Recurse into the freshly mounted content
+                                    // (nested outlets, grandchild holes,
+                                    // events, refs) inside the same guards.
+                                    let mut rec: Vec<proc_macro2::TokenStream> = Vec::new();
+                                    walk_content_mounts(
+                                        module,
+                                        &frags,
+                                        &prefix,
+                                        &component_field_map,
+                                        content_id,
+                                        &quote!(b),
+                                        &steps,
+                                        use_site.map_or(&[], |u| &u.ir.slots),
+                                        &owner_prefix,
+                                        use_site.map_or("", |u| u.field.as_str()),
+                                        false,
+                                        0,
+                                        &mut rec,
+                                    )?;
+                                    let body = quote! {
+                                        b.mount_slot(h, #di, #origin, #c_tpl, #c_holes, #c_branches);
+                                        #(#rec)*
+                                    };
+                                    leg_assembly[li].push(emit_assembly_walk(
+                                        &ctx_frag_mut(&ctx),
+                                        slot,
+                                        &[],
+                                        body,
+                                    ));
+                                    // Author-side fills are NOT under the
+                                    // branch subtree: their reactions join the
+                                    // mount mask so the fresh content's binds
+                                    // initialize on the next flush pass.
+                                    if !is_fallback {
+                                        leg_assembly_masks[li] |=
+                                            subtree_init_mask(module, content_id);
+                                    }
                                 }
                             }
                         }
-                        let inner = quote! {
-                            let on = #cond;
-                            if #recv.branch_is(#slot) != on {
+                        let inner = if has_else {
+                            // The tracked-leg shape (M11): a leg field makes
+                            // the mounted leg explicit, so the arm can swap
+                            // then ↔ else — `branch_is` alone cannot tell
+                            // the two legs apart, and the else leg must mount
+                            // when the condition is false (the fail-open this
+                            // closes: the emitted else template was dead).
+                            let leg = leg_field.as_ref().expect("else leg carries a tracker");
+                            let (then_tpl, then_holes, then_branches) = &leg_statics[0];
+                            let (else_tpl, else_holes, else_branches) = &leg_statics[1];
+                            let mount_flag_then =
+                                needs_assembly.then(|| quote! { mounted_leg = 1u8; });
+                            let mount_flag_else =
+                                needs_assembly.then(|| quote! { mounted_leg = 2u8; });
+                            let rebuilds_then = &leg_rebuilds[0];
+                            let rebuilds_else = &leg_rebuilds[1];
+                            // The dispose lists of BOTH legs ride each
+                            // transition: `Option::take` is idempotent, so
+                            // running the off leg's list is a no-op.
+                            let disposes = leg_disposes[0]
+                                .iter()
+                                .chain(leg_disposes[1].iter())
+                                .collect::<Vec<_>>();
+                            quote! {
+                                let on = #cond;
                                 if on {
-                                    #recv.mount_branch(h, #slot, #b_tpl, #b_holes, #b_branches);
-                                    #mount_flag
-                                    #(#rebuilds)*
+                                    if !(#recv.branch_is(#slot) && self.#leg == 1u8) {
+                                        #recv.unmount_branch(h, #slot);
+                                        #(#disposes)*
+                                        #recv.mount_branch(h, #slot, #then_tpl, #then_holes, #then_branches);
+                                        self.#leg = 1u8;
+                                        #mount_flag_then
+                                        #(#rebuilds_then)*
+                                    }
                                 } else {
-                                    #recv.unmount_branch(h, #slot);
-                                    #(#disposes)*
+                                    if !(#recv.branch_is(#slot) && self.#leg == 2u8) {
+                                        #recv.unmount_branch(h, #slot);
+                                        #(#disposes)*
+                                        #recv.mount_branch(h, #slot, #else_tpl, #else_holes, #else_branches);
+                                        self.#leg = 2u8;
+                                        #mount_flag_else
+                                        #(#rebuilds_else)*
+                                    }
+                                }
+                            }
+                        } else {
+                            let (then_tpl, then_holes, then_branches) = &leg_statics[0];
+                            let rebuilds = &leg_rebuilds[0];
+                            let disposes = &leg_disposes[0];
+                            quote! {
+                                let on = #cond;
+                                if #recv.branch_is(#slot) != on {
+                                    if on {
+                                        #recv.mount_branch(h, #slot, #then_tpl, #then_holes, #then_branches);
+                                        #mount_flag
+                                        #(#rebuilds)*
+                                    } else {
+                                        #recv.unmount_branch(h, #slot);
+                                        #(#disposes)*
+                                    }
                                 }
                             }
                         };
                         let scoped = ctx_scope(&ctx, inner);
-                        if needs_assembly {
+                        if has_else && needs_assembly {
+                            // The M11 mount marks, per leg: the leg field
+                            // picks the freshly mounted leg, so the else
+                            // leg's marking and assembly can never land on a
+                            // mounted then branch (and vice versa). The mark,
+                            // the assembly, and the captures sit OUTSIDE the
+                            // unwrap so the fallback root (`self.frag`) stays
+                            // borrowable (the M8 discipline).
+                            let mut leg_blocks: Vec<proc_macro2::TokenStream> = Vec::new();
+                            for (li, lid) in leg_ids.iter().enumerate() {
+                                let mask = subtree_init_mask(module, *lid) | leg_assembly_masks[li];
+                                let mask_lit =
+                                    syn::LitInt::new(&format!("{mask:#x}"), Span::call_site());
+                                let mut mount_attaches = Vec::new();
+                                if let Some(bf) = leg_frag_irs[li] {
+                                    for (edi, ed) in bf.dynamics.iter().enumerate() {
+                                        let DynamicKind::Event { event, delegate } = &ed.kind
+                                        else {
+                                            continue;
+                                        };
+                                        let Some(rx_id) = ed.reaction else {
+                                            continue;
+                                        };
+                                        let ev = syn::Ident::new(
+                                            &format!("{event:?}"),
+                                            Span::call_site(),
+                                        );
+                                        let hid = rx_id.get();
+                                        mount_attaches.push(quote! {
+                                            if let Some(n) = #branch_read.map(|b| b.hole(#edi)) {
+                                                self.frag.attach_foreign(
+                                                    n,
+                                                    ::lig_runtime::EventKind::#ev,
+                                                    ::lig_runtime::HandlerId(#hid),
+                                                    #delegate,
+                                                    h,
+                                                );
+                                            }
+                                        });
+                                    }
+                                }
+                                let mut mount_refs = Vec::new();
+                                if let Some(caps) = content_branch_refs.get(&lid.get()) {
+                                    for (hole, rname) in caps {
+                                        let rfield = syn::Ident::new(
+                                            &format!("ref_{rname}"),
+                                            Span::call_site(),
+                                        );
+                                        mount_refs.push(quote! {
+                                            if let Some(n) = #branch_read.map(|b| b.hole(#hole)) {
+                                                self.#rfield = n;
+                                            }
+                                        });
+                                    }
+                                }
+                                let assembly = &leg_assembly[li];
+                                let leg_val = (li + 1) as u8;
+                                leg_blocks.push(quote! {
+                                    if mounted_leg == #leg_val {
+                                        self.frag.mark_mask(#mask_lit);
+                                        #(#assembly)*
+                                        #(#mount_attaches)*
+                                        #(#mount_refs)*
+                                    }
+                                });
+                            }
+                            run_arms.push(quote! {
+                                #cname => {
+                                    let mut mounted_leg: u8 = 0u8;
+                                    #scoped
+                                    #(#leg_blocks)*
+                                }
+                            });
+                        } else if needs_assembly {
                             // The mount marks (M8, widened in M10): the fresh
                             // branch's own binds initialize on the NEXT flush
                             // pass (the loop re-enters through
@@ -706,11 +900,12 @@ fn generate_component_pieces(
                             // content. The mark, the assembly, and the
                             // captures sit OUTSIDE the unwrap so the fallback
                             // root (`self.frag`) stays borrowable.
-                            let branch_mask = subtree_init_mask(module, if_ir.then) | assembly_mask;
+                            let branch_mask =
+                                subtree_init_mask(module, if_ir.then) | leg_assembly_masks[0];
                             let mask_lo_lit =
                                 syn::LitInt::new(&format!("{branch_mask:#x}"), Span::call_site());
                             let mut mount_attaches = Vec::new();
-                            if let Some(bf) = module.fragments.get(if_ir.then.get() as usize) {
+                            if let Some(bf) = leg_frag_irs[0] {
                                 for (edi, ed) in bf.dynamics.iter().enumerate() {
                                     let DynamicKind::Event { event, delegate } = &ed.kind else {
                                         continue;
@@ -746,6 +941,7 @@ fn generate_component_pieces(
                                     });
                                 }
                             }
+                            let assembly = &leg_assembly[0];
                             run_arms.push(quote! {
                                 #cname => {
                                     let mut did_mount = false;
@@ -966,6 +1162,7 @@ fn generate_component_pieces(
                                 sanitize(module.strings.get(*name)),
                                 dynamic as usize,
                                 ctx.clone(),
+                                rx.decl.owner,
                             ));
                         } else {
                             return Err(CodegenError::Unsupported(
@@ -1026,21 +1223,33 @@ fn generate_component_pieces(
                         // Direct-rooted branch: attach after the flush, once
                         // the branch exists (M7 shape — flat walks stay
                         // byte-stable; nested walks read through the composed
-                        // chain, M8).
+                        // chain, M8). An else leg (M11) guards on the leg
+                        // tracker — only the mounted leg's holes exist, and
+                        // `hole()` falls back to the slab root out of bounds.
                         let slot = *slot;
-                        if matches!(**base, Ctx::Direct) {
-                            branch_attaches.push(quote! {
+                        let attach = if matches!(**base, Ctx::Direct) {
+                            quote! {
                                 if let Some(n) = s.frag.branch(#slot).map(|b| b.hole(#di)) {
                                     s.frag.attach_foreign(n, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate, h);
                                 }
-                            });
+                            }
                         } else {
                             let read = ctx_frag_read(&ctx);
-                            branch_attaches.push(quote! {
+                            quote! {
                                 if let Some(n) = #read.map(|b| b.hole(#di)) {
                                     s.frag.attach_foreign(n, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate, h);
                                 }
-                            });
+                            }
+                        };
+                        match else_leg_of(module, &frags, f.id) {
+                            Some((if_owner, dyn_idx, leg)) => {
+                                let field = syn::Ident::new(
+                                    &format!("leg_f{}_d{}", if_owner.get(), dyn_idx),
+                                    Span::call_site(),
+                                );
+                                branch_attaches.push(quote! { if s.#field == #leg { #attach } });
+                            }
+                            None => branch_attaches.push(attach),
                         }
                     }
                     Ctx::Fill { .. } | Ctx::Fallback { .. } | Ctx::Branch { .. } => {
@@ -1391,7 +1600,7 @@ fn generate_component_pieces(
     let mut ref_inits: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut content_ref_inits: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut branch_ref_inits: Vec<proc_macro2::TokenStream> = Vec::new();
-    for (name, hole, ctx) in &ref_captures {
+    for (name, hole, ctx, ref_owner) in &ref_captures {
         let fname = syn::Ident::new(&format!("ref_{name}"), Span::call_site());
         match ctx {
             Ctx::Direct => {
@@ -1399,21 +1608,33 @@ fn generate_component_pieces(
             }
             Ctx::Branch { slot, base } if !base.content_rooted() => {
                 let slot = *slot;
-                if matches!(**base, Ctx::Direct) {
-                    branch_ref_inits.push(quote! {
+                let capture = if matches!(**base, Ctx::Direct) {
+                    quote! {
                         if let Some(b) = s.frag.branch(#slot) {
                             s.#fname = b.hole(#hole);
                         }
-                    });
+                    }
                 } else {
                     // Nested Direct-rooted branch: read through the composed
                     // chain (M8).
                     let read = ctx_frag_read(ctx);
-                    branch_ref_inits.push(quote! {
+                    quote! {
                         if let Some(n) = #read.map(|b| b.hole(#hole)) {
                             s.#fname = n;
                         }
-                    });
+                    }
+                };
+                // An else leg (M11) guards on the leg tracker: only the
+                // mounted leg's holes exist.
+                match else_leg_of(module, &frags, *ref_owner) {
+                    Some((if_owner, dyn_idx, leg)) => {
+                        let field = syn::Ident::new(
+                            &format!("leg_f{}_d{}", if_owner.get(), dyn_idx),
+                            Span::call_site(),
+                        );
+                        branch_ref_inits.push(quote! { if s.#field == #leg { #capture } });
+                    }
+                    None => branch_ref_inits.push(capture),
                 }
             }
             Ctx::Fill { field, slot, .. } => {
@@ -1433,7 +1654,7 @@ fn generate_component_pieces(
             }
         }
     }
-    for (name, _hole, _ctx) in &ref_captures {
+    for (name, _hole, _ctx, _owner) in &ref_captures {
         let fname = syn::Ident::new(&format!("ref_{name}"), Span::call_site());
         struct_fields.push(quote! { pub #fname: ::lig_runtime::NodeId });
         init_fields.push(quote! { #fname: ::lig_runtime::NodeId(u32::MAX) });
@@ -2668,13 +2889,46 @@ fn branch_owner_of(
     for info in frags {
         let parent = module.fragments.get(info.id.get() as usize)?;
         for (di, d) in parent.dynamics.iter().enumerate() {
-            let target = match &d.kind {
-                DynamicKind::If(i) => i.then,
-                DynamicKind::For(fo) => fo.body,
+            // M11: the else leg addresses through the SAME branch slot as
+            // its then twin (one slot carries whichever leg is mounted).
+            let (target, is_else) = match &d.kind {
+                DynamicKind::If(i) if i.else_ == Some(f) => (i.then, true),
+                DynamicKind::If(i) => (i.then, false),
+                DynamicKind::For(fo) => (fo.body, false),
                 _ => continue,
             };
-            if target == f {
+            if target == f || is_else {
                 return Some((info.id, branch_slot_of_dynamic(parent, di as u32)?));
+            }
+        }
+    }
+    None
+}
+
+/// The tracked leg of a branch-body fragment whose If carries an else leg
+/// (M11): `(If owner, If dynamic index, leg)` with leg 1 = `then`, 2 =
+/// `else`. Callers guard post-flush captures on the leg field the mounting
+/// arm writes — `None` when the fragment is not an else-carrying If's branch
+/// body (then-only shapes keep the unguarded M7 emission).
+fn else_leg_of(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    f: FragmentId,
+) -> Option<(FragmentId, usize, u8)> {
+    for info in frags {
+        let parent = module.fragments.get(info.id.get() as usize)?;
+        for (di, d) in parent.dynamics.iter().enumerate() {
+            let DynamicKind::If(i) = &d.kind else {
+                continue;
+            };
+            if i.else_.is_none() {
+                continue;
+            }
+            if i.then == f {
+                return Some((info.id, di, 1));
+            }
+            if i.else_ == Some(f) {
+                return Some((info.id, di, 2));
             }
         }
     }
