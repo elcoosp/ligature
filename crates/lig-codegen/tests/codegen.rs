@@ -442,3 +442,165 @@ export function Panel({ title }) {
         "unmatched fill is Unsupported: {err:?}"
     );
 }
+
+#[test]
+fn direct_component_uses_attach_their_root_at_the_use_hole() {
+    // M10: the M2-era silent drop — a direct child's root never entered the
+    // parent's tree (the commit stream had no `Host::insert` at the use
+    // hole; the child's DOM floated detached). The build body now attaches
+    // every direct use's root before slot assembly, so the initial flush
+    // writes props onto a tree-attached child.
+    let src = r#"export function App() {
+  return <Panel title="Status"><p>all green</p></Panel>;
+}
+
+export function Panel({ title, children }) {
+  return <section><h1>{title}</h1><Slot /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "attach.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert!(
+        text.contains("h.insert(s.frag.hole(0usize), s.panel.frag.roots()[0], 0);"),
+        "the child root attaches at the use hole in the build body: {text}"
+    );
+}
+
+#[test]
+fn branch_components_rebuild_per_mount() {
+    // M10 per-mount instance identity: a component use inside a branch body
+    // (content-rooted here) builds as an Option field; the mounting If arm
+    // rebuilds the instance and inserts its root into the branch's component
+    // hole; the unmount arm disposes the instance; the prop-pass arm guards
+    // on the presence of the instance.
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [n, setN] = createSignal("two");
+  return (
+    <Panel title="x" header={<Show when={on()}><Badge count={n()} /></Show>} />
+  );
+}
+
+export function Badge({ count }) {
+  return <b class="badge">{count}</b>;
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "permount.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The instance field is per-mount (Option), built at mount time.
+    assert!(
+        text.contains("pub badge: Option<Badge>"),
+        "branch components are Option fields: {text}"
+    );
+    assert!(
+        text.contains("self.badge = Some(Badge::build(h, BadgeProps::default()));"),
+        "the mounting arm rebuilds the instance: {text}"
+    );
+    assert!(
+        text.contains("self.badge.take()"),
+        "the unmount arm resets the instance: {text}"
+    );
+    assert!(
+        text.contains("inst.frag.teardown(h);"),
+        "the unmount arm disposes the instance's slab: {text}"
+    );
+    // The grandchild root inserts into the branch's component hole.
+    assert!(
+        text.contains("h.insert(n, inst.frag.roots()[0], 0);"),
+        "the fresh root inserts into the branch hole: {text}"
+    );
+    // The prop-pass arm guards on the per-mount instance.
+    assert!(
+        text.contains("if let Some(c) = self.badge.as_mut()"),
+        "the prop-pass arm guards on the instance: {text}"
+    );
+}
+
+#[test]
+fn branch_outlets_mount_fills_and_fallbacks_with_the_branch() {
+    // M10 branch-time slot assembly: an outlet inside a branch body of slot
+    // content mounts its use-site fill (or the outlet's own fallback) when
+    // the branch mounts — through the composed walk (branch → slot_fill_mut).
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [tag, setTag] = createSignal("in");
+  return (
+    <Panel
+      title="x"
+      header={<Show when={on()}><Slot name="inner"><em>none</em></Slot></Show>}
+      inner={<b class="hl">{tag}</b>}
+    />
+  );
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "branchslot.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The branch-internal outlet's fill mounts through the composed walk.
+    assert!(
+        text.contains(".branch(0usize)") || text.contains("branch_mut(0usize)"),
+        "the walk unwraps the branch: {text}"
+    );
+    assert!(
+        text.contains("b.mount_slot(") && text.contains("::lig_runtime::SlotOrigin::Fill"),
+        "the fill mounts at branch-mount time: {text}"
+    );
+    // The bind on the filled content walks branch → fill.
+    assert!(
+        text.contains("if let Some(b) =") && text.contains("if let Some(c) = b.slot_fill_mut("),
+        "the fill bind walks the composed chain: {text}"
+    );
+}
+
+#[test]
+fn own_branch_outlets_mount_their_fallback_at_branch_mount() {
+    // M10: the silent fail-open closes — an outlet inside the component's
+    // OWN Show mounts its fallback when the branch mounts (child-side,
+    // direct-rooted); nothing rendered there before.
+    let src = r#"export function Inner({ flag }) {
+  return (
+    <Show when={flag()}>
+      <Slot name="a"><em>fallback</em></Slot>
+    </Show>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "ownbranch.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert!(
+        text.contains("::lig_runtime::SlotOrigin::Fallback") && text.contains("b.mount_slot("),
+        "the own-branch outlet mounts its fallback at branch mount: {text}"
+    );
+}
+
+#[test]
+fn list_body_component_uses_fail_closed_at_codegen() {
+    // M10 codegen backstop: a component use on a For-body fragment stays a
+    // compile error (per-item instance identity is the keyed-component
+    // story) — the frontend denies it; the backstop keeps codegen honest if
+    // the IR arrives from another frontend.
+    let src = r#"import { For } from "solid-js";
+export function App() {
+  return (
+    <For each={["a"]}>{(t) => <Badge count={1} />}</For>
+  );
+}
+
+export function Badge({ count }) {
+  return <b>{count}</b>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "listbody.tsx")
+        .expect_err("the frontend denies list-body component uses");
+    assert!(
+        module.iter().any(|d| d.code == "LIG-E001"),
+        "the frontend denial fires: {module:?}"
+    );
+}
