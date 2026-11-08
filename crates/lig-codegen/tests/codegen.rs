@@ -681,3 +681,190 @@ let box;
         "one Ref contract, one generated shape"
     );
 }
+
+#[test]
+fn else_branch_mounts_unmounts_and_swaps() {
+    // M11 — the else leg: a Show with a fallback emits BOTH legs' mount
+    // statics and a leg tracker; the cond arm mounts the else branch when
+    // the condition is false (the M2-era fail-open mounted `then` only and
+    // left the emitted else template dead). The then-only shape stays
+    // byte-stable; the else shape carries one `mount_branch` per leg.
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [tag, setTag] = createSignal("in");
+  return (
+    <Show when={on()} fallback={<i class="off">{tag}</i>}>
+      <b class="on">{tag}</b>
+    </Show>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "else.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert_eq!(
+        text.matches(".mount_branch(").count(),
+        2,
+        "one mount per leg (then + else): {text}"
+    );
+    assert!(
+        text.contains("leg_f"),
+        "the else shape tracks the mounted leg: {text}"
+    );
+}
+
+#[test]
+fn else_bind_arms_address_their_branch() {
+    // M11: a bind on the else branch walks the branch ctx like its then
+    // twin — `branch_owner_of` must classify else fragments as branches, or
+    // the else bind mis-addresses `self.frag` (the Direct mis-classification
+    // that made dynamic else content corrupt instead of render).
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [tag, setTag] = createSignal("in");
+  return (
+    <Show when={on()} fallback={<i class="off">{tag}</i>}>
+      <b class="on">{tag}</b>
+    </Show>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "elsebind.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert_eq!(
+        text.matches("if let Some(b) = self.frag.branch_mut(0usize)")
+            .count(),
+        2,
+        "both legs' binds guard on the mounted branch: {text}"
+    );
+    assert_eq!(
+        text.matches("b.set_text(h, 0usize").count(),
+        2,
+        "both legs' binds write through the branch: {text}"
+    );
+}
+
+#[test]
+fn else_branch_components_rebuild_per_mount() {
+    // M11: M10 per-mount identity generalizes to the else leg — a component
+    // use on the else branch builds as an Option field, rebuilds when the
+    // else branch mounts, disposes when it unmounts, and the prop-pass arm
+    // guards on the instance. Distinct child types keep the two legs'
+    // fields unambiguous (a shared child would make the field naming
+    // decide the test).
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [tag, setTag] = createSignal("two");
+  return (
+    <div>
+      <Show when={on()} fallback={<Tag note="off" />}>
+        <Badge note={tag} />
+      </Show>
+    </div>
+  );
+}
+
+export function Badge({ note }) {
+  return <em class="badge">{note}</em>;
+}
+
+export function Tag({ note }) {
+  return <i class="tag">{note}</i>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "elsecomp.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The else-branch use is a per-mount Option field (eager today — the
+    // else use classifies Direct and builds at build time, the M10
+    // stale-eager-instance shape in a new location).
+    assert!(
+        text.contains("pub tag: Option<Tag>"),
+        "the else-branch use is a per-mount Option field: {text}"
+    );
+    assert!(
+        text.contains("self.tag = Some(Tag::build(h, TagProps::default()));"),
+        "the else mount rebuilds the instance: {text}"
+    );
+    assert!(
+        text.contains("self.tag.take()"),
+        "the unmount path resets the else instance: {text}"
+    );
+    assert!(
+        text.contains("if let Some(c) = self.tag.as_mut()"),
+        "the prop-pass arm guards on the else instance: {text}"
+    );
+    // The then use stays eager-Direct-free: the THEN branch's use is a
+    // Branch-ctx Option too (M10), with its own rebuild arm.
+    assert!(
+        text.contains("pub badge: Option<Badge>")
+            && text.contains("self.badge = Some(Badge::build(h, BadgeProps::default()));"),
+        "the then-branch use keeps its M10 per-mount shape: {text}"
+    );
+}
+
+#[test]
+fn else_branch_outlets_mount_fills_with_the_branch() {
+    // M11: the M10 branch-time slot assembly generalizes to the else leg —
+    // an outlet inside the else branch mounts its use-site fill when the
+    // else branch mounts (author-side content; the ctx map already walked
+    // else branches, only the mounting arm ignored them).
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [tag, setTag] = createSignal("in");
+  return (
+    <Panel
+      title="x"
+      header={
+        <Show when={on()} fallback={<Slot name="inner"><em>off</em></Slot>}>
+          <Slot name="inner"><em class="none">{tag}</em></Slot>
+        </Show>
+      }
+      inner={<b class="hl">{tag}</b>}
+    />
+  );
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /></section>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "elseslot.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // 3 = the build-time header fill mount + one branch-time mount per leg.
+    assert_eq!(
+        text.matches("b.mount_slot(").count(),
+        2,
+        "the assembly runs per leg (plus the build-time fill mount): {text}"
+    );
+    assert_eq!(
+        text.matches("::lig_runtime::SlotOrigin::Fill").count(),
+        3,
+        "both legs mount their use-site fill (plus the build-time mount): {text}"
+    );
+}
+
+#[test]
+fn own_else_branch_outlets_mount_their_fallback() {
+    // M11: the child-side mirror of M10's own-branch fallback mount — an
+    // outlet inside the component's OWN else branch mounts its fallback
+    // when the else branch mounts.
+    let src = r#"export function Inner({ flag }) {
+  return (
+    <Show when={flag()} fallback={<Slot name="a"><em>off</em></Slot>}>
+      <Slot name="a"><em>on</em></Slot>
+    </Show>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "ownelse.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert_eq!(
+        text.matches("b.mount_slot(").count(),
+        2,
+        "fallback mounts on both legs: {text}"
+    );
+    assert_eq!(
+        text.matches("::lig_runtime::SlotOrigin::Fallback").count(),
+        2,
+        "both legs mount their own fallback: {text}"
+    );
+}
