@@ -5,7 +5,7 @@
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
     slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic, slots_named,
-    slots_nested, slots_structural, v_model,
+    slots_nested, slots_structural, template_ref, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::MockHost;
@@ -561,5 +561,27 @@ fn branch_outlets_mount_fills_and_fallbacks_with_the_branch() {
     assert!(
         fill1.branch(0).is_none(),
         "the branch unmounted with its fills"
+    );
+}
+
+/// The M12 template-ref contract, end to end: the Vue-leg spelling (the
+/// fixture is the two-leg `template-ref` pair) rides the same Ref machinery
+/// as the Solid leg — the placeholder declares no state, and the build body
+/// captures the element's hole `NodeId` into the `ref_<name>` field.
+#[test]
+fn template_ref_captures_the_element_node() {
+    let mut h = MockHost::new();
+    let app = template_ref::Marked::build(&mut h, template_ref::MarkedProps::default());
+    // The capture ran in the build body (Ctx::Direct): the field names the
+    // mounted <input> node after build — not the `NodeId(u32::MAX)`
+    // sentinel the struct initializes with.
+    assert_ne!(
+        app.ref_box,
+        lig_runtime::NodeId(u32::MAX),
+        "the build body captured the element hole"
+    );
+    assert!(
+        h.text_of(app.ref_box).is_none(),
+        "the input element carries no text — the capture addresses the element itself"
     );
 }
