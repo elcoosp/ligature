@@ -74,7 +74,6 @@ impl<'m> Lowering<'m> {
 
     /// Lower one oxc expression into the module's expr table.
     // One arm per grammar production keeps this auditable against §5.5.
-    #[allow(clippy::too_many_lines)]
     pub fn lower(&mut self, expr: &Expression<'_>, scope: &Scope) -> Lowered {
         match expr {
             Expression::BooleanLiteral(b) => {
@@ -324,7 +323,6 @@ impl<'m> Lowering<'m> {
     /// Lower a call: Solid getter syntax, whitelisted pure builtins, model
     /// fns, whitelisted method builtins on expressions, `native("…")`.
     // One admission path per call shape keeps §6.5 auditable.
-    #[allow(clippy::too_many_lines)]
     fn lower_call(&mut self, call: &oxc_ast::ast::CallExpression<'_>, scope: &Scope) -> Lowered {
         // native("…"): the inline-Rust escape hatch (§6.5).
         if let Expression::Identifier(id) = &call.callee
