@@ -9,7 +9,10 @@
 //! generations, stub thunks for new symbols, and the never-dlclose proof —
 //! the two-generation spike gate (`lig patch-spike`) exercises all of it.
 
-#![allow(unsafe_code)]
+// The crate is the single unsafe module by policy (§15): the dlopen jump
+// table and transmutes are its whole surface. `expect` keeps the workspace
+// `unsafe_code = "deny"` honest — the expectation warns if unsafe ever dries up.
+#![expect(unsafe_code)]
 #![deny(missing_docs)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
