@@ -76,7 +76,6 @@ fn keyword(v: &StyleValue) -> Option<&'static str> {
 /// Rect-kind properties (margin/padding) appear as four consecutive entries
 /// in t/r/b/l order; `gap` as two (row, col) — the lig-style convention.
 // One arm per schema field keeps the mapping auditable against §8.2.
-#[allow(clippy::too_many_lines)]
 #[must_use]
 pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
     use std::collections::BTreeMap;
