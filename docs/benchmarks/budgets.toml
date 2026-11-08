@@ -102,3 +102,12 @@ name = "codegen_branch"
 metric = "time"
 budget = 6000.0
 note = "M10 reference median 1065 µs (codegen/branch bench, release); ≈5.6× headroom"
+
+# Codegen over the template-ref surface (M12): the Ref capture contract —
+# the ref-field declaration, the sentinel init, and the build-body capture
+# ride generate_module.
+[[budget]]
+name = "codegen_ref"
+metric = "time"
+budget = 1200.0
+note = "M12 reference median 234 µs (codegen/ref bench, release); ≈5.1× headroom"
