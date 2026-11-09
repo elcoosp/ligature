@@ -37,18 +37,28 @@ pub fn digest(bytes: &[u8]) -> u64 {
 }
 
 /// Lower a source file with the frontend its extension selects (§6: `.tsx`
-/// → Solid, `.vue` → Vue SFC). The canonical IR is the same contract.
+/// → Solid, `.vue` → Vue SFC). The canonical IR is the same contract. Any
+/// other extension is a precise `LIG-E001` — before M18 unknown extensions
+/// silently lowered as Solid and failed far from the cause.
 pub fn lower_source(
     source: &str,
     name: &str,
 ) -> Result<ViewModule, Vec<lig_core::diagnostic::LigDiagnostic>> {
-    if Path::new(name)
+    let ext = Path::new(name)
         .extension()
-        .is_some_and(|x| x.eq_ignore_ascii_case("vue"))
-    {
-        lig_parse_vue::lower_module(source, name)
-    } else {
-        lig_parse_solid::lower_module(source, name)
+        .map(|x| x.to_string_lossy().into_owned())
+        .map(|x| x.to_ascii_lowercase());
+    match ext.as_deref() {
+        Some("vue") => lig_parse_vue::lower_module(source, name),
+        Some("tsx") => lig_parse_solid::lower_module(source, name),
+        _ => Err(vec![LigDiagnostic::error(
+            "LIG-E001",
+            format!(
+                "unsupported source extension for `{name}` — pass a `.tsx` file (Solid TSX) \
+                 or a `.vue` file (Vue SFC)"
+            ),
+            Span::new(0, 0),
+        )]),
     }
 }
 
@@ -91,7 +101,7 @@ pub struct CompiledUnit {
     /// Allow-tier constructs the admission report counted.
     pub allowed: usize,
     /// Codegen failure (an internal error — exit 2 in the CLI), if any.
-    pub codegen_error: Option<String>,
+    pub codegen_error: Option<CodegenFailure>,
 }
 
 impl CompiledUnit {
@@ -111,6 +121,92 @@ pub struct GeneratedOutput {
     pub links: GenLinks,
     /// FNV-1a 64 of `text` — two units re-emit iff this differs.
     pub digest: u64,
+}
+
+/// A codegen failure on one unit (the session's typed codegen seam, M18):
+/// which unit failed, why, and the fix in words — a [`miette::Diagnostic`]
+/// with a stable code (`ligature::codegen`) and help-text, so embedded
+/// consumers get the same quality of failure report the emit seam (M16)
+/// and the CLI print. Before M18 this seam carried a bare `String`.
+#[derive(Debug, Clone)]
+pub struct CodegenFailure {
+    /// The unit path the failure is about.
+    pub subject: String,
+    /// What went wrong (renders as the error line).
+    pub message: String,
+    /// The fix, in words (renders as `help:`).
+    pub help: String,
+    /// The underlying codegen error, when one caused this.
+    source: Option<lig_codegen::CodegenError>,
+}
+
+impl CodegenFailure {
+    /// Map a codegen error onto the typed seam: the message carries the
+    /// precise backstop reason; the help names the fix for the documented
+    /// backstop families, or the report path for internal bugs.
+    fn from(unit: &Path, e: &lig_codegen::CodegenError) -> Self {
+        let message = e.to_string();
+        let help = match e {
+            lig_codegen::CodegenError::Unsupported(what) => {
+                if what.contains("per-item slot content") {
+                    "binds inside per-item slot content read the item/index only — read parent \
+                     state through a keyed component (M13's per-item instance identity), or \
+                     hoist the bind out of the list body"
+                        .to_string()
+                } else if what.contains("fill would never mount") {
+                    "fills for list-body outlets never mount (items do not exist at the \
+                     parent's build) — author the content as the outlet's own fallback, which \
+                     the per-item replay mounts (M14)"
+                        .to_string()
+                } else {
+                    "the codegen backstop denies a construct the frontends admit — the drawn \
+                     boundary is docs/admission/rules.md and the catalog is `lig explain`; \
+                     report the shape with the session revision if the docs admit it"
+                        .to_string()
+                }
+            }
+            lig_codegen::CodegenError::Schedule(_) => {
+                "the const schedule is invalid (cycle or capacity) — an internal bug: report it \
+                 with the session revision from `lig doctor`"
+                    .to_string()
+            }
+            lig_codegen::CodegenError::Readability(_) => {
+                "the generated unit exceeded the readability budget — a codegen bug, not a lint \
+                 (§9.3): report it with the session revision"
+                    .to_string()
+            }
+        };
+        Self {
+            subject: unit.display().to_string(),
+            message,
+            help,
+            source: Some(e.clone()),
+        }
+    }
+}
+
+impl core::fmt::Display for CodegenFailure {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CodegenFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.source
+            .as_ref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl miette::Diagnostic for CodegenFailure {
+    fn code<'a>(&'a self) -> Option<Box<dyn core::fmt::Display + 'a>> {
+        Some(Box::new("ligature::codegen"))
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn core::fmt::Display + 'a>> {
+        Some(Box::new(&self.help))
+    }
 }
 
 impl GeneratedOutput {
@@ -314,7 +410,7 @@ impl Session {
         &mut self,
         path: &Path,
         profile: Profile,
-    ) -> Result<GeneratedOutput, String> {
+    ) -> Result<GeneratedOutput, CodegenFailure> {
         // Stage 1: the lowered module (owned clone — borrow-split from the
         // memo table below; lowering is the memoized expensive stage).
         let lowered = {
@@ -412,7 +508,12 @@ impl Session {
                 Ok(out)
             }
             Err(e) => {
-                let msg = e.to_string();
+                // The typed codegen seam (M18): the failure surfaces as a
+                // miette `Diagnostic` (code `ligature::codegen`, help-text)
+                // on the unit and as a warn event on the observability seam
+                // — never a bare `String`.
+                tracing::warn!(unit = %path.display(), "codegen failed: {e}");
+                let failure = CodegenFailure::from(path, &e);
                 let unit = CompiledUnit {
                     path: path.to_path_buf(),
                     stem: unit_stem(path),
@@ -422,13 +523,13 @@ impl Session {
                     diagnostics,
                     admitted: true,
                     allowed,
-                    codegen_error: Some(msg.clone()),
+                    codegen_error: Some(failure.clone()),
                 };
                 self.memos
                     .get_mut(path)
                     .expect("lowered memo entry exists")
                     .unit = Some(unit);
-                Err(msg)
+                Err(failure)
             }
         }
     }
@@ -540,6 +641,7 @@ fn cycle_span(module: &ViewModule, cycle: &[lig_core::id::ComponentId]) -> Optio
 mod tests {
     use super::{CompileReport, Session, unit_stem};
     use lig_admission::Profile;
+    use miette::Diagnostic as _;
     use std::path::{Path, PathBuf};
     use std::sync::{Arc, Mutex};
 
@@ -715,6 +817,77 @@ mod tests {
         );
         assert_eq!(unit_stem(Path::new("src/counter.tsx")), "counter");
         assert_eq!(unit_stem(Path::new("app.vue")), "app");
+    }
+
+    #[test]
+    fn codegen_backstop_failures_are_typed_diagnostics() {
+        // M18 micro-debt cleanup: the codegen seam fails as a typed
+        // `CodegenFailure` — a miette `Diagnostic` with the stable code
+        // `ligature::codegen` and help-text naming the fix — instead of the
+        // bare `String` the pre-M18 seam carried. The red shape: a
+        // state-reading bind inside per-item slot content lowers and admits
+        // (the frontend contract holds), then the codegen backstop fails.
+        const STATE_FALLBACK: &str = concat!(
+            "import { createSignal, For } from \"solid-js\";\n",
+            "export function Inner() {\n",
+            "  const [label, setLabel] = createSignal(\"static\");\n",
+            "  const [items, setItems] = createSignal([\"alpha\"]);\n",
+            "  return (\n",
+            "    <ul>\n",
+            "      <For each={items()} key={(r) => r}>\n",
+            "        {(r) => <Slot name=\"row\"><i class=\"row\">{label}</i></Slot>}\n",
+            "      </For>\n",
+            "    </ul>\n",
+            "  );\n",
+            "}\n",
+        );
+        let mut s = Session::new();
+        s.set_source(p("state_fallback.tsx"), STATE_FALLBACK);
+        s.compile(Profile::Layout);
+        let unit = s.unit(&p("state_fallback.tsx")).expect("unit present");
+        let err = unit
+            .codegen_error
+            .as_ref()
+            .expect("the codegen backstop denies the state-reading bind");
+        assert!(
+            err.code().map(|c| c.to_string()).as_deref() == Some("ligature::codegen"),
+            "a stable code: {err:?}"
+        );
+        let help = err
+            .help()
+            .map(|h| h.to_string())
+            .expect("miette help-text present");
+        assert!(
+            help.contains("item") && help.contains("keyed component"),
+            "the help names the per-item discipline and the escape: {help}"
+        );
+        assert!(
+            err.to_string().contains("per-item slot content"),
+            "the precise backstop reason renders as the message: {err}"
+        );
+        assert!(unit.generated.is_none(), "a failed unit carries no output");
+    }
+
+    #[test]
+    fn unsupported_extensions_deny_with_one_precise_reason() {
+        // M18 micro-debt cleanup: `lower_source` used to fall back to the
+        // Solid frontend for ANY non-.vue extension, so a `.js` file (or a
+        // typo'd `.tssx`) produced confusing syntax errors far from the
+        // cause. The seam now fails with one precise diagnostic naming the
+        // two supported extensions.
+        let diags = super::lower_source("const x = 1;\n", "script.js").expect_err("denied");
+        assert_eq!(diags.len(), 1, "one precise reason: {diags:?}");
+        let d = &diags[0];
+        assert_eq!(d.code, "LIG-E001", "the lowering-contract code");
+        assert!(
+            d.message.contains(".tsx") && d.message.contains(".vue"),
+            "the reason names the supported extensions: {}",
+            d.message
+        );
+        // Both supported extensions still lower (the dispatch is unchanged).
+        assert!(super::lower_source(counter(), "counter.tsx").is_ok());
+        let vue_counter = include_str!("../../../fixtures/conformance/counter/input.vue");
+        assert!(super::lower_source(vue_counter, "counter.vue").is_ok());
     }
 
     const VUE_COUNTER: &str = concat!(
