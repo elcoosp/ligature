@@ -621,8 +621,17 @@ fn generate_component_pieces(
                         });
                         let needs_assembly =
                             content_rooted || branch_has_components || branch_has_slots || has_else;
-                        let mount_flag =
-                            (!has_else && needs_assembly).then(|| quote! { did_mount = true; });
+                        // M17: a branch whose subtree carries a list remounts
+                        // with a FRESH list table — the reconcile must re-run
+                        // or the remounted list stays empty (the items are
+                        // reconcile state, not template state). The mount
+                        // mark (the M8 init discipline) re-runs the subtree's
+                        // reactions on the next flush pass; scoped to
+                        // list-carrying branches so every list-free unit's
+                        // bytes stay pinned.
+                        let branch_has_lists = subtree_has_for(module, if_ir.then);
+                        let mount_flag = (!has_else && (needs_assembly || branch_has_lists))
+                            .then(|| quote! { did_mount = true; });
                         // The mounted branch hangs on the fragment `ctx`
                         // addresses, at this dynamic's branch slot.
                         let branch_read = {
@@ -1028,6 +1037,27 @@ fn generate_component_pieces(
                                     }
                                 }
                             });
+                        } else if branch_has_lists {
+                            // M17: the plain (no-assembly) arm for a
+                            // list-carrying branch — the mount mark re-runs
+                            // the subtree's reactions (the For's reconcile
+                            // re-inserts into the fresh table, the binds
+                            // re-apply) on the next flush pass. The mark sits
+                            // OUTSIDE the unwrap so the fallback root
+                            // (`self.frag`) stays borrowable (the M8
+                            // discipline).
+                            let branch_mask = subtree_init_mask(module, if_ir.then);
+                            let mask_lo_lit =
+                                syn::LitInt::new(&format!("{branch_mask:#x}"), Span::call_site());
+                            run_arms.push(quote! {
+                                #cname => {
+                                    let mut did_mount = false;
+                                    #scoped
+                                    if did_mount {
+                                        self.frag.mark_mask(#mask_lo_lit);
+                                    }
+                                }
+                            });
                         } else {
                             run_arms.push(quote! { #cname => { #scoped } });
                         }
@@ -1136,14 +1166,8 @@ fn generate_component_pieces(
                         if for_ir.key.is_some() {
                             key_methods.push(emit_key_method(module, for_ir, &item_ty)?);
                         }
-                        let (apply_fn, fire_fns) = emit_item_method(
-                            module,
-                            &frags,
-                            &prefix,
-                            for_ir,
-                            &item_ty,
-                            matches!(ctx, Ctx::Direct),
-                        )?;
+                        let (apply_fn, fire_fns) =
+                            emit_item_method(module, &frags, &prefix, for_ir, &item_ty)?;
                         item_methods.push(apply_fn);
                         item_fire_fns.extend(fire_fns);
                     }
@@ -3826,6 +3850,31 @@ fn subtree_init_mask(module: &ViewModule, root: FragmentId) -> u64 {
     mask
 }
 
+/// Whether the subtree rooted at `root` carries a For dynamic (M17: a
+/// list-carrying branch remounts with a fresh list table — its reconcile
+/// must re-run through the mount mark, or the remounted list stays empty).
+fn subtree_has_for(module: &ViewModule, root: FragmentId) -> bool {
+    let mut stack = vec![root];
+    let mut seen = HashSet::new();
+    while let Some(f) = stack.pop() {
+        if !seen.insert(f.get()) {
+            continue;
+        }
+        let Some(fr) = module.fragments.get(f.get() as usize) else {
+            continue;
+        };
+        for d in &fr.dynamics {
+            if matches!(&d.kind, DynamicKind::For(_)) {
+                return true;
+            }
+        }
+        for &c in &fr.children {
+            stack.push(c);
+        }
+    }
+    false
+}
+
 /// Every fragment id of a subtree, root included (M8: the fallback
 /// init-flush mask covers the whole mounted content, branches included).
 fn subtree_ids(module: &ViewModule, root: FragmentId) -> Vec<u32> {
@@ -3955,15 +4004,16 @@ fn collect_body_reads(module: &ViewModule, body: FragmentId) -> Vec<StrId> {
 /// M15: the body's event dynamics emit index-addressed fire fns (the second
 /// tuple element) whose handler bodies substitute the item locals and flush
 /// through the standard pipeline — empty when the body carries no events.
-/// A COMPOSED list body (branch- or slot-owned For) carrying events stays
-/// fail-closed: the composed dispatch addressing is the follow-up.
+/// M17: the fire fns are context-free (source-addressed, `&mut self`), so a
+/// COMPOSED list body (branch- or slot-owned For) admits its own handlers —
+/// the attaches ride the composed reconcile's receiver-parameterized insert
+/// arms. Deeper subtree events stay at the admission walk.
 fn emit_item_method(
     module: &ViewModule,
     frags: &[FragInfo],
     prefix: &str,
     for_ir: &lig_ir::fragment::ForIr,
     item_ty: &Ty,
-    direct: bool,
 ) -> Result<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>), CodegenError> {
     let body_frag = &module.fragments[for_ir.body.get() as usize];
     let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
@@ -4095,12 +4145,9 @@ fn emit_item_method(
     // cascade through the standard schedule).
     let mut fire_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     if !item_handlers.is_empty() {
-        if !direct {
-            return Err(CodegenError::Unsupported(
-                "event handlers on composed list bodies are not admitted in v1 — \
-                 the composed dispatch addressing is the follow-up",
-            ));
-        }
+        // M17: composed bodies emit the same source-addressed fire fns —
+        // the addressing never touches the owner fragment, so the composed
+        // ctx needs no special shape (the v1 composed backstop is gone).
         let src = gen_expr(module, for_ir.source)?;
         for (di, expr_id) in item_handlers {
             let body = gen_item_handler_expr(module, expr_id, for_ir)?;
