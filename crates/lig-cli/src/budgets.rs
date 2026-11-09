@@ -218,7 +218,7 @@ fn samples_for(name: &str) -> usize {
     match name {
         "lower_solid_counter" | "lower_vue_counter" => 120,
         "canonical_json_counter" => 200,
-        "codegen_counter" => 60,
+        "codegen_counter" | "session_compile_counter" => 60,
         "codegen_composed"
         | "codegen_branch"
         | "codegen_ref"
@@ -299,6 +299,19 @@ fn list_slot_source(root: &Path) -> String {
 fn for_event_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/for-event/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// One full cold session pass (the M16 session bench's workload:
+/// set_source + compile — lower, admission, the build-order cycle check,
+/// and codegen ride the digest-gated pass `lig build` runs per unit), over
+/// the M0 reference workload the bench drives.
+fn session_compile_counter() -> f64 {
+    median_us(samples_for("session_compile_counter"), || {
+        let mut s = lig_incremental::Session::new();
+        s.set_source("counter.tsx", COUNTER_TSX);
+        let r = s.compile(lig_admission::Profile::Layout);
+        black_box(r);
+    })
 }
 
 /// One measurement by ledger name. Time rows return median µs; the bytes row
@@ -388,6 +401,7 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(u);
             })
         }
+        "session_compile_counter" => session_compile_counter(),
         "runtime_instantiate" => median_us(samples_for(name), || {
             let mut h = CountingHost { commits: 0 };
             let f = Fragment::new(&mut h, counter_tpl(), HOLE_ANCHORS, BRANCH_ANCHORS);
@@ -447,6 +461,7 @@ const REGISTRY: &[&str] = &[
     "codegen_list_component",
     "codegen_list_slot",
     "codegen_for_event",
+    "session_compile_counter",
     "runtime_instantiate",
     "runtime_update_mask",
     "runtime_list_diff_keyed",
@@ -620,11 +635,12 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 17 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 18 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
-        // codegen_for_event), all named, no dupes.
-        assert_eq!(REGISTRY.len(), 17);
+        // codegen_for_event, M16 adds session_compile_counter), all named,
+        // no dupes.
+        assert_eq!(REGISTRY.len(), 18);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
