@@ -67,7 +67,7 @@ dist/
 - **Fail-closed admission ladder.** Every construct lands in exactly one Deny/Lint/Allow tier — 11 rules in `docs/admission/rules.md`, each backed by an allow fixture and a deny/lint fixture, synced 1:1 by a CI gate. A Deny means zero output downstream.
 - **Byte-reproducible codegen.** `quote!` → `syn::File` → `prettyplease` emits Rust that is byte-identical across runs: `lig reproducibility` diffs the committed counter unit (7,385 B, component digest `0x85d06a5c087b3589`) against a fresh generation, and a readability budget is enforced by a syn visitor.
 - **no_std runtime with keyed reconciliation.** The runtime is `#![no_std]` + alloc with `forbid(unsafe_code)`: `Copy` node handles, an object-safe `Host` commit stream, LIS-stable keyed list diffs, and a const-scheduled flush loop. CI proves bare-metal builds for `thumbv7em-none-eabihf` and `aarch64-unknown-none-softfloat`.
-- **Incremental by construction.** FNV-1a digest-gated memos skip unchanged work in `lig build` and `lig watch`; build-order cycles surface as `LIG-E020` denials instead of hangs; chained source maps attribute every generated position back to source, per reaction arm.
+- **Incremental by construction.** FNV-1a digest-gated memos skip unchanged work in `lig build` and `lig watch`; build-order cycles surface as `LIG-E020` denials instead of hangs; chained source maps attribute every generated position back to source, per reaction arm. Since M16 the session stages walk named `tracing` spans (`session_compile`/`lower`/`admit`/`codegen`/`emit`) and `emit_units` fails as a typed miette `Diagnostic` (`ligature::emit`) with help-text — the embed API is observable and fails like the CLI does.
 - **Composed slot content, assembled at every mount.** Fills and fallbacks are full component surfaces: dynamic binds, events, refs, If/For (M8), grandchild component uses with reactive prop-pass, nested outlets whose fills and fallbacks mount with their content (M9), and per-mount component identity plus branch-time assembly — a component or outlet inside a branch mounts, initializes, disposes, and rebuilds with its branch (M10) — on BOTH legs of a conditional: the else leg mounts, assembles, and disposes exactly like the then leg (M11). Components compose in keyed lists too (M13): a component use in a `For`/`v-for` body owns a per-item instance store the keyed plan mirrors — inserts build + attach, removes dispose, and LIS-stable moves reposition the SAME instance. And since M14, slot outlets do the per-item story on their own: an outlet directly on a list body mounts its fallback into EVERY live item's outlet hole through the per-item replay, the mounted content moves with its item without rebuilds and disposes with it, and the fallback's item-bound binds re-apply per replay. Every component use's root attaches at its use hole exactly once per mount, in every ownership shape. And since M15, event handlers work in list bodies too: a handler directly on a `For`/`v-for` body attaches once per fresh item at its own node and dispatches index-addressed through a generated per-item fire fn — the live item's value substitutes into the handler body, keyed moves carry the handler record without re-attaching, removals dispose it with the item's slab, and stale indices are no-ops.
 - **A hot-patch protocol with a budget.** One patch dylib, an atomically swapped jump table, never-`dlclose` semantics; `lig patch-spike` chains two patch generations with stub thunks and enforces save→frame under 1 second on Linux and macOS (measured ~125–140 ms).
 - **Performance budgets as a gate, not a vibe.** `docs/benchmarks/budgets.toml` pins one ceiling per bench workload — at least 5x headroom over the recorded reference median — enforced in release mode by `lig budgets` in CI.
@@ -135,6 +135,20 @@ let unit = session.unit(&path).expect("registered source");
 assert!(unit.admitted, "denied: {:?}", unit.diagnostics);
 ```
 
+Runnable consumer examples live in `crates/lig-incremental/examples` — run them without touching `dist/`:
+
+```sh
+cargo run -p lig-incremental --example compile_and_emit   # cold pass → memo reuse → digest-gated emit → the generated unit
+cargo run -p lig-incremental --example render_denial      # a LIG-E114 denial, rendered with its fix and catalog URL
+```
+
+Runnable consumer examples live in `crates/lig-incremental/examples` — run them without touching `dist/`:
+
+```sh
+cargo run -p lig-incremental --example compile_and_emit   # cold pass → memo reuse → digest-gated emit → the generated unit
+cargo run -p lig-incremental --example render_denial      # a LIG-E114 denial, rendered with its fix and catalog URL
+```
+
 Generated units are plain Rust built on `lig_runtime`'s prelude — see the committed example
 at `fixtures/generated/counter.rs`, walked line by line in `docs/appendix-a.md`. The full
 generated shape: a component struct with state fields, generated setters as the only write
@@ -150,10 +164,12 @@ path, a const `Schedule`, static template tables, and `build`/`fire_*` entry poi
 > slot assembly: a slot outlet directly on a list body mounts its
 > fallback into every live item's outlet hole through the per-item
 > replay — the mounted content moves with its item and disposes with
-> it), and M15 (per-item event dispatch: a handler directly on a
+> it), M15 (per-item event dispatch: a handler directly on a
 > list body attaches per fresh item and dispatches index-addressed
 > through a generated per-item fire fn — the live item substitutes
-> into the handler body) complete, with the View IR
+> into the handler body), and M16 (the consumer surface: the first
+> runnable `examples/`, `tracing` spans across the session stages, a
+> typed `EmitError` with miette help-text on the emission seam) complete, with the View IR
 > schema at v5 and the compiled subset deliberately small: constructs outside the contract
 > (slot outlets and events inside list-item branches, events on composed or
 > nested list bodies, callback calls, raw DOM access) deny with a precise code rather than mis-compile. CI runs on Linux and macOS;
@@ -163,9 +179,9 @@ path, a const `Schedule`, static template tables, and `build`/`fire_*` entry poi
 
 ## Learn more
 
-- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m15/REPORT.md`](docs/m15/REPORT.md) — what each milestone delivered and measured (M15, the keyed-interaction story, is delivered on this tree at [`docs/m15/REPORT.md`](docs/m15/REPORT.md))
+- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m16/REPORT.md`](docs/m16/REPORT.md) — what each milestone delivered and measured (M16, the consumer surface, is delivered on this tree at [`docs/m16/REPORT.md`](docs/m16/REPORT.md))
 - [`docs/appendix-a.md`](docs/appendix-a.md) — the annotated generated unit every gate pins
-- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023), the else leg (0024), template refs on the Vue leg (0025), per-item instance identity (0026), per-item slot assembly (0027), per-item event dispatch (0028)
+- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023), the else leg (0024), template refs on the Vue leg (0025), per-item instance identity (0026), per-item slot assembly (0027), per-item event dispatch (0028), the consumer surface (0029)
 - [`docs/admission/rules.md`](docs/admission/rules.md) — the Deny/Lint/Allow rule table; the 15-doc diagnostic catalog under [`docs/errors/`](docs/errors/)
 - Benchmarks: [`docs/benchmarks/budgets.toml`](docs/benchmarks/budgets.toml) (enforced ceilings), [`docs/benchmarks/save-to-frame.md`](docs/benchmarks/save-to-frame.md) (patch protocol numbers), [`docs/benchmarks/oxc-vs-swc.md`](docs/benchmarks/oxc-vs-swc.md) (the parser re-benchmark)
 - [`fixtures/README.md`](fixtures/README.md) — the conformance contract both frontends must satisfy
