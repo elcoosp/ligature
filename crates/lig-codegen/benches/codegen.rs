@@ -90,6 +90,21 @@ fn bench_codegen_list_component(c: &mut Criterion) {
     });
 }
 
+/// Lower the list-slot fixture once (M14: per-item slot assembly — the
+/// per-item fallback mount in the item replay, the item-bound bind emission,
+/// and the reaction filtering ride the module pipeline), then time repeated
+/// codegen of the same IR.
+fn bench_codegen_list_slot(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/list-slot/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "list-slot.tsx").expect("fixture lowers");
+    c.bench_function("codegen/list-slot", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("list-slot codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
@@ -97,6 +112,7 @@ criterion_group!(
     bench_codegen_branch,
     bench_codegen_ref,
     bench_codegen_else,
-    bench_codegen_list_component
+    bench_codegen_list_component,
+    bench_codegen_list_slot
 );
 criterion_main!(benches);
