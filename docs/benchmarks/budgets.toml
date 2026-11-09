@@ -130,6 +130,15 @@ metric = "time"
 budget = 3000.0
 note = "M14 reference median 582 µs (codegen/list-slot bench, release, Linux x86_64); ≈5.2× headroom"
 
+# Codegen over the for-event surface (M15): per-item event dispatch — the
+# index-addressed fire fns, the item-substituted handler bodies, and the
+# per-item attach arms ride generate_module.
+[[budget]]
+name = "codegen_for_event"
+metric = "time"
+budget = 3500.0
+note = "M15 reference median 680 µs (codegen/for-event bench, release, Linux x86_64); ≈5.1× headroom"
+
 # Codegen over the list-component surface (M13): per-item instance identity —
 # the `Vec<Option<Child>>` store, the plan-op mirroring in the reconcile, and
 # the per-item children replay ride generate_module.
