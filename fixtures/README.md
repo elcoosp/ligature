@@ -7,7 +7,7 @@ pins. Since M2, the full triple form is mandatory:
 fixtures/conformance/<behavior>/
   input.solid.tsx     # Solid frontend input
   input.vue           # Vue SFC input (the M2 leg)
-  expected.ir.json    # canonical View IR v2 — the shared contract both
+  expected.ir.json    # canonical View IR v5 — the shared contract both
                       # frontends must produce
 ```
 
