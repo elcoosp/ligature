@@ -395,7 +395,10 @@ fn emit_and_report(
     };
     let emission =
         lig_incremental::emit::emit_units(out, &units, profile_str, prune).map_err(|e| {
+            // EmitError is a miette Diagnostic: print the message and its
+            // help-text (the fix, in words) on the CLI surface too.
             eprintln!("lig {what}: {e}");
+            eprintln!("  help: {}", e.help);
             CliError::Internal
         })?;
     for path in session.sources() {
