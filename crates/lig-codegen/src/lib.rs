@@ -365,7 +365,20 @@ fn generate_component_pieces(
         // any base, author or child side) rebuilds its instance per mount,
         // so the field is `Option<Child>` (built in the mounting arm,
         // disposed on unmount). Direct uses keep the eager M0 field.
-        if matches!(
+        // M13 per-item instance identity: a use on a FOR-BODY fragment owns
+        // a `Vec<Option<Child>>` — the generated reconcile mirrors the
+        // keyed plan onto it (build + attach on insert, teardown on remove,
+        // reposition on move), so every live item carries its own instance.
+        // The store starts empty: items mount on the first reconcile. (The
+        // list-body check comes FIRST: `ctx_of` classifies a For body as a
+        // `Branch` ctx, but a direct item-body use is NOT a per-mount branch
+        // use — the branch-in-item case is denied at the frontend.)
+        if owner_is_list_body(module, &frags, use_site.owner) {
+            struct_fields.push(quote! {
+                pub #fname: ::alloc::vec::Vec<::core::option::Option<#child_ty>>
+            });
+            init_fields.push(quote! { #fname: ::alloc::vec::Vec::new() });
+        } else if matches!(
             ctx_of(module, &frags, &ctx_map, use_site.owner),
             Ctx::Branch { .. }
         ) {
@@ -628,6 +641,27 @@ fn generate_component_pieces(
                                 leg_disposes[li].push(quote! {
                                     if let Some(inst) = self.#field.take() {
                                         inst.frag.teardown(h);
+                                    }
+                                });
+                            }
+                            // M13: the leg's subtree may own list bodies with
+                            // per-item component stores — a branch unmount
+                            // tears the items down with it, so the dispose
+                            // list drains the stores (idempotent, like the
+                            // Option takes: `drain` on an empty vec is a
+                            // no-op).
+                            for field in subtree_list_body_use_fields(
+                                module,
+                                &frags,
+                                *lid,
+                                &component_field_map,
+                            ) {
+                                let field = syn::Ident::new(&field, Span::call_site());
+                                leg_disposes[li].push(quote! {
+                                    for inst in self.#field.drain(..) {
+                                        if let Some(c) = inst {
+                                            c.frag.teardown(h);
+                                        }
                                     }
                                 });
                             }
@@ -990,8 +1024,10 @@ fn generate_component_pieces(
                                     self.#method(h, #slot);
                                 }
                             });
-                            list_methods.push(emit_list_method(
-                                module, for_ir, &item_ty, body_info, &prefix,
+                            let body_uses =
+                                body_component_uses(module, for_ir, &component_field_map);
+                            list_methods.extend(emit_list_method(
+                                module, for_ir, &item_ty, body_info, &prefix, &body_uses,
                             )?);
                         } else {
                             // Composed list (M8 — branch-in-content and
@@ -1030,8 +1066,19 @@ fn generate_component_pieces(
                                 })
                                 .collect();
                             let recv = ctx_recv(&ctx);
+                            // M13: the body's per-item instance stores ride
+                            // the call as `&mut` params.
+                            let body_uses =
+                                body_component_uses(module, for_ir, &component_field_map);
+                            let inst_args: Vec<proc_macro2::TokenStream> = body_uses
+                                .iter()
+                                .map(|u| {
+                                    let field = syn::Ident::new(&u.field, Span::call_site());
+                                    quote! { &mut self.#field }
+                                })
+                                .collect();
                             let call = quote! {
-                                Self::#method(h, #recv, #slot, items, #(#read_args),*);
+                                Self::#method(h, #recv, #slot, items, #(#read_args,)* #(#inst_args,)*);
                             };
                             let scoped = ctx_scope(&ctx, call);
                             run_arms.push(quote! {
@@ -1042,9 +1089,9 @@ fn generate_component_pieces(
                                     #scoped
                                 }
                             });
-                            list_methods.push(emit_list_method_composed(
-                                module, for_ir, &item_ty, body_info, &prefix,
-                            ));
+                            list_methods.extend(emit_list_method_composed(
+                                module, for_ir, &item_ty, body_info, &prefix, &body_uses,
+                            )?);
                         }
                         if for_ir.key.is_some() {
                             key_methods.push(emit_key_method(module, for_ir, &item_ty)?);
@@ -2957,18 +3004,227 @@ fn emit_apply_fns(module: &ViewModule, frags: &[FragInfo]) -> Vec<proc_macro2::T
     Vec::new()
 }
 
+/// One component use on a For-body fragment (M13): the per-item instance
+/// store the reconcile mirrors the keyed plan onto.
+struct BodyUse {
+    /// The dynamic index of the use within the body fragment (the item
+    /// template's component hole).
+    di: usize,
+    /// The use-site IR (component id + bound props).
+    ir: lig_ir::fragment::ComponentIr,
+    /// The owner-side `Vec<Option<Child>>` field name.
+    field: String,
+}
+
+/// The component uses on a For body, in dynamic order — the per-item
+/// instance stores the list reconcile mirrors (M13).
+fn body_component_uses(
+    module: &ViewModule,
+    for_ir: &lig_ir::fragment::ForIr,
+    field_map: &HashMap<(u32, u32), String>,
+) -> Vec<BodyUse> {
+    let Some(body_frag) = module.fragments.get(for_ir.body.get() as usize) else {
+        return Vec::new();
+    };
+    body_frag
+        .dynamics
+        .iter()
+        .enumerate()
+        .filter_map(|(di, d)| {
+            let DynamicKind::Component(c) = &d.kind else {
+                return None;
+            };
+            let field = field_map
+                .get(&(for_ir.body.get(), di as u32))
+                .cloned()
+                .unwrap_or_else(|| field_name_for(module, c.component));
+            Some(BodyUse {
+                di,
+                ir: c.clone(),
+                field,
+            })
+        })
+        .collect()
+}
+
+/// The per-item instance stores owned by component uses inside FOR bodies
+/// of a fragment SUBTREE, sorted and deduped (M13): a branch unmount tears
+/// its whole fragment tree down — items included — so the mounting arm's
+/// dispose list drains these stores (the instances' roots hang inside the
+/// dying items' component holes).
+fn subtree_list_body_use_fields(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    root: FragmentId,
+    field_map: &HashMap<(u32, u32), String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![root];
+    while let Some(f) = stack.pop() {
+        let Some(frag) = module.fragments.get(f.get() as usize) else {
+            continue;
+        };
+        if owner_is_list_body(module, frags, f) {
+            for (di, d) in frag.dynamics.iter().enumerate() {
+                let DynamicKind::Component(_) = &d.kind else {
+                    continue;
+                };
+                if let Some(field) = field_map.get(&(f.get(), di as u32)) {
+                    out.push(field.clone());
+                }
+            }
+        }
+        for d in &frag.dynamics {
+            if let DynamicKind::If(i) = &d.kind {
+                stack.push(i.then);
+                if let Some(el) = i.else_ {
+                    stack.push(el);
+                }
+            }
+        }
+        for &c in &frag.children {
+            stack.push(c);
+        }
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The `State` names one expression reads (sorted, deduped) — the per-item
+/// children-fn parameter set (M13; the body-wide variant is
+/// [`collect_body_reads`]).
+fn expr_state_reads(module: &ViewModule, id: ExprId) -> Vec<StrId> {
+    use lig_ir::expr::Expr as E;
+    fn walk(e: &E, out: &mut Vec<StrId>) {
+        match e {
+            E::State(s) => out.push(*s),
+            E::Field(inner, _) | E::Unary(_, inner) => walk(inner, out),
+            E::Index(a, b) | E::Binary(_, a, b) | E::Ternary(a, b, _) => {
+                walk(a, out);
+                walk(b, out);
+            }
+            E::Array(items) => items.iter().for_each(|i| walk(i, out)),
+            E::Tpl(parts) => {
+                for p in parts {
+                    if let lig_ir::expr::TplPart::Hole(h) = p {
+                        walk(h, out);
+                    }
+                }
+            }
+            E::Call(_, args) => args.iter().for_each(|a| walk(a, out)),
+            _ => {}
+        }
+    }
+    let mut out = Vec::new();
+    walk(module.exprs.get(id), &mut out);
+    out.sort();
+    out.dedup();
+    out
+}
+
+/// The per-item children fn (M13): applies one list-body component use's
+/// prop bindings for ONE item (the replay runs per live item after the
+/// reconcile ops) and flushes the child. Uses with no dynamic props need no
+/// replay (the instance's props never change after its initial sets).
+fn emit_item_children_fn(
+    module: &ViewModule,
+    for_ir: &lig_ir::fragment::ForIr,
+    item_ty: &Ty,
+    use_: &BodyUse,
+) -> Result<Option<proc_macro2::TokenStream>, CodegenError> {
+    if use_.ir.props.is_empty() {
+        return Ok(None);
+    }
+    let Some(child) = module.components.get(use_.ir.component.get() as usize) else {
+        return Ok(None);
+    };
+    let child_name = sanitize(module.strings.get(child.name));
+    let child_ty = syn::Ident::new(&child_name, Span::call_site());
+    let fname = syn::Ident::new(
+        &format!("children_f{}_d{}", for_ir.body.get(), use_.di),
+        Span::call_site(),
+    );
+    let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
+    // The parent-state reads of THIS use's prop values (the pre-clone
+    // discipline: the replay runs while the parent's fragment is mutably
+    // borrowed).
+    let mut reads: Vec<StrId> = use_
+        .ir
+        .props
+        .iter()
+        .flat_map(|pb| expr_state_reads(module, pb.value))
+        .collect();
+    reads.sort();
+    reads.dedup();
+    let read_params: Vec<proc_macro2::TokenStream> = reads
+        .iter()
+        .map(|r| {
+            let pname = syn::Ident::new(
+                &format!("s_{}", sanitize(module.strings.get(*r))),
+                Span::call_site(),
+            );
+            let ty: syn::Type = syn::parse_str(&ty_name(
+                &module.state_by_name(*r).map_or(Ty::Int, |d| d.ty.clone()),
+            ))
+            .expect("valid state type");
+            quote! { #pname: #ty }
+        })
+        .collect();
+    let mut sets = Vec::new();
+    for pb in &use_.ir.props {
+        let setter = syn::Ident::new(
+            &format!("set_{}", sanitize(module.strings.get(pb.prop))),
+            Span::call_site(),
+        );
+        let raw = gen_item_expr(module, pb.value, for_ir, item_ty)?;
+        // Setters take their value BY VALUE (the §7.6 write path): a string
+        // literal interns into `String::from`, other literals pass through,
+        // everything else clones (the item param is consumed per call).
+        let v = match module.exprs.get(pb.value) {
+            lig_ir::expr::Expr::Lit(lig_ir::expr::Lit::Str(_)) => {
+                quote!(::alloc::string::String::from(#raw))
+            }
+            lig_ir::expr::Expr::Lit(
+                lig_ir::expr::Lit::Int(_)
+                | lig_ir::expr::Lit::Float(_)
+                | lig_ir::expr::Lit::Bool(_)
+                | lig_ir::expr::Lit::Null,
+            ) => raw,
+            _ => quote!((#raw).clone()),
+        };
+        sets.push(quote! { c.#setter(#v); });
+    }
+    Ok(Some(quote! {
+        fn #fname(
+            c: &mut #child_ty,
+            h: &mut dyn Host,
+            item: #item_ty_lit,
+            index: i64,
+            #(#read_params,)*
+        ) {
+            #(#sets)*
+            ::lig_runtime::flush(c, h);
+        }
+    }))
+}
+
 /// The per-For reconcile method (§7.5): keyed lists run the sequential
 /// keyed plan (`plan_keyed` — removes, moves, inserts, each addressing the
 /// live list at apply time, then a full bind replay so index-driven binds
 /// track the new positions); unkeyed lists keep the Index diff (mount new
-/// items, remove tails, refresh survivors).
+/// items, remove tails, refresh survivors). Since M13 both plans MIRROR the
+/// ops onto the body's per-item component instance stores (build + attach
+/// on insert, teardown on remove, reposition on move), and the replay
+/// covers EVERY live item: the binds and the per-item component props.
 fn emit_list_method(
     module: &ViewModule,
     for_ir: &lig_ir::fragment::ForIr,
     item_ty: &Ty,
     body_info: &FragInfo,
     prefix: &str,
-) -> Result<proc_macro2::TokenStream, CodegenError> {
+    uses: &[BodyUse],
+) -> Result<Vec<proc_macro2::TokenStream>, CodegenError> {
     let src = gen_expr(module, for_ir.source)?;
     let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
     let body_tpl = tpl_ident(prefix, body_info.template_id);
@@ -3006,6 +3262,109 @@ fn emit_list_method(
             quote! { #pname.clone() }
         })
         .collect();
+    // M13: per-use token fragments for the plan-op mirroring. Removes take
+    // + teardown BEFORE the item unmounts (the child roots hang in the
+    // item's component holes); inserts build + attach + store AFTER the
+    // item mounts (the hole exists only then); moves reposition the same
+    // instance (no rebuild — per-item identity survives reorders).
+    let remove_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            quote! {
+                if let Some(inst) = self.#field.remove(index) {
+                    inst.frag.teardown(h);
+                }
+            }
+        })
+        .collect();
+    let move_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            quote! {
+                let inst = self.#field.remove(from);
+                self.#field.insert(to, inst);
+            }
+        })
+        .collect();
+    let insert_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            let Some(decl) = module.components.get(u.ir.component.get() as usize) else {
+                return quote! {};
+            };
+            let child_name = sanitize(module.strings.get(decl.name));
+            let child_ty = syn::Ident::new(&child_name, Span::call_site());
+            let props_ty = syn::Ident::new(&format!("{child_name}Props"), Span::call_site());
+            let di = u.di;
+            quote! {
+                let inst = #child_ty::build(h, #props_ty::default());
+                if let Some(f) = self.frag.list_item(slot, index) {
+                    let n = f.hole(#di);
+                    h.insert(n, inst.frag.roots()[0], 0);
+                }
+                self.#field.insert(index, Some(inst));
+            }
+        })
+        .collect();
+    // The per-item replay arms: after the bind replay, each use's children
+    // fn sets the instance's props for THIS item and flushes the child.
+    let replay_arms: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .filter(|u| !u.ir.props.is_empty())
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            let children = syn::Ident::new(
+                &format!("children_f{}_d{}", for_ir.body.get(), u.di),
+                Span::call_site(),
+            );
+            quote! {
+                if let Some(c) = self.#field[i].as_mut() {
+                    Self::#children(c, h, it.clone(), i as i64, #(#read_args),*);
+                }
+            }
+        })
+        .collect();
+    let unkeyed_insert_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            let Some(decl) = module.components.get(u.ir.component.get() as usize) else {
+                return quote! {};
+            };
+            let child_name = sanitize(module.strings.get(decl.name));
+            let child_ty = syn::Ident::new(&child_name, Span::call_site());
+            let props_ty = syn::Ident::new(&format!("{child_name}Props"), Span::call_site());
+            let di = u.di;
+            quote! {
+                let inst = #child_ty::build(h, #props_ty::default());
+                if let Some(f) = self.frag.list_item(slot, i) {
+                    let n = f.hole(#di);
+                    h.insert(n, inst.frag.roots()[0], 0);
+                }
+                self.#field.insert(i, Some(inst));
+            }
+        })
+        .collect();
+    let unkeyed_remove_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            quote! {
+                if let Some(inst) = self.#field.remove(i) {
+                    inst.frag.teardown(h);
+                }
+            }
+        })
+        .collect();
+    let mut children_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    for u in uses {
+        if let Some(ts) = emit_item_children_fn(module, for_ir, item_ty, u)? {
+            children_fns.push(ts);
+        }
+    }
     let body = if for_ir.key.is_some() {
         let key_fn = syn::Ident::new(&format!("key_of_f{}", for_ir.body.get()), Span::call_site());
         quote! {
@@ -3024,10 +3383,12 @@ fn emit_list_method(
                 for step in ::lig_runtime::plan_keyed(&old_keys, &new_keys) {
                     match step {
                         ::lig_runtime::SeqOp::Remove { index } => {
+                            #(#remove_mirrors)*
                             self.frag.list_remove(h, slot, index);
                         }
                         ::lig_runtime::SeqOp::Move { from, to } => {
                             self.frag.list_move(h, slot, from, to);
+                            #(#move_mirrors)*
                         }
                         ::lig_runtime::SeqOp::Insert { key, index } => {
                             self.frag.list_insert(
@@ -3039,6 +3400,7 @@ fn emit_list_method(
                                 #body_holes,
                                 #body_branches,
                             );
+                            #(#insert_mirrors)*
                         }
                     }
                 }
@@ -3047,6 +3409,7 @@ fn emit_list_method(
                     if let Some(f) = self.frag.list_item_mut(slot, i) {
                         #apply(f, h, it.clone(), i as i64, #(#read_args),*);
                     }
+                    #(#replay_arms)*
                 }
             }
         }
@@ -3058,20 +3421,26 @@ fn emit_list_method(
                 let common = old.min(items.len());
                 for i in common..items.len() {
                     self.frag.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
+                    #(#unkeyed_insert_mirrors)*
                 }
                 for i in (common..old).rev() {
+                    #(#unkeyed_remove_mirrors)*
                     self.frag.list_remove(h, slot, i);
                 }
                 #(#read_declares)*
-                for (i, it) in items.iter().enumerate().take(common) {
+                for (i, it) in items.iter().enumerate() {
                     if let Some(f) = self.frag.list_item_mut(slot, i) {
                         #apply(f, h, it.clone(), i as i64, #(#read_args),*);
                     }
+                    #(#replay_arms)*
                 }
             }
         }
     };
-    Ok(body)
+    Ok(children_fns
+        .into_iter()
+        .chain(core::iter::once(body))
+        .collect())
 }
 
 /// The composed per-For reconcile (M8): lists on mounted branches or slot
@@ -3080,14 +3449,18 @@ fn emit_list_method(
 /// and the parent-state reads (pre-cloned by the caller, passed by value)
 /// never overlap. Same plans as [`emit_list_method`]: keyed lists run the
 /// sequential keyed plan, unkeyed lists the Index diff; both replay the item
-/// binds so new items initialize.
+/// binds so new items initialize. Since M13 the plans also mirror the ops
+/// onto the body's per-item component instance stores — passed in as `&mut
+/// Vec<Option<Child>>` parameters (the associated fn takes no `self`, so
+/// the owner's stores ride the call).
 fn emit_list_method_composed(
     module: &ViewModule,
     for_ir: &lig_ir::fragment::ForIr,
     item_ty: &Ty,
     body_info: &FragInfo,
     prefix: &str,
-) -> proc_macro2::TokenStream {
+    uses: &[BodyUse],
+) -> Result<Vec<proc_macro2::TokenStream>, CodegenError> {
     let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
     let body_tpl = tpl_ident(prefix, body_info.template_id);
     let body_holes = hole_ident(prefix, body_info.id.get() as usize);
@@ -3125,7 +3498,118 @@ fn emit_list_method_composed(
             quote! { #pname.clone() }
         })
         .collect();
-    if for_ir.key.is_some() {
+    // The per-item instance stores ride the call as `&mut Vec` params (M13).
+    let inst_params: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            let Some(decl) = module.components.get(u.ir.component.get() as usize) else {
+                return quote! {};
+            };
+            let child_name = sanitize(module.strings.get(decl.name));
+            let child_ty = syn::Ident::new(&child_name, Span::call_site());
+            quote! {
+                #field: &mut ::alloc::vec::Vec<::core::option::Option<#child_ty>>
+            }
+        })
+        .collect();
+    let remove_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            quote! {
+                if let Some(inst) = #field.remove(index) {
+                    inst.frag.teardown(h);
+                }
+            }
+        })
+        .collect();
+    let move_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            quote! {
+                let inst = #field.remove(from);
+                #field.insert(to, inst);
+            }
+        })
+        .collect();
+    let insert_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            let Some(decl) = module.components.get(u.ir.component.get() as usize) else {
+                return quote! {};
+            };
+            let child_name = sanitize(module.strings.get(decl.name));
+            let child_ty = syn::Ident::new(&child_name, Span::call_site());
+            let props_ty = syn::Ident::new(&format!("{child_name}Props"), Span::call_site());
+            let di = u.di;
+            quote! {
+                let inst = #child_ty::build(h, #props_ty::default());
+                if let Some(f) = recv.list_item(slot, index) {
+                    let n = f.hole(#di);
+                    h.insert(n, inst.frag.roots()[0], 0);
+                }
+                #field.insert(index, Some(inst));
+            }
+        })
+        .collect();
+    let replay_arms: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .filter(|u| !u.ir.props.is_empty())
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            let children = syn::Ident::new(
+                &format!("children_f{}_d{}", for_ir.body.get(), u.di),
+                Span::call_site(),
+            );
+            quote! {
+                if let Some(c) = #field[i].as_mut() {
+                    Self::#children(c, h, it.clone(), i as i64, #(#read_args),*);
+                }
+            }
+        })
+        .collect();
+    let unkeyed_insert_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            let Some(decl) = module.components.get(u.ir.component.get() as usize) else {
+                return quote! {};
+            };
+            let child_name = sanitize(module.strings.get(decl.name));
+            let child_ty = syn::Ident::new(&child_name, Span::call_site());
+            let props_ty = syn::Ident::new(&format!("{child_name}Props"), Span::call_site());
+            let di = u.di;
+            quote! {
+                let inst = #child_ty::build(h, #props_ty::default());
+                if let Some(f) = recv.list_item(slot, i) {
+                    let n = f.hole(#di);
+                    h.insert(n, inst.frag.roots()[0], 0);
+                }
+                #field.insert(i, Some(inst));
+            }
+        })
+        .collect();
+    let unkeyed_remove_mirrors: Vec<proc_macro2::TokenStream> = uses
+        .iter()
+        .map(|u| {
+            let field = syn::Ident::new(&u.field, Span::call_site());
+            quote! {
+                if let Some(inst) = #field.remove(i) {
+                    inst.frag.teardown(h);
+                }
+            }
+        })
+        .collect();
+    let mut children_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    for u in uses {
+        if let Some(ts) = emit_item_children_fn(module, for_ir, item_ty, u)? {
+            children_fns.push(ts);
+        }
+    }
+    let body = if for_ir.key.is_some() {
         let key_fn = syn::Ident::new(&format!("key_of_f{}", for_ir.body.get()), Span::call_site());
         quote! {
             fn #method(
@@ -3134,6 +3618,7 @@ fn emit_list_method_composed(
                 slot: usize,
                 items: ::alloc::vec::Vec<#item_ty_lit>,
                 #(#read_params,)*
+                #(#inst_params,)*
             ) {
                 let old_len = recv.list_len(slot);
                 let mut old_keys: ::alloc::vec::Vec<u64> = ::alloc::vec::Vec::with_capacity(old_len);
@@ -3148,10 +3633,12 @@ fn emit_list_method_composed(
                 for step in ::lig_runtime::plan_keyed(&old_keys, &new_keys) {
                     match step {
                         ::lig_runtime::SeqOp::Remove { index } => {
+                            #(#remove_mirrors)*
                             recv.list_remove(h, slot, index);
                         }
                         ::lig_runtime::SeqOp::Move { from, to } => {
                             recv.list_move(h, slot, from, to);
+                            #(#move_mirrors)*
                         }
                         ::lig_runtime::SeqOp::Insert { key, index } => {
                             recv.list_insert(
@@ -3163,6 +3650,7 @@ fn emit_list_method_composed(
                                 #body_holes,
                                 #body_branches,
                             );
+                            #(#insert_mirrors)*
                         }
                     }
                 }
@@ -3170,6 +3658,7 @@ fn emit_list_method_composed(
                     if let Some(f) = recv.list_item_mut(slot, i) {
                         #apply(f, h, it.clone(), i as i64, #(#read_args),*);
                     }
+                    #(#replay_arms)*
                 }
             }
         }
@@ -3181,23 +3670,31 @@ fn emit_list_method_composed(
                 slot: usize,
                 items: ::alloc::vec::Vec<#item_ty_lit>,
                 #(#read_params,)*
+                #(#inst_params,)*
             ) {
                 let old = recv.list_len(slot);
                 let common = old.min(items.len());
                 for i in common..items.len() {
                     recv.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
+                    #(#unkeyed_insert_mirrors)*
                 }
                 for i in (common..old).rev() {
+                    #(#unkeyed_remove_mirrors)*
                     recv.list_remove(h, slot, i);
                 }
-                for (i, it) in items.iter().enumerate().take(common) {
+                for (i, it) in items.iter().enumerate() {
                     if let Some(f) = recv.list_item_mut(slot, i) {
                         #apply(f, h, it.clone(), i as i64, #(#read_args),*);
                     }
+                    #(#replay_arms)*
                 }
             }
         }
-    }
+    };
+    Ok(children_fns
+        .into_iter()
+        .chain(core::iter::once(body))
+        .collect())
 }
 
 /// The non-handler reaction mask of a fragment SUBTREE (M8): the bits a
@@ -3335,6 +3832,14 @@ fn collect_body_reads(module: &ViewModule, body: FragmentId) -> Vec<StrId> {
     let mut out = Vec::new();
     for d in &frag.dynamics {
         walk(module.exprs.get(d.expr), &mut out);
+        // M13: a list-body component use's prop bindings are part of the
+        // per-item replay — their parent-state reads pre-clone with the
+        // body's own reads.
+        if let DynamicKind::Component(c) = &d.kind {
+            for pb in &c.props {
+                walk(module.exprs.get(pb.value), &mut out);
+            }
+        }
     }
     out.sort();
     out.dedup();
@@ -3428,9 +3933,13 @@ fn emit_item_method(
                      (LIG-E118) — hoist to the list level or a keyed component",
                 ));
             }
+            DynamicKind::Component(_) => {
+                // M13: the per-item component replay lives in the reconcile
+                // method (the instance store and the plan-op mirroring are
+                // reconcile state) — the item-bind replay emits nothing here.
+            }
             DynamicKind::If(_)
             | DynamicKind::For(_)
-            | DynamicKind::Component(_)
             | DynamicKind::Html
             | DynamicKind::Ref
             | DynamicKind::Slot { .. }
