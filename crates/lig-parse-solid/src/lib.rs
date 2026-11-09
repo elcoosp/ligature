@@ -1623,29 +1623,45 @@ impl ComponentLowering<'_, '_> {
         Ok(Some(fill))
     }
 
-    /// The M10/M13 slot-content contract: fills and fallbacks mount as live
-    /// fragments — scalar binds (text/class/attr/style-prop/html), events,
-    /// refs, If/For dynamics (M8), component uses and nested outlets (M9),
-    /// AND (M10) component uses and nested outlets inside BRANCH bodies of
-    /// content: a remounted branch rebuilds its per-mount component instance
-    /// (Option field, dispose on unmount), and the branch mounts its
+    /// The M10/M13/M14/M18 slot-content contract: fills and fallbacks mount
+    /// as live fragments — scalar binds (text/class/attr/style-prop/html),
+    /// events, refs, If/For dynamics (M8), component uses and nested outlets
+    /// (M9), AND (M10) component uses and nested outlets inside BRANCH bodies
+    /// of content: a remounted branch rebuilds its per-mount component
+    /// instance (Option field, dispose on unmount), and the branch mounts its
     /// outlets' fills/fallbacks with it (branch-time slot assembly). Since
     /// M13, component uses admit inside LIST bodies of content too — per-item
     /// instance identity (the generated reconcile mirrors the keyed plan onto
-    /// a `Vec<Option<Child>>` store). OUTLETS inside list bodies stay
-    /// fail-closed: per-item slot assembly is still the keyed-component
-    /// follow-up. Children/prop-pass/whole-style dynamics stay denied (M2),
-    /// and event handlers inside list item bodies stay denied (the LIG-E118
-    /// discipline — per-item dispatch needs keyed components).
+    /// a `Vec<Option<Child>>` store). Since M18, a list body of content is a
+    /// COMPOSED body like any other (ADR-0030's "branch- or slot-owned"):
+    /// its OWN surface admits — an event handler and a slot outlet directly
+    /// on the item body lower, riding the receiver-parameterized composed
+    /// reconcile (M17's attach machinery) and the shared per-item replay
+    /// (M14's mount machinery). Deeper shapes keep the fail-closed
+    /// discipline: events beyond the body deny with the LIG-E118 reason and
+    /// outlets beyond the body with the branch-in-item reason (per-item ×
+    /// per-mount/per-item composition is the foundation follow-up).
+    /// Children/prop-pass/whole-style dynamics stay denied (M2).
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: oxc_span::Span) {
-        self.content_contract(frag, false, span);
+        self.content_contract(frag, false, false, false, span);
     }
 
     /// The recursive content walk: `in_list_item` marks fragments mounted as
-    /// For bodies (their binds are the per-item replay's; events there are
-    /// the LIG-E118 denial; components and outlets there are the per-item
-    /// identity denial).
-    fn content_contract(&mut self, frag: FragmentId, in_list_item: bool, span: oxc_span::Span) {
+    /// For bodies or their plain-child descendants; `owner_direct` marks the
+    /// list body fragment ITSELF (M18 — the body's own events and outlets
+    /// admit, everything deeper keeps the denial); `in_item_subtree` is the
+    /// UN-reset item context — branch bodies reset `in_list_item` (the
+    /// pre-M18 shape; admission's E118 walk and the own-tree contract catch
+    /// those deeper shapes) but keep the subtree bit so a nested list body
+    /// never gains the owner-direct surface.
+    fn content_contract(
+        &mut self,
+        frag: FragmentId,
+        in_list_item: bool,
+        owner_direct: bool,
+        in_item_subtree: bool,
+        span: oxc_span::Span,
+    ) {
         let (dynamics, children) = {
             let f = &self.module.fragments[frag.get() as usize];
             (f.dynamics.clone(), f.children.clone())
@@ -1656,7 +1672,8 @@ impl ComponentLowering<'_, '_> {
                 // component uses + nested outlets on content (M9), inside
                 // content BRANCHES (M10 — per-mount identity), and inside
                 // content LIST bodies (M13 — per-item instance identity) are
-                // admitted.
+                // admitted. Since M18 the list body's OWN event/outlet admits
+                // too (the composed owner-direct lift).
                 DynamicKind::Text
                 | DynamicKind::Html
                 | DynamicKind::Attr { .. }
@@ -1666,15 +1683,18 @@ impl ComponentLowering<'_, '_> {
                 | DynamicKind::If(_)
                 | DynamicKind::For(_)
                 | DynamicKind::Component(_) => None,
-                DynamicKind::Event { .. } => in_list_item.then(|| {
-                    "event handlers inside list item bodies are not admitted in v1 — hoist the \
-                     handler to the list level (the LIG-E118 discipline)"
+                DynamicKind::Event { .. } => (in_list_item && !owner_direct).then(|| {
+                    "event handlers beyond the composed list item body are not admitted — \
+                         per-item dispatch covers the body's own handler (direct and composed); \
+                         branch-in-item and nested-list dispatch are the foundation follow-up \
+                         (the LIG-E118 discipline)"
                         .to_string()
                 }),
-                DynamicKind::Slot { .. } => in_list_item.then(|| {
-                    "slot outlets inside list item bodies of slot content are not admitted — \
-                     per-item slot assembly covers the OWN-TREE list body; composed fill/fallback \
-                     resolution is the follow-up (hoist the outlet out of the body)"
+                DynamicKind::Slot { .. } => (in_list_item && !owner_direct).then(|| {
+                    "slot outlets beyond the composed list item body are not admitted — \
+                         per-item slot assembly covers the body's own outlet (own-tree and \
+                         composed); branch-in-item composition is the follow-up (hoist the \
+                         outlet out of the body)"
                         .to_string()
                 }),
                 DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
@@ -1693,28 +1713,36 @@ impl ComponentLowering<'_, '_> {
         }
         // Structural bodies recurse: If branches and For bodies keep the
         // scalar content contract (binds, events, refs compose); For bodies
-        // additionally keep the per-item instance denials.
-        let mut structural: Vec<(FragmentId, bool)> = Vec::new();
+        // additionally keep the per-item instance denials. The body of a For
+        // whose owner is NOT already inside an item subtree is the composed
+        // list body itself — `owner_direct` marks it so the M18 owner-direct
+        // surface admits exactly one level deep; a NESTED list body (inside
+        // an item subtree) stays fail-closed.
+        let mut structural: Vec<(FragmentId, bool, bool, bool)> = Vec::new();
         {
             let f = &self.module.fragments[frag.get() as usize];
             for d in &f.dynamics {
                 match &d.kind {
                     DynamicKind::If(i) => {
-                        structural.push((i.then, false));
+                        structural.push((i.then, false, false, in_item_subtree));
                         if let Some(el) = i.else_ {
-                            structural.push((el, false));
+                            structural.push((el, false, false, in_item_subtree));
                         }
                     }
-                    DynamicKind::For(fo) => structural.push((fo.body, true)),
+                    DynamicKind::For(fo) => {
+                        structural.push((fo.body, true, !in_item_subtree, true));
+                    }
                     _ => {}
                 }
             }
         }
         for child in children {
-            if let Some((_, child_in_list)) = structural.iter().find(|(id, _)| *id == child) {
-                self.content_contract(child, *child_in_list, span);
+            if let Some(&(_, child_in_list, child_direct, child_subtree)) =
+                structural.iter().find(|(id, _, _, _)| id == &child)
+            {
+                self.content_contract(child, child_in_list, child_direct, child_subtree, span);
             } else {
-                self.content_contract(child, in_list_item, span);
+                self.content_contract(child, in_list_item, false, in_item_subtree, span);
             }
         }
     }
