@@ -54,6 +54,9 @@ serde_json = "1.0.154"
 # diagnostics rendering (D-7)
 miette = { version = "7.6.0", features = ["fancy"] }
 
+# session observability (M16): stage spans over the incremental pipeline
+tracing = "0.1.44"
+
 # style lowering (D-12); lightningcss is an MPL-2.0 *dependency boundary only* (§15)
 lightningcss = "=1.0.0-alpha.72"
 taffy = "0.15.1"
