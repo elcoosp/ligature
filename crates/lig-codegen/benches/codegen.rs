@@ -75,12 +75,28 @@ fn bench_codegen_else(c: &mut Criterion) {
     });
 }
 
+/// Lower the list-component fixture once (M13: per-item instance identity —
+/// the `Vec<Option<Child>>` store, the plan-op mirroring in the reconcile,
+/// and the per-item children replay ride the module pipeline), then time
+/// repeated codegen of the same IR.
+fn bench_codegen_list_component(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/list-component/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "list-component.tsx").expect("fixture lowers");
+    c.bench_function("codegen/list-component", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("list-component codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
     bench_codegen_composed,
     bench_codegen_branch,
     bench_codegen_ref,
-    bench_codegen_else
+    bench_codegen_else,
+    bench_codegen_list_component
 );
 criterion_main!(benches);
