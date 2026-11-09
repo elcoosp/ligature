@@ -4,7 +4,7 @@ export function Rows() {
   const [items, setItems] = createSignal(["a", "b"]);
   return (
     <ul>
-      <For each={items()}>{(n) => <li>{n}</li>}</For>
+      <For each={items()}>{(n) => <li onClick={() => setItems([n])}>{n}</li>}</For>
     </ul>
   );
 }
