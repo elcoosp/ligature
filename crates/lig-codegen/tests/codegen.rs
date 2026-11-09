@@ -655,6 +655,60 @@ export function Badge({ count }) {
 }
 
 #[test]
+fn list_body_events_dispatch_per_item() {
+    // M15 per-item event dispatch: an event handler DIRECTLY on a For-body
+    // fragment emits an index-addressed fire fn (`fire_f{body}_d{di}`) whose
+    // handler body substitutes the item/index locals and flushes through the
+    // standard pipeline; the attach rides the reconcile's INSERT arms (once
+    // per fresh item — the replay must never re-attach), and the handler's
+    // Effect reaction stays out of the run dispatch (item addressing has no
+    // flush scope — the M13 discipline).
+    let src = r#"import { For } from "solid-js";
+export function App() {
+  const [rows, setRows] = createSignal(["alpha", "beta"]);
+  const [picked, setPicked] = createSignal("");
+  return (
+    <ul>
+      <For each={rows()} key={(r) => r}>
+        {(r) => <li><button onClick={() => setPicked(r)}>{r}</button></li>}
+      </For>
+    </ul>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "for-event.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The dispatch glue: index-addressed, captures the payload, flushes.
+    assert!(
+        text.contains("pub fn fire_f1_d0(") && text.contains("index: usize,"),
+        "the per-item fire fn is index-addressed: {text}"
+    );
+    assert!(
+        text.contains("let Some(item) = items.get(index) else {"),
+        "dispatch addresses the live item through the source: {text}"
+    );
+    assert!(
+        text.contains("self.set_picked(item.clone());"),
+        "the handler body substitutes the item local: {text}"
+    );
+    assert!(
+        text.contains("::lig_runtime::flush(self, h);"),
+        "the handler's state writes cascade through the flush: {text}"
+    );
+    // The attach rides the KEYED INSERT arm (once per fresh item, at the
+    // event's hole, with the handler reaction id) — inside the plan's
+    // `list_item_mut` guard, after the item mounts.
+    assert!(
+        text.contains("if let Some(f) = self.frag.list_item_mut(slot, index) {"),
+        "the keyed insert arm reaches the fresh item fragment: {text}"
+    );
+    assert!(
+        text.contains("f.attach(\n                                h,\n                                0usize,\n                                ::lig_runtime::EventKind::Click,"),
+        "the item event attaches at its hole with the handler reaction id: {text}"
+    );
+}
+
+#[test]
 fn list_body_outlets_mount_their_fallback_per_item() {
     // M14 per-item slot assembly: a slot outlet on a For-body fragment
     // mounts its OWN fallback into every live item's outlet hole — the
