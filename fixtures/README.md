@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (35)
+## Behavior fixtures (36)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -53,6 +53,7 @@ table).
 | `for-index` | getter-only list signal + `<For>`/`v-for` index accessor |
 | `for-event` | per-item event dispatch (M15): an `onClick`/`@click` handler DIRECTLY on the `<For>`/`v-for` body — one Attach commit per fresh item at its own node, index-addressed dispatch through the generated per-item fire fn with the item substituted into the handler body, keyed moves re-locate the handler record without re-attaching, removals dispose it with the item's slab, and stale indices are no-ops |
 | `for-event-composed` | per-item event dispatch on composed list bodies (M17): the same direct handler, with the `<For>`/`v-for` hanging inside a `Show`/`v-if` branch — the composed reconcile's receiver-parameterized insert arms attach per fresh item, the fire fn dispatches through the source, and a branch cycle (unmount → remount) disposes and re-attaches the records per mount (the mount mark re-runs the list's reconcile into the fresh table) |
+| `for-composed-content` | the composed-content owner-direct lift (M18): a fill carried into a branch-mounted child holds a keyed `For`/`v-for` whose body carries BOTH the per-item handler AND a nested outlet with an item-bound fallback — the fill mounts into the fresh instance at branch mount (the per-mount fill assembly), the composed reconcile's receiver-parameterized insert arms attach per fresh item, the shared replay mounts the fallback per item and re-applies its item-bound binds, keyed rotations move the same slabs without rebuilds or re-attaches, removals dispose with the item, and the branch cycle rebuilds everything per mount |
 | `for-keyed` | keyed list reconciliation (M5): `<For key={(t) => t}>` / `v-for … :key="t"` — identity keys on both legs, `plan_keyed` LIS-stable moves in the generated unit |
 | `for-list` | `<For>` mount over a list signal |
 | `list-component` | per-item component identity in keyed lists (M13): a `<Badge count={t} />` inside a keyed `<For>`/`v-for` body — the generated `Vec<Option<Badge>>` store mirrors the keyed plan (inserts build + attach into the item's hole, removes dispose, moves reposition the same instance), and the per-item replay drives each instance's props |
