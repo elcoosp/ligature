@@ -6,6 +6,41 @@ use lig_ir::ViewModule;
 use lig_ir::expr::{BinOp, Expr, Lit, TplPart, UnOp};
 use quote::quote;
 
+/// Where state reads render (M15): component methods and run arms read
+/// through `self`; the per-item replay's associated fns read the pre-cloned
+/// `s_<field>` params (they run while `self.frag` is mutably borrowed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StateRecv {
+    /// `self.<field>` (the default — byte-identical to the pre-M15 shape).
+    SelfField,
+    /// The `s_<field>` params of the per-item replay fns.
+    SParams,
+}
+
+/// The expression-generation context (M15): the list-item scope's
+/// item/index substitution plus the state-read discipline. The default
+/// ([`CTX_SELF`]) reproduces the pre-M15 rendering byte-for-byte.
+#[derive(Debug, Clone, Copy)]
+pub struct ExprCtx {
+    /// The list-item scope: `(item, index)` local ids — `Local` reads of
+    /// either render as the per-item fn's `item`/`index` params; any other
+    /// local is denied (fail-closed, the pre-M15 item-expr contract).
+    pub item_scope: Option<(StrId, Option<StrId>)>,
+    /// Whether `Local(item)` reads clone per reference (handler bodies may
+    /// read the item more than once; the replay's single-use shapes move).
+    pub clone_item: bool,
+    /// The state-read discipline of the enclosing fn.
+    pub state_recv: StateRecv,
+}
+
+/// The default context: component methods and run arms (`self.` receiver,
+/// no item scope).
+pub const CTX_SELF: ExprCtx = ExprCtx {
+    item_scope: None,
+    clone_item: false,
+    state_recv: StateRecv::SelfField,
+};
+
 /// Value kind of an expression, for apply-fn signatures.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ValueKind {
@@ -69,27 +104,68 @@ pub fn gen_expr(
     module: &ViewModule,
     id: lig_core::id::ExprId,
 ) -> Result<proc_macro2::TokenStream, crate::CodegenError> {
+    gen_expr_ctx(module, id, &CTX_SELF)
+}
+
+/// [`gen_expr`] under an explicit context (M15): the item/index substitution
+/// and the state-read discipline of list-item fns.
+pub fn gen_expr_ctx(
+    module: &ViewModule,
+    id: lig_core::id::ExprId,
+    ctx: &ExprCtx,
+) -> Result<proc_macro2::TokenStream, crate::CodegenError> {
     let expr = module.exprs.get(id);
-    gen_expr_value(module, expr)
+    gen_expr_value(module, expr, ctx)
 }
 
 fn gen_expr_value(
     module: &ViewModule,
     expr: &Expr,
+    ctx: &ExprCtx,
 ) -> Result<proc_macro2::TokenStream, crate::CodegenError> {
     Ok(match expr {
         Expr::Lit(lit) => gen_lit(module, lit),
         Expr::Local(name) => {
-            let n = ident_of(module, *name);
-            quote!(#n)
+            if let Some((item, index)) = ctx.item_scope {
+                if *name == item {
+                    if ctx.clone_item {
+                        quote!(item.clone())
+                    } else {
+                        quote!(item)
+                    }
+                } else if index.is_some_and(|ix| ix == *name) {
+                    quote!(index)
+                } else {
+                    return Err(crate::CodegenError::Unsupported(
+                        "locals other than the item/index bindings are not admitted in list item bodies (v1)",
+                    ));
+                }
+            } else {
+                let n = ident_of(module, *name);
+                quote!(#n)
+            }
         }
-        Expr::State(name) => {
-            let n = ident_of(module, *name);
-            quote!(self.#n)
-        }
+        Expr::State(name) => match ctx.state_recv {
+            StateRecv::SelfField => {
+                let n = ident_of(module, *name);
+                quote!(self.#n)
+            }
+            StateRecv::SParams => {
+                let pname = syn::Ident::new(
+                    &format!("s_{}", crate::sanitize(module.strings.get(*name))),
+                    proc_macro2::Span::call_site(),
+                );
+                quote!(#pname)
+            }
+        },
         Expr::Event(field) => {
             // Event payloads live on the component's `ev` slot (§6.1); reads
             // produce an owned String (deref-coerces at `&str` use sites).
+            if ctx.state_recv == StateRecv::SParams {
+                return Err(crate::CodegenError::Unsupported(
+                    "event-field reads inside list item binds are not admitted in v1",
+                ));
+            }
             let f = syn::Ident::new(field.rust_field(), proc_macro2::Span::call_site());
             quote!(self.ev.#f.clone().unwrap_or_default())
         }
@@ -107,16 +183,16 @@ fn gen_expr_value(
                 .iter()
                 .map(|i| match i {
                     Expr::Lit(Lit::Str(_)) => {
-                        let v = gen_expr_value(module, i)?;
+                        let v = gen_expr_value(module, i, ctx)?;
                         Ok(quote!(::alloc::string::String::from(#v)))
                     }
-                    other => gen_expr_value(module, other),
+                    other => gen_expr_value(module, other, ctx),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             quote!(::alloc::vec![#(#elems),*])
         }
         Expr::Field(inner, f) => {
-            let obj = gen_expr_value(module, inner)?;
+            let obj = gen_expr_value(module, inner, ctx)?;
             if module.strings.get(*f) == "length" {
                 quote!((#obj .len() as i64))
             } else {
@@ -125,27 +201,27 @@ fn gen_expr_value(
             }
         }
         Expr::Index(a, b) => {
-            let obj = gen_expr_value(module, a)?;
-            let idx = gen_expr_value(module, b)?;
+            let obj = gen_expr_value(module, a, ctx)?;
+            let idx = gen_expr_value(module, b, ctx)?;
             quote!((#obj [#idx as usize]))
         }
         Expr::Unary(op, inner) => {
-            let v = gen_expr_value(module, inner)?;
+            let v = gen_expr_value(module, inner, ctx)?;
             match op {
                 UnOp::Neg => quote!((-#v)),
                 UnOp::Not => quote!((!#v)),
             }
         }
         Expr::Binary(op, a, b) => {
-            let l = gen_expr_value(module, a)?;
-            let r = gen_expr_value(module, b)?;
+            let l = gen_expr_value(module, a, ctx)?;
+            let r = gen_expr_value(module, b, ctx)?;
             let op_tok = binop(*op);
             quote!((#l #op_tok #r))
         }
         Expr::Ternary(c, a, b) => {
-            let cv = gen_expr_value(module, c)?;
-            let av = gen_expr_value(module, a)?;
-            let bv = gen_expr_value(module, b)?;
+            let cv = gen_expr_value(module, c, ctx)?;
+            let av = gen_expr_value(module, a, ctx)?;
+            let bv = gen_expr_value(module, b, ctx)?;
             quote!(if #cv { #av } else { #bv })
         }
         Expr::Tpl(parts) => {
@@ -156,7 +232,7 @@ fn gen_expr_value(
                     TplPart::Text(s) => fmt.push_str(module.strings.get(*s)),
                     TplPart::Hole(h) => {
                         fmt.push_str("{}");
-                        args.push(gen_expr_value(module, h)?);
+                        args.push(gen_expr_value(module, h, ctx)?);
                     }
                 }
             }
@@ -171,12 +247,17 @@ fn gen_expr_value(
             let name = module.strings.get(decl.name).to_string();
             let call_args = args
                 .iter()
-                .map(|a| gen_expr_value(module, a))
+                .map(|a| gen_expr_value(module, a, ctx))
                 .collect::<Result<Vec<_>, _>>()?;
             match decl.kind {
                 lig_ir::expr::PureFnKind::ModelFn { target } => {
                     // setCount(x) → self.set_count(x) (target explicit, §6.3);
                     // string literals coerce to the setter's String parameter.
+                    if ctx.state_recv == StateRecv::SParams {
+                        return Err(crate::CodegenError::Unsupported(
+                            "setter calls inside list item binds are not admitted in v1",
+                        ));
+                    }
                     let setter = syn::Ident::new(
                         &format!("set_{}", raw_ident(module.strings.get(target))),
                         proc_macro2::Span::call_site(),
