@@ -603,18 +603,14 @@ export function Badge({ count }) {
     );
 }
 
-/// The M10/M13 own-tree contract (Solid leg): OUTLETS inside FOR bodies of
-/// the component's OWN template still deny with one precise reason (per-item
-/// slot assembly remains the keyed-component follow-up for outlets) —
-/// closing the silent fail-open where the item template lowered with a
-/// never-mounted outlet hole. Component uses admit since M13 (per-item
-/// instance identity). If branches admit (the per-mount identity story).
+/// The M14 lift (Solid leg): slot outlets admit DIRECTLY on FOR bodies of
+/// the component's own template — per-item slot assembly: every live item
+/// mounts the outlet's own fallback into the item's outlet hole, and the
+/// per-item replay drives the fallback's item-bound binds. Component uses
+/// admit since M13 (per-item instance identity).
 #[test]
-fn own_tree_for_bodies_deny_outlets() {
-    let cases: [(&str, &str); 1] = [
-        // Outlet inside a For body of the component's own template
-        (
-            r#"import { For } from "solid-js";
+fn own_tree_for_bodies_admit_outlets() {
+    let src = r#"import { For } from "solid-js";
 export function Inner({ items }) {
   return (
     <ul>
@@ -622,23 +618,58 @@ export function Inner({ items }) {
     </ul>
   );
 }
-"#,
-            "Outlet in own-tree list",
-        ),
-    ];
-    for (src, what) in cases {
-        match lig_parse_solid::lower_module(src, "own_list.tsx") {
-            Ok(_) => panic!("{what}: expected LIG-E001, got success"),
-            Err(diags) => {
-                assert!(
-                    diags.iter().any(|d| d.code == "LIG-E001"),
-                    "{what}: expected LIG-E001, got {diags:?}"
-                );
-                assert!(
-                    diags.iter().any(|d| d.message.contains("per-item")),
-                    "{what}: expected the per-item reason, got {diags:?}"
-                );
-            }
+"#;
+    let m = lig_parse_solid::lower_module(src, "own_list.tsx").unwrap_or_else(|diags| {
+        panic!("outlet in own-tree list body: expected admission, got {diags:?}")
+    });
+    let v = lig_ir::validate::validate(&m);
+    assert!(v.is_empty(), "invariants must hold: {v:?}");
+    assert!(
+        m.fragments
+            .iter()
+            .any(|f| f.dynamics.iter().any(|d| matches!(
+                &d.kind,
+                lig_ir::DynamicKind::Slot {
+                    fallback: Some(_),
+                    ..
+                }
+            ))),
+        "the item template carries the outlet with its fallback"
+    );
+}
+
+/// The M14 boundary (Solid leg): an outlet inside a BRANCH hanging on a
+/// list body keeps the sticky `in_for` denial — per-item slot assembly
+/// covers the DIRECT item-body outlet; branch-in-item slot composition is
+/// the follow-up.
+#[test]
+fn own_tree_item_branches_still_deny_outlets() {
+    let src = r#"import { For } from "solid-js";
+export function Inner({ items }) {
+  return (
+    <ul>
+      <For each={items()}>
+        {(item) => (
+          <Show when={true}>
+            <Slot name="a"><em>{item}</em></Slot>
+          </Show>
+        )}
+      </For>
+    </ul>
+  );
+}
+"#;
+    match lig_parse_solid::lower_module(src, "branch_outlet_list.tsx") {
+        Ok(_) => panic!("outlet in a list-item branch: expected LIG-E001, got success"),
+        Err(diags) => {
+            assert!(
+                diags.iter().any(|d| d.code == "LIG-E001"),
+                "the sticky in-for contract fires: {diags:?}"
+            );
+            assert!(
+                diags.iter().any(|d| d.message.contains("branch")),
+                "the branch-in-item reason: {diags:?}"
+            );
         }
     }
 }
