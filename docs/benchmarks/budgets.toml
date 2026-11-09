@@ -165,3 +165,12 @@ name = "session_compile_counter"
 metric = "time"
 budget = 3500.0
 note = "M16 reference median 691 µs (session/compile-counter bench, release, Linux x86_64); ≈5.1× headroom"
+
+# M18: the composed-content module — the fill-carried composed reconcile,
+# the per-mount fill assembly in the mounting arm, the receiver-guarded ctx
+# unwraps, and the per-item fire fn ride generate_module.
+[[budget]]
+name = "codegen_for_composed_content"
+metric = "time"
+budget = 6500.0
+note = "M18 reference median 1251 µs (codegen/for-composed-content bench, release, Linux x86_64, re-measured 1152-1251 across three runs); ≈5.2× headroom"
