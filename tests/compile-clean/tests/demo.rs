@@ -3,8 +3,8 @@
 //! compile-clean fixture run end-to-end.
 
 use compile_clean::{
-    component_use, counter, dynamic_style, effect_multi, event_object, for_event,
-    for_event_composed, for_keyed, for_list, list_component, list_slot, show_else,
+    component_use, counter, dynamic_style, effect_multi, event_object, for_composed_content,
+    for_event, for_event_composed, for_keyed, for_list, list_component, list_slot, show_else,
     slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic, slots_named,
     slots_nested, slots_structural, template_ref, v_model,
 };
@@ -985,4 +985,111 @@ fn composed_list_events_dispatch_per_item() {
     lig_runtime::flush(&mut app, &mut h);
     app.fire_f2_d0(&mut h, 1, &EvData::new());
     assert_eq!(app.picked, "beta", "a stale index is a no-op, not a panic");
+}
+
+/// The M18 composed-content owner-direct lift, end to end: a fill carried
+/// into a branch-mounted child (`Cell`) holds a keyed list whose body
+/// carries BOTH the per-item handler and the per-item outlet. The fill
+/// mounts into the fresh instance at branch mount (the M10 identity cycle,
+/// completed by the M18 mounting-arm assembly), the handler attaches per
+/// fresh item through the composed reconcile's insert arms (M17 machinery,
+/// the content leg), the outlet's own fallback mounts per item through the
+/// shared replay (M14 machinery, through any receiver), keyed moves carry
+/// the handler records and the mounted content without rebuilds, removals
+/// dispose with the item's slab, and the branch cycle rebuilds everything
+/// per mount.
+#[test]
+fn composed_content_lists_carry_events_and_slots_per_item() {
+    let mut h = MockHost::new();
+    let mut app = for_composed_content::PickList::build(
+        &mut h,
+        for_composed_content::PickListProps::default(),
+    );
+    let attaches = |h: &MockHost| {
+        h.commits
+            .iter()
+            .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
+            .count()
+    };
+    // The branch mounted at build; the fill mounted INTO the fresh instance.
+    let cell = app.cell.as_ref().expect("the branch mounted the instance");
+    let fill = cell.frag.slot_fill(0).expect("the fill mounted at mount");
+    assert_eq!(
+        fill.list_len(0),
+        2,
+        "alpha/beta mounted in the content list"
+    );
+
+    // One attach per live item, and one mounted fallback per item bound to
+    // its item by the replay.
+    assert_eq!(attaches(&h), 2, "one attach per live item at mount");
+    let alpha_fb = fill
+        .list_item(0, 0)
+        .and_then(|f| f.slot_fallback(1))
+        .expect("row 0 fallback mounted");
+    let beta_fb = fill
+        .list_item(0, 1)
+        .and_then(|f| f.slot_fallback(1))
+        .expect("row 1 fallback mounted");
+    let alpha_node = alpha_fb.hole(0);
+    assert_eq!(h.text_of(alpha_node), Some("alpha"), "item bind by replay");
+    assert_eq!(h.text_of(beta_fb.hole(0)), Some("beta"));
+
+    // Dispatch: index-addressed through the source, exactly like the direct
+    // and branch-owned composed lists (M15/M17).
+    app.fire_f4_d0(&mut h, 0, &EvData::new());
+    assert_eq!(app.picked, "alpha", "item 0's handler picked alpha");
+    app.fire_f4_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "beta", "item 1's handler picked beta");
+
+    // A keyed rotation moves the SAME slabs (handler records + mounted
+    // fallbacks) without re-attaching or rebuilding.
+    let before = attaches(&h);
+    app.set_rows(vec!["beta".into(), "alpha".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    let cell = app.cell.as_ref().expect("the branch survives the rotation");
+    let fill = cell.frag.slot_fill(0).expect("the fill survives");
+    assert_eq!(
+        fill.list_item(0, 1)
+            .and_then(|f| f.slot_fallback(1))
+            .map(|f| f.hole(0)),
+        Some(alpha_node),
+        "the LIS-stable item kept its slab and its mounted fallback"
+    );
+    assert_eq!(attaches(&h), before, "a keyed move re-attaches nothing");
+    app.fire_f4_d0(&mut h, 0, &EvData::new());
+    assert_eq!(app.picked, "beta", "live index 0 is now beta");
+
+    // The branch cycle: unmounting disposes the instance (the fill content,
+    // the items, the records go with it), remounting rebuilds everything —
+    // the fill mounts into the FRESH instance, the mount mark re-runs the
+    // list's reconcile, and fresh records attach per fresh item.
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(app.cell.is_none(), "the unmount disposed the instance");
+    app.set_on(true);
+    lig_runtime::flush(&mut app, &mut h);
+    let cell = app.cell.as_ref().expect("the remount rebuilt the instance");
+    let fill = cell.frag.slot_fill(0).expect("the fill remounted");
+    assert_eq!(fill.list_len(0), 2, "the remounted list refilled");
+    assert_eq!(
+        attaches(&h),
+        before + 2,
+        "the remount attached one record per fresh item"
+    );
+    assert_ne!(
+        fill.list_item(0, 0)
+            .and_then(|f| f.slot_fallback(1))
+            .map(|f| f.hole(0)),
+        Some(alpha_node),
+        "a remounted branch rebuilds fresh slabs"
+    );
+    app.fire_f4_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "alpha", "the remounted item dispatches");
+
+    // A stale index stays a no-op (source-addressed, never a panic).
+    app.set_rows(vec!["alpha".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    app.fire_f4_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "alpha", "a stale index is a no-op, not a panic");
 }
