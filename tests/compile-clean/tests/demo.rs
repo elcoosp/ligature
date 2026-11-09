@@ -4,11 +4,12 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    list_component, show_else, slots_branch_component, slots_branch_outlet, slots_component,
-    slots_dynamic, slots_named, slots_nested, slots_structural, template_ref, v_model,
+    list_component, list_slot, show_else, slots_branch_component, slots_branch_outlet,
+    slots_component, slots_dynamic, slots_named, slots_nested, slots_structural, template_ref,
+    v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
-use mock_host::MockHost;
+use mock_host::{Commit, MockHost};
 
 /// The M8 structural-slot-content contract, end to end: a fill carries an If
 /// branch (its bind initializes at build AND re-initializes on every late
@@ -553,6 +554,100 @@ fn list_components_carry_per_item_identity() {
         "a new key builds a new instance, not the disposed one"
     );
     assert_eq!(h.text_of(gamma.frag.hole(0)), Some("gamma"));
+}
+
+/// The M14 per-item slot assembly, end to end: a slot outlet DIRECTLY on a
+/// keyed For body mounts its own fallback into EVERY live item's outlet
+/// hole (the per-item replay mounts idempotently and drives the fallback's
+/// item-bound bind) — keyed rotations move the SAME mounted content without
+/// rebuilding it (the item's `Fragment` carries its slot table), removals
+/// dispose the content with the item (teardown recurses into slots), and
+/// fresh keys build fresh content.
+#[test]
+fn list_slots_mount_their_fallback_per_item() {
+    let mut h = MockHost::new();
+    let mut app = list_slot::App::build(&mut h, list_slot::AppProps::default());
+    // Two items → two mounted fallbacks, each bound to its item by the replay.
+    assert_eq!(app.frag.list_len(0), 2, "alpha/beta mounted");
+    let alpha_fb = app
+        .frag
+        .list_item(0, 0)
+        .and_then(|f| f.slot_fallback(0))
+        .expect("row 0 fallback mounted");
+    let beta_fb = app
+        .frag
+        .list_item(0, 1)
+        .and_then(|f| f.slot_fallback(0))
+        .expect("row 1 fallback mounted");
+    let alpha_node = alpha_fb.hole(0);
+    let beta_node = beta_fb.hole(0);
+    assert_eq!(
+        h.text_of(alpha_node),
+        Some("alpha"),
+        "the fallback bind initialized through the replay"
+    );
+    assert_eq!(h.text_of(beta_node), Some("beta"));
+
+    // A keyed rotate MOVES the mounted content without rebuilding it: the
+    // same node handles reappear at the new positions (a rebuild would
+    // carry fresh instance-seq NodeIds).
+    app.set_rows(vec!["beta".into(), "alpha".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.frag.list_len(0), 2, "a keyed move rebuilds nothing");
+    let moved_beta = app
+        .frag
+        .list_item(0, 0)
+        .and_then(|f| f.slot_fallback(0))
+        .expect("beta at 0");
+    let stable_alpha = app
+        .frag
+        .list_item(0, 1)
+        .and_then(|f| f.slot_fallback(0))
+        .expect("alpha at 1");
+    assert_eq!(
+        moved_beta.hole(0),
+        beta_node,
+        "the moved item kept its mounted content"
+    );
+    assert_eq!(
+        stable_alpha.hole(0),
+        alpha_node,
+        "the LIS-stable item kept its content"
+    );
+    assert_eq!(
+        h.text_of(beta_node),
+        Some("beta"),
+        "the moved content still renders at its new position"
+    );
+
+    // A removal disposes the item AND its mounted content: teardown
+    // recurses into the item's slot table, so the removed content's nodes
+    // leave the host.
+    app.set_rows(vec!["beta".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.frag.list_len(0), 1, "the removed item is gone");
+    assert!(
+        h.commits
+            .iter()
+            .any(|c| matches!(c, Commit::Destroy { node } if *node == alpha_node)),
+        "the removed item's mounted content was torn down"
+    );
+
+    // A fresh key builds FRESH content (a new node handle) with its bind
+    // driven by the replay.
+    app.set_rows(vec!["beta".into(), "gamma".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    let fresh = app
+        .frag
+        .list_item(0, 1)
+        .and_then(|f| f.slot_fallback(0))
+        .expect("fresh gamma content");
+    assert_ne!(
+        fresh.hole(0),
+        alpha_node,
+        "a new key builds new content, not the disposed one"
+    );
+    assert_eq!(h.text_of(fresh.hole(0)), Some("gamma"));
 }
 
 /// The M10 branch-time slot assembly, end to end: an outlet inside a branch
