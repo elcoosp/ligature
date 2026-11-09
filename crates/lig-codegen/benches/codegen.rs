@@ -105,6 +105,22 @@ fn bench_codegen_list_slot(c: &mut Criterion) {
     });
 }
 
+/// Lower the for-event fixture once (M15: per-item event dispatch — the
+/// index-addressed fire fns with the item-substituted handler bodies, the
+/// per-item attach arms in both plans' insert paths, and the run-dispatch
+/// filtering ride the module pipeline), then time repeated codegen of the
+/// same IR.
+fn bench_codegen_for_event(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/for-event/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "for-event.tsx").expect("fixture lowers");
+    c.bench_function("codegen/for-event", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("for-event codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
@@ -113,6 +129,7 @@ criterion_group!(
     bench_codegen_ref,
     bench_codegen_else,
     bench_codegen_list_component,
-    bench_codegen_list_slot
+    bench_codegen_list_slot,
+    bench_codegen_for_event
 );
 criterion_main!(benches);
