@@ -655,6 +655,129 @@ export function Badge({ count }) {
 }
 
 #[test]
+fn list_body_outlets_mount_their_fallback_per_item() {
+    // M14 per-item slot assembly: a slot outlet on a For-body fragment
+    // mounts its OWN fallback into every live item's outlet hole — the
+    // per-item replay mounts idempotently (an already-mounted item skips)
+    // and applies the fallback's item-bound binds to the mounted content.
+    let src = r#"import { For } from "solid-js";
+export function Inner() {
+  const [items, setItems] = createSignal(["alpha"]);
+  return (
+    <ul>
+      <For each={items()}>{(item) => <Slot name="a"><em>{item}</em></Slot>}</For>
+    </ul>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "listslot.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    assert!(
+        text.contains("f.mount_slot("),
+        "the item replay mounts the fallback into the item's outlet hole: {text}"
+    );
+    assert!(
+        text.contains("::lig_runtime::SlotOrigin::Fallback"),
+        "the per-item mount origin is the outlet's own fallback: {text}"
+    );
+    assert!(
+        text.contains("slot_fallback_mut("),
+        "the fallback binds address the mounted content: {text}"
+    );
+    assert!(
+        text.contains("c.set_text(h, 0usize, &(item))"),
+        "the fallback's item-bound bind substitutes the item: {text}"
+    );
+}
+
+#[test]
+fn list_body_outlet_state_reads_stay_fail_closed() {
+    // M14 boundary: the per-item fallback's binds may read the item/index
+    // only — a state read would need the flush fan-out over live items
+    // (one reaction, N items), which is the follow-up.
+    let src = r#"import { For } from "solid-js";
+export function Inner() {
+  const [rows, setRows] = createSignal(["a"]);
+  const [tag, setTag] = createSignal("x");
+  return (
+    <ul>
+      <For each={rows()}>{(item) => <Slot name="a"><em>{tag}</em></Slot>}</For>
+    </ul>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "listslot_state.tsx").expect("lower");
+    let err = lig_codegen::generate_module(&module)
+        .expect_err("state-reading per-item fallback binds stay denied");
+    assert!(
+        err.to_string().contains("per-item slot content"),
+        "the precise reason names the fan-out follow-up: {err}"
+    );
+}
+
+#[test]
+fn list_body_outlet_fills_stay_fail_closed() {
+    // M14 boundary: a use-site fill for a child's list-body outlet names no
+    // outlet the parent's init walk can reach (items do not exist at build
+    // time) — the M9 unmatched-fill backstop keeps it fail-closed; the
+    // cross-component fill coordination is the follow-up.
+    let src = r#"import { For } from "solid-js";
+export function App() {
+  return (
+    <Panel row={<b>filled</b>} />
+  );
+}
+
+export function Panel() {
+  const [items, setItems] = createSignal(["a"]);
+  return (
+    <ul>
+      <For each={items()} key={(item) => item}>{(item) => <Slot name="row" />}</For>
+    </ul>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "listslot_fill.tsx").expect("lower");
+    let err = lig_codegen::generate_module(&module)
+        .expect_err("fills for list-body outlets never mount — fail-closed");
+    assert!(
+        err.to_string().contains("the fill would never mount"),
+        "the unmatched-fill backstop fires: {err}"
+    );
+}
+
+#[test]
+fn list_body_slot_content_stays_scalar() {
+    // M14 boundary: per-item slot content admits scalar binds only —
+    // events/refs/structural content inside it keeps the codegen backstop
+    // (per-item dispatch and refs need the keyed-component follow-ups).
+    let src = r#"import { For } from "solid-js";
+export function Inner() {
+  const [items, setItems] = createSignal(["alpha"]);
+  const [tag, setTag] = createSignal("x");
+  return (
+    <ul>
+      <For each={items()}>
+        {(item) => (
+          <Slot name="a">
+            <em onClick={() => setTag("y")}>{item}</em>
+          </Slot>
+        )}
+      </For>
+    </ul>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "listslot_event.tsx").expect("lower");
+    let err = lig_codegen::generate_module(&module)
+        .expect_err("events inside per-item slot content stay denied");
+    assert!(
+        err.to_string().contains("per-item slot content"),
+        "the precise reason: {err}"
+    );
+}
+
+#[test]
 fn list_body_components_in_branches_stay_fail_closed() {
     // M13 boundary: a component use inside a BRANCH hanging on a list body
     // keeps the per-mount backstop (per-item identity covers the DIRECT
