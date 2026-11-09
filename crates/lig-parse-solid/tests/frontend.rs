@@ -446,32 +446,15 @@ export function Panel({ title }) {
     );
 }
 
-/// The M10 fail-closed boundary (Solid leg): component uses and nested
-/// outlets inside LIST bodies of content stay denied with LIG-E001 —
-/// per-item instance identity remains the keyed-component story. The
-/// BRANCH cases M9 denied admit since M10 (per-mount identity + the
-/// branch-time slot assembly).
+/// The M13 boundary (Solid leg): nested outlets inside LIST bodies of
+/// content stay denied with LIG-E001 — per-item slot assembly remains the
+/// keyed-component follow-up for OUTLETS. Component uses in list bodies
+/// admit since M13 (per-item instance identity). The BRANCH cases M9
+/// denied admit since M10 (per-mount identity + the branch-time slot
+/// assembly).
 #[test]
 fn slot_content_stays_fail_closed_on_structural_instances() {
-    let cases: [(&str, &str); 2] = [
-        // Component use inside a For body on content
-        (
-            r#"import { For } from "solid-js";
-export function App() {
-  return (
-    <Panel
-      title="x"
-      header={<For each={["a"]}>{(t) => <Badge count={1} />}</For>}
-    />
-  );
-}
-
-export function Badge({ count }) {
-  return <b>{count}</b>;
-}
-"#,
-            "Component in content list",
-        ),
+    let cases: [(&str, &str); 1] = [
         // Nested outlet inside a For body on content
         (
             r#"import { For } from "solid-js";
@@ -549,15 +532,86 @@ export function Badge({ count }) {
     }
 }
 
-/// The M10 own-tree contract (Solid leg): component uses and outlets inside
-/// FOR bodies of the component's OWN template deny with one precise reason
-/// (per-item identity is the keyed-component story) — closing two silent
-/// fail-opens where the item template lowered with a never-mounted outlet
-/// hole and a single detached component instance. If branches admit (the
-/// per-mount identity story).
+/// The M13 lift (Solid leg): component uses admit inside For bodies of slot
+/// content — each keyed item carries its own component instance (M13
+/// per-item instance identity). The outlet case stays denied (per-item slot
+/// assembly remains the follow-up).
 #[test]
-fn own_tree_for_bodies_deny_components_and_outlets() {
-    let cases: [(&str, &str); 2] = [
+fn content_list_bodies_admit_components() {
+    let body = r#"import { For } from "solid-js";
+export function App() {
+  const [rows, setRows] = createSignal(["alpha", "beta"]);
+  return (
+    <Panel
+      title="x"
+      header={<For each={rows()} key={(t) => t}>{(t) => <Badge count={t} />}</For>}
+    />
+  );
+}
+
+export function Badge({ count }) {
+  return <b>{count}</b>;
+}
+"#;
+    let src = format!(
+        "{body}\nexport function Panel({{ title }}) {{\n  return <section><Slot name=\"foot\" /></section>;\n}}\n"
+    );
+    let m = lig_parse_solid::lower_module(&src, "content_list.tsx").unwrap_or_else(|diags| {
+        panic!("component in content list body: expected admission, got {diags:?}")
+    });
+    let v = lig_ir::validate::validate(&m);
+    assert!(v.is_empty(), "invariants must hold: {v:?}");
+    assert!(
+        m.fragments.iter().any(|f| f
+            .dynamics
+            .iter()
+            .any(|d| matches!(d.kind, lig_ir::DynamicKind::Component(_)))),
+        "the item template carries the component use"
+    );
+}
+
+/// The M13 own-tree lift (Solid leg): component uses admit inside FOR bodies
+/// of the component's OWN template — per-item instance identity (the M13
+/// keyed-component story): each live item owns its instance, the keyed plan
+/// builds/disposes/moves it, and the per-item replay drives its props.
+#[test]
+fn own_tree_for_bodies_admit_components() {
+    let src = r#"import { For } from "solid-js";
+export function App({ items }) {
+  return (
+    <main>
+      <For each={items()} key={(t) => t}>{(t) => <Badge count={t} />}</For>
+    </main>
+  );
+}
+
+export function Badge({ count }) {
+  return <b>{count}</b>;
+}
+"#;
+    let m = lig_parse_solid::lower_module(src, "own_list.tsx").unwrap_or_else(|diags| {
+        panic!("component in own-tree list body: expected admission, got {diags:?}")
+    });
+    let v = lig_ir::validate::validate(&m);
+    assert!(v.is_empty(), "invariants must hold: {v:?}");
+    assert!(
+        m.fragments.iter().any(|f| f
+            .dynamics
+            .iter()
+            .any(|d| matches!(d.kind, lig_ir::DynamicKind::Component(_)))),
+        "the item template carries the component use"
+    );
+}
+
+/// The M10/M13 own-tree contract (Solid leg): OUTLETS inside FOR bodies of
+/// the component's OWN template still deny with one precise reason (per-item
+/// slot assembly remains the keyed-component follow-up for outlets) —
+/// closing the silent fail-open where the item template lowered with a
+/// never-mounted outlet hole. Component uses admit since M13 (per-item
+/// instance identity). If branches admit (the per-mount identity story).
+#[test]
+fn own_tree_for_bodies_deny_outlets() {
+    let cases: [(&str, &str); 1] = [
         // Outlet inside a For body of the component's own template
         (
             r#"import { For } from "solid-js";
@@ -570,23 +624,6 @@ export function Inner({ items }) {
 }
 "#,
             "Outlet in own-tree list",
-        ),
-        // Component use inside a For body of the component's own template
-        (
-            r#"import { For } from "solid-js";
-export function App({ items }) {
-  return (
-    <main>
-      <For each={items()}>{(item) => <Badge count={item} />}</For>
-    </main>
-  );
-}
-
-export function Badge({ count }) {
-  return <b>{count}</b>;
-}
-"#,
-            "Component in own-tree list",
         ),
     ];
     for (src, what) in cases {

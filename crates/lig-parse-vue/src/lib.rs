@@ -109,28 +109,37 @@ pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagn
     Ok(module)
 }
 
-/// The M10 own-tree contract (mirrors the Solid leg): component uses and
-/// slot outlets inside v-for bodies of a component's own template deny with
-/// one precise reason. Before M10 both lowered silently broken: the item
-/// template carried a never-mounted outlet hole, and a v-for body carrying
-/// a component use built ONE eager instance field shared by every item, its
-/// root never attached. v-if branches admit (per-mount identity).
+/// The M10/M13 own-tree contract (mirrors the Solid leg): slot outlets
+/// inside v-for bodies of a component's own template deny with one precise
+/// reason (per-item slot assembly is still the keyed-component follow-up
+/// for outlets). Before M10 the outlet lowered silently broken: the item
+/// template carried a never-mounted outlet hole. Component uses admit since
+/// M13 — per-item instance identity: the generated reconcile mirrors the
+/// keyed plan onto a `Vec<Option<Child>>` instance store (build+attach on
+/// insert, teardown on remove, reposition on move), so each live item owns
+/// its instance — DIRECT item-body uses only. Component uses inside
+/// list-body v-if branches stay denied (the sticky `in_for` discipline:
+/// an If inside a list item is still per-item, and the branch-context
+/// composition is the follow-up). v-if branches outside lists admit
+/// (per-mount identity).
 fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigDiagnostic>) {
-    let mut stack = vec![(root, false)];
-    while let Some((frag_id, in_for)) = stack.pop() {
+    // The walk state: `(fragment, in_for, item_branch)` — see the Solid
+    // leg's [`own_tree_contract`] for the sticky discipline.
+    let mut stack = vec![(root, false, false)];
+    while let Some((frag_id, in_for, item_branch)) = stack.pop() {
         let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
             continue;
         };
         for d in &frag.dynamics {
-            let why = match (&d.kind, in_for) {
-                (DynamicKind::Component(_), true) => Some(
-                    "component uses inside list item bodies are not admitted — per-item \
-                          instance identity is the keyed-component story (hoist the use out of \
-                          the body)",
+            let why = match (&d.kind, in_for, item_branch) {
+                (DynamicKind::Component(_), _, true) => Some(
+                    "component uses inside list item branches are not admitted — per-item \
+                          instance identity covers the direct item-body use; branch-in-item \
+                          composition is the follow-up (hoist the use out of the body)",
                 ),
-                (DynamicKind::Slot { .. }, true) => Some(
+                (DynamicKind::Slot { .. }, true, _) => Some(
                     "slot outlets inside list item bodies are not admitted — per-item slot \
-                          assembly is the keyed-component story (hoist the outlet out of the \
+                          assembly is the keyed-component follow-up (hoist the outlet out of the \
                           body)",
                 ),
                 _ => None,
@@ -145,17 +154,17 @@ fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigD
             }
             match &d.kind {
                 DynamicKind::If(i) => {
-                    stack.push((i.then, in_for));
+                    stack.push((i.then, in_for, item_branch || in_for));
                     if let Some(el) = i.else_ {
-                        stack.push((el, in_for));
+                        stack.push((el, in_for, item_branch || in_for));
                     }
                 }
-                DynamicKind::For(fo) => stack.push((fo.body, true)),
+                DynamicKind::For(fo) => stack.push((fo.body, true, false)),
                 _ => {}
             }
         }
         for &c in &frag.children {
-            stack.push((c, in_for));
+            stack.push((c, in_for, item_branch));
         }
     }
 }
@@ -2482,7 +2491,9 @@ impl ComponentLowering<'_> {
             let denied: Option<String> = match &d.kind {
                 // Scalar binds, refs, the structural constructs (M8),
                 // component uses + nested outlets on content (M9) and inside
-                // content BRANCHES (M10 — per-mount identity) are admitted.
+                // content BRANCHES (M10 — per-mount identity) and inside
+                // content LIST bodies (M13 — per-item instance identity)
+                // are admitted.
                 DynamicKind::Text
                 | DynamicKind::Html
                 | DynamicKind::Attr { .. }
@@ -2490,21 +2501,16 @@ impl ComponentLowering<'_> {
                 | DynamicKind::StyleProp { .. }
                 | DynamicKind::Ref
                 | DynamicKind::If(_)
-                | DynamicKind::For(_) => None,
+                | DynamicKind::For(_)
+                | DynamicKind::Component(_) => None,
                 DynamicKind::Event { .. } => in_list_item.then(|| {
                     "event handlers inside list item bodies are not admitted in v1 — hoist the \
                      handler to the list level (the LIG-E118 discipline)"
                         .to_string()
                 }),
-                DynamicKind::Component(_) => in_list_item.then(|| {
-                    "component uses inside list item bodies of slot content are not admitted — \
-                     per-item instance identity is the keyed-component story (hoist the use out \
-                     of the body)"
-                        .to_string()
-                }),
                 DynamicKind::Slot { .. } => in_list_item.then(|| {
                     "slot outlets inside list item bodies of slot content are not admitted — \
-                     per-item slot assembly is the keyed-component story (hoist the outlet out \
+                     per-item slot assembly is the keyed-component follow-up (hoist the outlet out \
                      of the body)"
                         .to_string()
                 }),
@@ -3264,33 +3270,15 @@ defineOptions({ name: "Panel" });
         );
     }
 
-    /// The M10 fail-closed boundary (Vue leg): component uses and nested
-    /// outlets inside LIST bodies of content stay denied with LIG-E001 —
-    /// per-item instance identity remains the keyed-component story. The
-    /// BRANCH cases M9 denied admit since M10 (per-mount identity + the
+    /// The M13 boundary (Vue leg): nested outlets inside LIST bodies of
+    /// content stay denied with LIG-E001 — per-item slot assembly remains
+    /// the keyed-component follow-up for OUTLETS. Component uses in list
+    /// bodies admit since M13 (per-item instance identity). The BRANCH
+    /// cases M9 denied admit since M10 (per-mount identity + the
     /// branch-time slot assembly).
     #[test]
     fn slot_content_stays_fail_closed_on_structural_instances() {
-        let cases: [(&str, &str); 2] = [
-            // Component use inside a v-for body on content
-            (
-                r#"<script setup lang="ts">
-defineOptions({ name: "App" });
-const rows = ref(["a"]);
-</script>
-<template>
-  <Panel title="x">
-    <template #header><Badge v-for="r in rows" :count="1" /></template>
-  </Panel>
-</template>
-<script setup lang="ts">
-defineOptions({ name: "Badge" });
-const { count } = defineProps<{ count: number }>();
-</script>
-<template><b>{{ count }}</b></template>
-"#,
-                "Component in content list",
-            ),
+        let cases: [(&str, &str); 1] = [
             // Nested outlet inside a v-for body on content
             (
                 r#"<script setup lang="ts">
@@ -3372,14 +3360,16 @@ const on = ref(true);
         }
     }
 
-    /// The M10 own-tree contract (Vue leg): component uses and outlets
-    /// inside v-for bodies of the component's OWN template deny with one
-    /// precise reason (per-item identity is the keyed-component story) —
-    /// closing two silent fail-opens where the item template lowered with a
-    /// never-mounted outlet hole and a single detached component instance.
+    /// The M10/M13 own-tree contract (Vue leg): OUTLETS inside v-for bodies
+    /// of the component's OWN template still deny with one precise reason
+    /// (per-item slot assembly remains the keyed-component follow-up for
+    /// outlets) — closing the silent fail-open where the item template
+    /// lowered with a never-mounted outlet hole. Component uses admit since
+    /// M13 (per-item instance identity). If branches admit (the per-mount
+    /// identity story).
     #[test]
-    fn own_tree_for_bodies_deny_components_and_outlets() {
-        let cases: [(&str, &str); 2] = [
+    fn own_tree_for_bodies_deny_outlets() {
+        let cases: [(&str, &str); 1] = [
             // Outlet inside a v-for body of the component's own template
             (
                 r#"<script setup lang="ts">
@@ -3393,23 +3383,6 @@ const items = ref(["a"]);
 </template>
 "#,
                 "Outlet in own-tree list",
-            ),
-            // Component use inside a v-for body of the component's own template
-            (
-                r#"<script setup lang="ts">
-defineOptions({ name: "App" });
-const items = ref(["a"]);
-</script>
-<template>
-  <main><span v-for="item in items" :key="item"><Badge :count="item" /></span></main>
-</template>
-<script setup lang="ts">
-defineOptions({ name: "Badge" });
-const { count } = defineProps<{ count: string }>();
-</script>
-<template><b>{{ count }}</b></template>
-"#,
-                "Component in own-tree list",
             ),
         ];
         for (src, what) in cases {
@@ -3427,6 +3400,78 @@ const { count } = defineProps<{ count: string }>();
                 }
             }
         }
+    }
+
+    /// The M13 own-tree lift (Vue leg): component uses admit inside v-for
+    /// bodies of the component's OWN template — per-item instance identity
+    /// (the M13 keyed-component story): each live item owns its instance,
+    /// the keyed plan builds/disposes/moves it, and the per-item replay
+    /// drives its props.
+    #[test]
+    fn own_tree_for_bodies_admit_components() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "App" });
+const items = ref(["alpha"]);
+</script>
+<template>
+  <main><Badge v-for="t in items" :key="t" :count="t" /></main>
+</template>
+<script setup lang="ts">
+defineOptions({ name: "Badge" });
+const { count } = defineProps<{ count: string }>();
+</script>
+<template><b>{{ count }}</b></template>
+"#;
+        let m = lower_module(src, "own_list.vue").unwrap_or_else(|diags| {
+            panic!("component in own-tree list body: expected admission, got {diags:?}")
+        });
+        let v = lig_ir::validate::validate(&m);
+        assert!(v.is_empty(), "invariants must hold: {v:?}");
+        assert!(
+            m.fragments.iter().any(|f| f
+                .dynamics
+                .iter()
+                .any(|d| matches!(d.kind, lig_ir::DynamicKind::Component(_)))),
+            "the item template carries the component use"
+        );
+    }
+
+    /// The M13 lift (Vue leg): component uses admit inside v-for bodies of
+    /// slot content — each keyed item carries its own component instance
+    /// (M13 per-item instance identity). The outlet case stays denied
+    /// (per-item slot assembly remains the follow-up).
+    #[test]
+    fn content_list_bodies_admit_components() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "App" });
+const rows = ref(["alpha"]);
+</script>
+<template>
+  <Panel title="x">
+    <template #header><span v-for="t in rows" :key="t"><Badge :count="t" /></span></template>
+  </Panel>
+</template>
+<script setup lang="ts">
+defineOptions({ name: "Badge" });
+const { count } = defineProps<{ count: string }>();
+</script>
+<template><b>{{ count }}</b></template>
+"#;
+        let src = format!(
+            "{src}\n<script setup>defineOptions({{ name: \"Panel\" }});</script>\n<template><section><slot name=\"foot\" /></section></template>\n"
+        );
+        let m = lower_module(&src, "content_list.vue").unwrap_or_else(|diags| {
+            panic!("component in content list body: expected admission, got {diags:?}")
+        });
+        let v = lig_ir::validate::validate(&m);
+        assert!(v.is_empty(), "invariants must hold: {v:?}");
+        assert!(
+            m.fragments.iter().any(|f| f
+                .dynamics
+                .iter()
+                .any(|d| matches!(d.kind, lig_ir::DynamicKind::Component(_)))),
+            "the item template carries the component use"
+        );
     }
 
     // -- M12: template refs on the Vue leg ----------------------------------

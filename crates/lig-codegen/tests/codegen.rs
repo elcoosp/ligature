@@ -581,15 +581,97 @@ fn own_branch_outlets_mount_their_fallback_at_branch_mount() {
 }
 
 #[test]
-fn list_body_component_uses_fail_closed_at_codegen() {
-    // M10 codegen backstop: a component use on a For-body fragment stays a
-    // compile error (per-item instance identity is the keyed-component
-    // story) — the frontend denies it; the backstop keeps codegen honest if
-    // the IR arrives from another frontend.
+fn list_body_components_carry_per_item_instance_identity() {
+    // M13 keyed-component story: a component use on a For-body fragment
+    // lowers to a per-item instance store — a `Vec<Option<Child>>` field
+    // mirrored against the keyed plan ops by the reconcile method (insert
+    // builds + attaches, remove takes + tears down, move repositions
+    // without rebuilding), and the per-item replay drives the child's
+    // props. The branch-context backstop (component in a branch INSIDE a
+    // list body) stays fail-closed.
     let src = r#"import { For } from "solid-js";
 export function App() {
+  const [rows, setRows] = createSignal(["alpha", "beta"]);
   return (
-    <For each={["a"]}>{(t) => <Badge count={1} />}</For>
+    <main>
+      <For each={rows()} key={(t) => t}>{(t) => <Badge count={t} />}</For>
+    </main>
+  );
+}
+
+export function Badge({ count }) {
+  return <b class="badge">{count}</b>;
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "listbody.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The per-item instance store replaces the eager field.
+    assert!(
+        text.contains("pub badge: ::alloc::vec::Vec<::core::option::Option<Badge>>"),
+        "list-body components are per-item instance stores: {text}"
+    );
+    assert!(
+        text.contains("badge: ::alloc::vec::Vec::new()"),
+        "the store starts empty (items mount on the first reconcile): {text}"
+    );
+    // Remove: take the instance, dispose its slab, then unmount the item.
+    assert!(
+        text.contains("if let Some(inst) = self.badge.remove(index) {"),
+        "the remove step takes the per-item instance: {text}"
+    );
+    assert!(
+        text.contains("inst.frag.teardown(h);"),
+        "the removed instance's slab disposes: {text}"
+    );
+    // Insert: build the instance, attach its root into the item's component
+    // hole, store it at the live index.
+    assert!(
+        text.contains("let inst = Badge::build(h, BadgeProps::default());"),
+        "the insert step builds a fresh instance: {text}"
+    );
+    assert!(
+        text.contains("self.badge.insert(index, Some(inst));"),
+        "the instance stores at the live item index: {text}"
+    );
+    assert!(
+        text.contains("h.insert(n, inst.frag.roots()[0], 0);"),
+        "the fresh root attaches at the item's component hole: {text}"
+    );
+    // Move (keyed): the instance repositions WITHOUT rebuilding.
+    assert!(
+        text.contains("let inst = self.badge.remove(from);")
+            && text.contains("self.badge.insert(to, inst);"),
+        "the move step repositions the same instance: {text}"
+    );
+    // The per-item replay drives the child's props and flushes it.
+    assert!(
+        text.contains("if let Some(c) = self.badge[i].as_mut() {"),
+        "the replay arm guards on the per-item instance: {text}"
+    );
+    assert!(
+        text.contains("::lig_runtime::flush(c, h);"),
+        "the replay flushes the child after its prop sets: {text}"
+    );
+}
+
+#[test]
+fn list_body_components_in_branches_stay_fail_closed() {
+    // M13 boundary: a component use inside a BRANCH hanging on a list body
+    // keeps the per-mount backstop (per-item identity covers the DIRECT
+    // item-body use; branch-in-item composition remains the follow-up).
+    let src = r#"import { For } from "solid-js";
+export function App() {
+  const [rows, setRows] = createSignal(["alpha"]);
+  return (
+    <main>
+      <For each={rows()}>
+        {(t) => (
+          <Show when={true}>
+            <Badge count={t} />
+          </Show>
+        )}
+      </For>
+    </main>
   );
 }
 
@@ -597,11 +679,11 @@ export function Badge({ count }) {
   return <b>{count}</b>;
 }
 "#;
-    let module = lig_parse_solid::lower_module(src, "listbody.tsx")
-        .expect_err("the frontend denies list-body component uses");
+    let err = lig_parse_solid::lower_module(src, "branch_in_list.tsx")
+        .expect_err("the frontend denies branch-context components inside list bodies");
     assert!(
-        module.iter().any(|d| d.code == "LIG-E001"),
-        "the frontend denial fires: {module:?}"
+        err.iter().any(|d| d.code == "LIG-E001"),
+        "the sticky in-for contract fires: {err:?}"
     );
 }
 
