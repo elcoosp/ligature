@@ -14,7 +14,7 @@ pub mod expr_gen;
 pub mod readability;
 pub mod template_gen;
 
-use expr_gen::{ValueKind, gen_expr, value_kind};
+use expr_gen::{ExprCtx, StateRecv, ValueKind, gen_expr, gen_expr_ctx, value_kind};
 use lig_core::id::{ComponentId, ExprId, FragmentId, StrId};
 use lig_ir::anchor::AnchorStep as IrStep;
 use lig_ir::expr::Ty;
@@ -452,8 +452,23 @@ fn generate_component_pieces(
     let mut run_arms: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut list_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut item_methods: Vec<proc_macro2::TokenStream> = Vec::new();
+    // M15: the per-item fire fns — `&mut self` methods, spliced into the
+    // impl block (the per-item analogues of the event fns).
+    let mut item_fire_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut key_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut ref_captures: Vec<(String, usize, Ctx, FragmentId)> = Vec::new();
+    // M15: For-body fragments — their event effects dispatch through the
+    // per-item fire fns, not the run dispatch (no item addressing in the
+    // flush scope, the M13 replay discipline).
+    let for_bodies: HashSet<u32> = module
+        .fragments
+        .iter()
+        .flat_map(|f| f.dynamics.iter())
+        .filter_map(|d| match &d.kind {
+            DynamicKind::For(fo) => Some(fo.body.get()),
+            _ => None,
+        })
+        .collect();
     for rx in &rxs {
         let cname = syn::Ident::new(&format!("{prefix}{}", rx.const_name), Span::call_site());
         match rx.decl.kind {
@@ -480,6 +495,12 @@ fn generate_component_pieces(
                 });
             }
             ReactionKind::Effect { .. } => {
+                // M15: a For-body event effect dispatches through the
+                // per-item fire fn — the run dispatch has no item addressing
+                // (the M13 replay discipline), so the arm is not emitted.
+                if for_bodies.contains(&rx.decl.owner.get()) {
+                    continue;
+                }
                 // event handler body: setter calls as statements
                 let body = gen_expr(module, rx.decl.body)?;
                 run_arms.push(quote! {
@@ -1115,8 +1136,16 @@ fn generate_component_pieces(
                         if for_ir.key.is_some() {
                             key_methods.push(emit_key_method(module, for_ir, &item_ty)?);
                         }
-                        item_methods
-                            .push(emit_item_method(module, &frags, &prefix, for_ir, &item_ty)?);
+                        let (apply_fn, fire_fns) = emit_item_method(
+                            module,
+                            &frags,
+                            &prefix,
+                            for_ir,
+                            &item_ty,
+                            matches!(ctx, Ctx::Direct),
+                        )?;
+                        item_methods.push(apply_fn);
+                        item_fire_fns.extend(fire_fns);
                     }
                     DynamicKind::Component(c) => {
                         // Prop-pass (§7.6): direct writes on the child's
@@ -1276,6 +1305,13 @@ fn generate_component_pieces(
                     dispatch_lo |= 1u64 << id;
                 } else {
                     dispatch_hi |= 1u64 << (id - 64);
+                }
+                // M15: per-item events attach at each item's insert (the
+                // reconcile mirrors) and dispatch through the per-item fire
+                // fns — no build-time attach record (the items do not exist
+                // yet, and a branch-table lookup would be the wrong table).
+                if for_bodies.contains(&f.id.get()) {
+                    continue;
                 }
                 let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
                 let h = rx_id.get();
@@ -1785,6 +1821,8 @@ fn generate_component_pieces(
 
             #(#list_methods)*
 
+            #(#item_fire_fns)*
+
             /// Run-once build (C4): executes top-to-bottom; reactivity lives
             /// exclusively in reactions. M7 phases: child attach (M10 — each
             /// direct use's root enters the owner tree at its use hole) →
@@ -1867,7 +1905,7 @@ fn generate_component_pieces(
 
 type StrPair = (lig_core::id::StrId, u64);
 
-fn sanitize(name: &str) -> String {
+pub(crate) fn sanitize(name: &str) -> String {
     let cleaned: String = name
         .chars()
         .map(|c| {
@@ -3229,6 +3267,40 @@ fn emit_item_children_fn(
     }))
 }
 
+/// The per-item event attaches (M15): one attach commit per event dynamic of
+/// the item body, emitted inside the reconcile's INSERT arms (keyed and
+/// unkeyed plans, direct and composed receivers) so every fresh item's
+/// element gets its handler record exactly once — the per-item replay never
+/// re-attaches, and teardown disposes the records with the item's slab.
+fn item_event_attaches(
+    module: &ViewModule,
+    for_ir: &lig_ir::fragment::ForIr,
+    recv: &proc_macro2::TokenStream,
+    index_expr: &proc_macro2::TokenStream,
+) -> proc_macro2::TokenStream {
+    let body = &module.fragments[for_ir.body.get() as usize];
+    let mut attaches: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (di, d) in body.dynamics.iter().enumerate() {
+        let DynamicKind::Event { event, delegate } = &d.kind else {
+            continue;
+        };
+        let Some(rx) = d.reaction else { continue };
+        let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
+        let h = rx.get();
+        attaches.push(quote! {
+            f.attach(h, #di, ::lig_runtime::EventKind::#ev, ::lig_runtime::HandlerId(#h), #delegate);
+        });
+    }
+    if attaches.is_empty() {
+        return quote! {};
+    }
+    quote! {
+        if let Some(f) = #recv.list_item_mut(slot, #index_expr) {
+            #(#attaches)*
+        }
+    }
+}
+
 /// The per-For reconcile method (§7.5): keyed lists run the sequential
 /// keyed plan (`plan_keyed` — removes, moves, inserts, each addressing the
 /// live list at apply time, then a full bind replay so index-driven binds
@@ -3237,6 +3309,8 @@ fn emit_item_children_fn(
 /// ops onto the body's per-item component instance stores (build + attach
 /// on insert, teardown on remove, reposition on move), and the replay
 /// covers EVERY live item: the binds and the per-item component props.
+/// Since M15 the insert arms also attach the body's per-item event handlers
+/// (once per fresh item, through [`item_event_attaches`]).
 fn emit_list_method(
     module: &ViewModule,
     for_ir: &lig_ir::fragment::ForIr,
@@ -3379,6 +3453,10 @@ fn emit_list_method(
             }
         })
         .collect();
+    let keyed_event_attaches =
+        item_event_attaches(module, for_ir, &quote!(self.frag), &quote!(index));
+    let unkeyed_event_attaches =
+        item_event_attaches(module, for_ir, &quote!(self.frag), &quote!(i));
     let mut children_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     for u in uses {
         if let Some(ts) = emit_item_children_fn(module, for_ir, item_ty, u)? {
@@ -3421,6 +3499,7 @@ fn emit_list_method(
                                 #body_branches,
                             );
                             #(#insert_mirrors)*
+                            #keyed_event_attaches
                         }
                     }
                 }
@@ -3442,6 +3521,7 @@ fn emit_list_method(
                 for i in common..items.len() {
                     self.frag.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
                     #(#unkeyed_insert_mirrors)*
+                    #unkeyed_event_attaches
                 }
                 for i in (common..old).rev() {
                     #(#unkeyed_remove_mirrors)*
@@ -3623,6 +3703,8 @@ fn emit_list_method_composed(
             }
         })
         .collect();
+    let keyed_event_attaches = item_event_attaches(module, for_ir, &quote!(recv), &quote!(index));
+    let unkeyed_event_attaches = item_event_attaches(module, for_ir, &quote!(recv), &quote!(i));
     let mut children_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     for u in uses {
         if let Some(ts) = emit_item_children_fn(module, for_ir, item_ty, u)? {
@@ -3671,6 +3753,7 @@ fn emit_list_method_composed(
                                 #body_branches,
                             );
                             #(#insert_mirrors)*
+                            #keyed_event_attaches
                         }
                     }
                 }
@@ -3697,6 +3780,7 @@ fn emit_list_method_composed(
                 for i in common..items.len() {
                     recv.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
                     #(#unkeyed_insert_mirrors)*
+                    #unkeyed_event_attaches
                 }
                 for i in (common..old).rev() {
                     #(#unkeyed_remove_mirrors)*
@@ -3868,15 +3952,22 @@ fn collect_body_reads(module: &ViewModule, body: FragmentId) -> Vec<StrId> {
 
 /// The per-item bind replay: one method covering the body fragment's binds,
 /// with `item`/`index` locals substituted and parent state reads via `self`.
+/// M15: the body's event dynamics emit index-addressed fire fns (the second
+/// tuple element) whose handler bodies substitute the item locals and flush
+/// through the standard pipeline — empty when the body carries no events.
+/// A COMPOSED list body (branch- or slot-owned For) carrying events stays
+/// fail-closed: the composed dispatch addressing is the follow-up.
 fn emit_item_method(
     module: &ViewModule,
     frags: &[FragInfo],
     prefix: &str,
     for_ir: &lig_ir::fragment::ForIr,
     item_ty: &Ty,
-) -> Result<proc_macro2::TokenStream, CodegenError> {
+    direct: bool,
+) -> Result<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>), CodegenError> {
     let body_frag = &module.fragments[for_ir.body.get() as usize];
     let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
+    let mut item_handlers: Vec<(usize, ExprId)> = Vec::new();
     let reads = collect_body_reads(module, for_ir.body);
     let read_params: Vec<proc_macro2::TokenStream> = reads
         .iter()
@@ -3950,10 +4041,10 @@ fn emit_item_method(
                 });
             }
             DynamicKind::Event { .. } => {
-                return Err(CodegenError::Unsupported(
-                    "event handlers inside list item bodies are not admitted in v1 \
-                     (LIG-E118) — hoist to the list level or a keyed component",
-                ));
+                // M15 per-item dispatch: the handler body rides the fire fn
+                // (item/index substituted); the attach rides the reconcile's
+                // insert arms ([`item_event_attaches`]). Collected below.
+                item_handlers.push((di, d.expr));
             }
             DynamicKind::Component(_) => {
                 // M13: the per-item component replay lives in the reconcile
@@ -3997,12 +4088,54 @@ fn emit_item_method(
         &format!("apply_item_f{}", for_ir.body.get()),
         proc_macro2::Span::call_site(),
     );
-    Ok(quote! {
-        fn #method(f: &mut ::lig_runtime::Fragment, h: &mut dyn Host,
-                   item: #item_ty_lit, index: i64, #(#read_params,)*) {
-            #(#commits)*
+    // M15: the per-item fire fns — one per event dynamic of the body. Each
+    // captures the payload, addresses the live item through the source
+    // (stale indices return, no panic), substitutes the item/index locals
+    // into the handler body, and flushes the owner (the setter writes
+    // cascade through the standard schedule).
+    let mut fire_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    if !item_handlers.is_empty() {
+        if !direct {
+            return Err(CodegenError::Unsupported(
+                "event handlers on composed list bodies are not admitted in v1 — \
+                 the composed dispatch addressing is the follow-up",
+            ));
         }
-    })
+        let src = gen_expr(module, for_ir.source)?;
+        for (di, expr_id) in item_handlers {
+            let body = gen_item_handler_expr(module, expr_id, for_ir)?;
+            let fire = syn::Ident::new(
+                &format!("fire_f{}_d{}", for_ir.body.get(), di),
+                proc_macro2::Span::call_site(),
+            );
+            fire_fns.push(quote! {
+                /// Per-item dispatch glue (M15): capture the event payload,
+                /// substitute the live item/index into the handler body, and
+                /// flush — the per-item analogue of the top-level `fire_N`
+                /// (§10.1).
+                pub fn #fire(&mut self, h: &mut dyn Host, index: usize, ev: &::lig_runtime::EvData) {
+                    self.ev = ev.clone();
+                    let items: ::alloc::vec::Vec<#item_ty_lit> =
+                        ::core::clone::Clone::clone(&(#src));
+                    let Some(item) = items.get(index) else {
+                        return;
+                    };
+                    let index = index as i64;
+                    #body;
+                    ::lig_runtime::flush(self, h);
+                }
+            });
+        }
+    }
+    Ok((
+        quote! {
+            fn #method(f: &mut ::lig_runtime::Fragment, h: &mut dyn Host,
+                       item: #item_ty_lit, index: i64, #(#read_params,)*) {
+                #(#commits)*
+            }
+        },
+        fire_fns,
+    ))
 }
 
 /// The M14 per-item slot arm (§7.4 + §7.5): one For-body outlet's mount
@@ -4040,6 +4173,23 @@ fn emit_item_slot_arm(
     let fb_frag = &module.fragments[fb_id.get() as usize];
     let mut binds: Vec<proc_macro2::TokenStream> = Vec::new();
     for (fdi, fd) in fb_frag.dynamics.iter().enumerate() {
+        // Per-item slot content admits scalar binds only — the precise
+        // reason fires BEFORE any expression generation (an event's handler
+        // body is a setter call, which the replay renderer would deny with
+        // a less precise shape).
+        if !matches!(
+            &fd.kind,
+            DynamicKind::Text
+                | DynamicKind::Class
+                | DynamicKind::Attr { .. }
+                | DynamicKind::StyleProp { .. }
+        ) {
+            return Err(CodegenError::Unsupported(
+                "per-item slot content admits scalar binds only — events, refs, and \
+                 structural content inside list-body outlets keep the codegen backstop \
+                 (the per-item dispatch/identity follow-ups)",
+            ));
+        }
         if !expr_state_reads(module, fd.expr).is_empty() {
             return Err(CodegenError::Unsupported(
                 "state-reading binds inside per-item slot content are not admitted in v1 — \
@@ -4129,42 +4279,45 @@ fn emit_item_slot_arm(
 }
 
 /// `gen_expr` with `item`/`index` locals resolved (item bodies see the item
-/// value and position; parent state reads stay `self.<field>`).
+/// value and position; parent state reads take the replay's `s_<field>`
+/// params). M15: the substitution threads through EVERY nesting level (the
+/// pre-M15 generator substituted only the top-level node), so composed item
+/// binds — template holes, call args, array elements — render correctly.
 fn gen_item_expr(
     module: &ViewModule,
     id: ExprId,
     for_ir: &lig_ir::fragment::ForIr,
     _item_ty: &Ty,
 ) -> Result<proc_macro2::TokenStream, CodegenError> {
-    let expr = module.exprs.get(id);
-    match expr {
-        lig_ir::expr::Expr::Local(l) => {
-            if *l == for_ir.item {
-                Ok(quote!(item))
-            } else if for_ir.index.is_some_and(|ix| ix == *l) {
-                Ok(quote!(index))
-            } else {
-                Err(CodegenError::Unsupported(
-                    "locals other than the item/index bindings are not admitted in list item bodies (v1)",
-                ))
-            }
-        }
-        lig_ir::expr::Expr::State(name) => {
-            // Parent-state reads arrive as `s_<field>` parameters (the item
-            // replay runs while `self.frag` is mutably borrowed).
-            let pname = syn::Ident::new(
-                &format!("s_{}", sanitize(module.strings.get(*name))),
-                Span::call_site(),
-            );
-            Ok(quote!(#pname))
-        }
-        other => {
-            // Literals, field/index chains, calls: the standard generator
-            // (its `self.`-prefixed State arm is overridden above).
-            let _ = other;
-            gen_expr(module, id)
-        }
-    }
+    gen_expr_ctx(
+        module,
+        id,
+        &ExprCtx {
+            item_scope: Some((for_ir.item, for_ir.index)),
+            clone_item: false,
+            state_recv: StateRecv::SParams,
+        },
+    )
+}
+
+/// `gen_expr` for a per-item HANDLER body (M15): the item/index locals
+/// substitute at every nesting level, parent state and event-field reads
+/// stay on the `self` receiver (the fire fn is a `&mut self` method), and
+/// item reads clone per reference (a handler may read the item twice).
+fn gen_item_handler_expr(
+    module: &ViewModule,
+    id: ExprId,
+    for_ir: &lig_ir::fragment::ForIr,
+) -> Result<proc_macro2::TokenStream, CodegenError> {
+    gen_expr_ctx(
+        module,
+        id,
+        &ExprCtx {
+            item_scope: Some((for_ir.item, for_ir.index)),
+            clone_item: true,
+            state_recv: StateRecv::SelfField,
+        },
+    )
 }
 
 /// Generate the Rust source for one source file's whole module (§9.5): all
