@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (33)
+## Behavior fixtures (34)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -51,6 +51,7 @@ table).
 | `effect-multi` | multi-statement effect bodies (M6): a two-statement `createEffect`/`watchEffect` block → two post-tier reactions with per-statement reads |
 | `event-object` | `$event.currentTarget.value` payload flow |
 | `for-index` | getter-only list signal + `<For>`/`v-for` index accessor |
+| `for-event` | per-item event dispatch (M15): an `onClick`/`@click` handler DIRECTLY on the `<For>`/`v-for` body — one Attach commit per fresh item at its own node, index-addressed dispatch through the generated per-item fire fn with the item substituted into the handler body, keyed moves re-locate the handler record without re-attaching, removals dispose it with the item's slab, and stale indices are no-ops |
 | `for-keyed` | keyed list reconciliation (M5): `<For key={(t) => t}>` / `v-for … :key="t"` — identity keys on both legs, `plan_keyed` LIS-stable moves in the generated unit |
 | `for-list` | `<For>` mount over a list signal |
 | `list-component` | per-item component identity in keyed lists (M13): a `<Badge count={t} />` inside a keyed `<For>`/`v-for` body — the generated `Vec<Option<Badge>>` store mirrors the keyed plan (inserts build + attach into the item's hole, removes dispose, moves reposition the same instance), and the per-item replay drives each instance's props |
