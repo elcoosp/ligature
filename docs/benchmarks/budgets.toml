@@ -139,6 +139,15 @@ metric = "time"
 budget = 3500.0
 note = "M15 reference median 680 µs (codegen/for-event bench, release, Linux x86_64); ≈5.1× headroom"
 
+# M17: the composed-event module — the ctx-classified composed reconcile,
+# the receiver-parameterized per-item attach arms, and the list-carrying
+# branch's mount mark ride generate_module.
+[[budget]]
+name = "codegen_for_event_composed"
+metric = "time"
+budget = 4500.0
+note = "M17 reference median 816 µs (codegen/for-event-composed bench, release, Linux x86_64); ≈5.5× headroom"
+
 # Codegen over the list-component surface (M13): per-item instance identity —
 # the `Vec<Option<Child>>` store, the plan-op mirroring in the reconcile, and
 # the per-item children replay ride generate_module.
