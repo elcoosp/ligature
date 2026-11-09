@@ -1,0 +1,502 @@
+{
+  "version": 5,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "for-composed-content.tsx",
+      "hash": 14418507035663017349
+    }
+  ],
+  "strings": {
+    "entries": [
+      "",
+      "Cell",
+      "PickList",
+      "alpha",
+      "beta",
+      "branch_0",
+      "cell",
+      "class",
+      "i",
+      "items_2",
+      "li",
+      "on",
+      "pick",
+      "picked",
+      "r",
+      "row",
+      "rows",
+      "setPicked",
+      "slotfallback_3",
+      "slotfill_1"
+    ]
+  },
+  "components": [
+    {
+      "name": 1,
+      "root": 0,
+      "props": []
+    },
+    {
+      "name": 2,
+      "root": 1,
+      "props": []
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 8,
+          "static_attrs": [
+            {
+              "key": 7,
+              "value": {
+                "Str": 12
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 3040328753822874757
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 10,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 9854449004688134530
+    },
+    {
+      "root": "Marker",
+      "hash": 12638226782974257592
+    }
+  ],
+  "fragments": [
+    {
+      "name": 1,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "Slot": {
+              "name": 6,
+              "fallback": null
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            87,
+            107
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 2,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "If": {
+              "cond": 1,
+              "then": 2,
+              "else_": null
+            }
+          },
+          "expr": 1,
+          "reaction": 1,
+          "span": [
+            305,
+            554
+          ]
+        }
+      ],
+      "children": [
+        2
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 5,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "Component": {
+              "component": 0,
+              "props": [],
+              "slots": [
+                {
+                  "name": 6,
+                  "fallback": 3
+                }
+              ]
+            }
+          },
+          "expr": 2,
+          "reaction": 2,
+          "span": [
+            330,
+            542
+          ]
+        }
+      ],
+      "children": [
+        3
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 19,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "For": {
+              "source": 3,
+              "item": 14,
+              "index": null,
+              "key": 4,
+              "body": 4
+            }
+          },
+          "expr": 3,
+          "reaction": 3,
+          "span": [
+            342,
+            538
+          ]
+        }
+      ],
+      "children": [
+        4
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 9,
+      "template": 1,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "Event": {
+              "event": "click",
+              "delegate": true
+            }
+          },
+          "expr": 5,
+          "reaction": 4,
+          "span": [
+            418,
+            436
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Slot": {
+              "name": 15,
+              "fallback": 5
+            }
+          },
+          "expr": 6,
+          "reaction": 5,
+          "span": [
+            451,
+            498
+          ]
+        }
+      ],
+      "children": [
+        5
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 18,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 7,
+          "reaction": 6,
+          "span": [
+            485,
+            486
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "Lit": "Null"
+      },
+      {
+        "State": 11
+      },
+      {
+        "Lit": "Null"
+      },
+      {
+        "State": 16
+      },
+      {
+        "Local": 14
+      },
+      {
+        "Call": [
+          0,
+          [
+            {
+              "Local": 14
+            }
+          ]
+        ]
+      },
+      {
+        "Lit": "Null"
+      },
+      {
+        "Local": 14
+      },
+      {
+        "Lit": {
+          "Bool": true
+        }
+      },
+      {
+        "Array": [
+          {
+            "Lit": {
+              "Str": 3
+            }
+          },
+          {
+            "Lit": {
+              "Str": 4
+            }
+          }
+        ]
+      },
+      {
+        "Lit": {
+          "Str": 0
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 317,
+        "end": 321
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 353,
+        "end": 359
+      },
+      {
+        "start": 373,
+        "end": 374
+      },
+      {
+        "start": 424,
+        "end": 436
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 485,
+        "end": 486
+      },
+      {
+        "start": 176,
+        "end": 180
+      },
+      {
+        "start": 222,
+        "end": 239
+      },
+      {
+        "start": 285,
+        "end": 287
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 11,
+      "owner": 1,
+      "kind": "signal",
+      "ty": "Bool",
+      "init": 8
+    },
+    {
+      "name": 16,
+      "owner": 1,
+      "kind": "signal",
+      "ty": {
+        "List": "Str"
+      },
+      "init": 9
+    },
+    {
+      "name": 13,
+      "owner": 1,
+      "kind": "signal",
+      "ty": "Str",
+      "init": 10
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        11
+      ],
+      "writes": [],
+      "body": 1,
+      "owner": 1
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 2,
+      "owner": 2
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        16
+      ],
+      "writes": [],
+      "body": 3,
+      "owner": 3
+    },
+    {
+      "kind": {
+        "effect": {
+          "tier": "post"
+        }
+      },
+      "reads": [],
+      "writes": [
+        13
+      ],
+      "body": 5,
+      "owner": 4
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 1
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 6,
+      "owner": 4
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 7,
+      "owner": 5
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [
+    {
+      "name": 17,
+      "kind": {
+        "ModelFn": {
+          "target": 13
+        }
+      }
+    }
+  ],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}
