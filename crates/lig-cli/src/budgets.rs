@@ -224,7 +224,8 @@ fn samples_for(name: &str) -> usize {
         | "codegen_ref"
         | "codegen_else"
         | "codegen_list_component"
-        | "codegen_list_slot" => 40,
+        | "codegen_list_slot"
+        | "codegen_for_event" => 40,
         "runtime_instantiate" | "runtime_update_mask" | "patch_apply_1" | "patch_dispatch_hit" => {
             800
         }
@@ -288,6 +289,15 @@ fn list_component_source(root: &Path) -> String {
 /// source.
 fn list_slot_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/list-slot/input.solid.tsx");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The for-event fixture (the M15 codegen bench's workload: the
+/// index-addressed fire fns, the item-substituted handler bodies, and the
+/// per-item attach arms), read from the committed fixture so the gate and
+/// the parity harness share one source.
+fn for_event_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/for-event/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -370,6 +380,14 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(u);
             })
         }
+        "codegen_for_event" => {
+            let src = for_event_source(root);
+            let m = lig_parse_solid::lower_module(&src, "for-event.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
+                black_box(u);
+            })
+        }
         "runtime_instantiate" => median_us(samples_for(name), || {
             let mut h = CountingHost { commits: 0 };
             let f = Fragment::new(&mut h, counter_tpl(), HOLE_ANCHORS, BRANCH_ANCHORS);
@@ -428,6 +446,7 @@ const REGISTRY: &[&str] = &[
     "codegen_else",
     "codegen_list_component",
     "codegen_list_slot",
+    "codegen_for_event",
     "runtime_instantiate",
     "runtime_update_mask",
     "runtime_list_diff_keyed",
@@ -601,11 +620,11 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 16 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 17 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
-        // codegen_list_component, M14 adds codegen_list_slot), all named,
-        // no dupes.
-        assert_eq!(REGISTRY.len(), 16);
+        // codegen_list_component, M14 adds codegen_list_slot, M15 adds
+        // codegen_for_event), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 17);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
