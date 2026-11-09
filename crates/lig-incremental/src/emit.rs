@@ -8,6 +8,7 @@
 //! every unit in the pass is admitted.
 
 use crate::CompiledUnit;
+use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -51,6 +52,73 @@ pub struct EmissionReport {
     pub stats: BTreeMap<String, lig_sourcemap::VerifyStats>,
 }
 
+/// An emission failure (the `dist/` writer's typed seam, M16): which unit or
+/// artifact failed, why, and the fix in words — a [`miette::Diagnostic`] with
+/// a stable code (`ligature::emit`) and help-text, so embedded consumers get
+/// the same quality of failure report the CLI prints.
+#[derive(Debug)]
+pub struct EmitError {
+    /// The unit stem or artifact path the failure is about.
+    pub subject: String,
+    /// What went wrong (renders as the error line).
+    pub message: String,
+    /// The fix, in words (renders as `help:`).
+    pub help: String,
+    /// The underlying I/O error, when one caused this.
+    io: Option<std::io::Error>,
+}
+
+impl EmitError {
+    /// An I/O failure against one artifact path (the atomic write, the
+    /// directory creation, the state file).
+    fn io(path: &Path, e: std::io::Error) -> Self {
+        Self {
+            subject: path.display().to_string(),
+            message: format!("{}: {e}", path.display()),
+            help: "emission writes dist/ atomically (write .tmp, then rename) — check that \
+                   the output directory's parent exists and is writable, and that no \
+                   read-only mount, permission change, or stale `.tmp` file blocks the rename"
+                .to_string(),
+            io: Some(e),
+        }
+    }
+
+    /// A contract violation on one unit (fail-closed BR-1 or a failed map
+    /// verification — the pipeline's own invariants, not the filesystem).
+    fn contract(stem: &str, message: String, help: String) -> Self {
+        Self {
+            subject: stem.to_string(),
+            message,
+            help,
+            io: None,
+        }
+    }
+}
+
+impl core::fmt::Display for EmitError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for EmitError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.io
+            .as_ref()
+            .map(|e| e as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl Diagnostic for EmitError {
+    fn code<'a>(&'a self) -> Option<Box<dyn core::fmt::Display + 'a>> {
+        Some(Box::new("ligature::emit"))
+    }
+
+    fn help<'a>(&'a self) -> Option<Box<dyn core::fmt::Display + 'a>> {
+        Some(Box::new(&self.help))
+    }
+}
+
 /// Load the previous build state, if any.
 #[must_use]
 pub fn load_state(out_dir: &Path) -> Option<BuildState> {
@@ -70,18 +138,28 @@ pub fn load_state(out_dir: &Path) -> Option<BuildState> {
 ///   loop keeps `dist` synced with the source set).
 ///
 /// # Errors
-/// Any I/O failure or a failed NFR-6 source-map verification (fail-closed,
-/// with the offending stem).
+/// A typed [`EmitError`] on any I/O failure or a failed NFR-6 source-map
+/// verification (fail-closed, naming the offending stem) — `code`
+/// `ligature::emit`, with miette help-text naming the fix.
 pub fn emit_units(
     out_dir: &Path,
     units: &[&CompiledUnit],
     profile: &str,
     prune: bool,
-) -> Result<EmissionReport, String> {
+) -> Result<EmissionReport, EmitError> {
+    let span = tracing::info_span!(
+        "emit",
+        units = units.len(),
+        written = tracing::field::Empty,
+        kept = tracing::field::Empty,
+    );
+    let _guard = span.enter();
     let prev = load_state(out_dir);
     let mut report = EmissionReport::default();
-    std::fs::create_dir_all(out_dir.join("ir")).map_err(|e| e.to_string())?;
-    std::fs::create_dir_all(out_dir.join("maps")).map_err(|e| e.to_string())?;
+    std::fs::create_dir_all(out_dir.join("ir"))
+        .map_err(|e| EmitError::io(&out_dir.join("ir"), e))?;
+    std::fs::create_dir_all(out_dir.join("maps"))
+        .map_err(|e| EmitError::io(&out_dir.join("maps"), e))?;
 
     let mut state = BuildState {
         version: 1,
@@ -98,17 +176,39 @@ pub fn emit_units(
         let Some(out) = unit.generated.as_ref() else {
             continue; // denied units never reach emission (BR-1 upstream)
         };
-        let module = unit
-            .module
-            .as_ref()
-            .ok_or_else(|| format!("{}: admitted unit without IR", unit.stem))?;
+        let module = unit.module.as_ref().ok_or_else(|| {
+            EmitError::contract(
+                &unit.stem,
+                format!("{}: admitted unit without IR", unit.stem),
+                "an admitted unit always carries its lowered IR — the fail-closed contract \
+                 (BR-1) makes this an internal bug: re-run the pass and report it with the \
+                 session revision from `lig doctor`"
+                    .to_string(),
+            )
+        })?;
 
         // NFR-6: verify the chained maps before any emission.
-        let verified = lig_sourcemap::verify(module, &unit.source, &out.text, &out.links)
-            .map_err(|e| format!("{}: sourcemap verify failed: {e}", unit.stem))?;
+        let verified =
+            lig_sourcemap::verify(module, &unit.source, &out.text, &out.links).map_err(|e| {
+                EmitError::contract(
+                    &unit.stem,
+                    format!("{}: sourcemap verify failed: {e}", unit.stem),
+                    "the chained map failed its own verification — an internal mapping bug: \
+                     run `lig reproducibility` to pin it against the committed unit"
+                        .to_string(),
+                )
+            })?;
 
         let src_map = lig_sourcemap::src_to_ir(module, &unit.source);
-        let ir_map = lig_sourcemap::ir_to_rust(module, &out.text, &out.links)?;
+        let ir_map = lig_sourcemap::ir_to_rust(module, &out.text, &out.links).map_err(|e| {
+            EmitError::contract(
+                &unit.stem,
+                format!("{}: IR→Rust map failed: {e}", unit.stem),
+                "the generated-symbol links did not resolve — an internal mapping bug: run \
+                 `lig resolve` on the committed map to narrow it"
+                    .to_string(),
+            )
+        })?;
         let merged = lig_sourcemap::chain(&src_map, &ir_map);
 
         let rs_bytes = out.text.as_bytes();
@@ -163,11 +263,21 @@ pub fn emit_units(
         }
     }
 
+    span.record("written", report.written.len());
+    span.record("kept", report.kept.len());
     write_atomic(
         &out_dir.join("manifest.toml"),
         manifest_rows.join("\n").as_bytes(),
     )?;
-    let state_json = serde_json::to_string_pretty(&state).map_err(|e| e.to_string())?;
+    let state_json = serde_json::to_string_pretty(&state).map_err(|e| {
+        EmitError::contract(
+            "build-state.json",
+            format!("serialize build state: {e}"),
+            "the build state is plain serde JSON over owned digests — a serialization failure \
+             here is an internal bug: report it with the session revision"
+                .to_string(),
+        )
+    })?;
     write_atomic(&out_dir.join("build-state.json"), state_json.as_bytes())?;
     Ok(report)
 }
@@ -185,9 +295,78 @@ fn hex(v: u64) -> String {
     format!("{v:#018x}")
 }
 
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
+fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), EmitError> {
     let tmp = path.with_extension("tmp");
     std::fs::write(&tmp, bytes)
         .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| format!("{}: {e}", path.display()))
+        .map_err(|e| EmitError::io(path, e))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{emit_units, load_state};
+    use crate::Session;
+    use lig_admission::Profile;
+    use miette::Diagnostic;
+    use std::path::PathBuf;
+
+    fn counter_session() -> Session {
+        let mut s = Session::new();
+        s.set_source(
+            PathBuf::from("counter.tsx"),
+            lig_parse_solid::tests_support::COUNTER_TSX,
+        );
+        s.compile(Profile::Layout);
+        s
+    }
+
+    #[test]
+    fn second_pass_keeps_written_artifacts() {
+        let s = counter_session();
+        let out = std::env::temp_dir().join(format!("lig-emit-test-{}-keep", std::process::id()));
+        let _ = std::fs::remove_dir_all(&out);
+        let units = s.units();
+        let first = emit_units(&out, &units, "taffy", false).expect("first emission writes");
+        assert_eq!(first.written, vec!["counter".to_string()]);
+        assert!(first.kept.is_empty(), "the first pass writes, never keeps");
+        let second = emit_units(&out, &units, "taffy", false).expect("second emission");
+        assert!(
+            second.written.is_empty(),
+            "digest unchanged — the artifacts are kept (D-9)"
+        );
+        assert_eq!(second.kept, vec!["counter".to_string()]);
+        assert!(
+            load_state(&out).is_some(),
+            "the state file records the pass"
+        );
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    #[test]
+    fn emission_failure_is_a_typed_error_with_help() {
+        let s = counter_session();
+        // A regular file where the out directory should be: create_dir_all
+        // fails, and the failure surfaces as a typed `EmitError` (code +
+        // miette help-text), not a bare `String`.
+        let blocker =
+            std::env::temp_dir().join(format!("lig-emit-test-{}-blocker", std::process::id()));
+        std::fs::write(&blocker, b"not a directory").expect("write blocker");
+        let out = blocker.join("dist");
+        let units = s.units();
+        let err = emit_units(&out, &units, "taffy", false).expect_err("blocked emission fails");
+        assert!(
+            err.message.contains("dist"),
+            "the message names the blocked path: {err}"
+        );
+        assert!(
+            err.code().map(|c| c.to_string()).as_deref() == Some("ligature::emit"),
+            "a stable code: {err:?}"
+        );
+        let help = err
+            .help()
+            .map(|h| h.to_string())
+            .expect("miette help-text present");
+        assert!(help.contains("writable"), "the help names the fix: {help}");
+        std::fs::remove_file(&blocker).ok();
+    }
 }
