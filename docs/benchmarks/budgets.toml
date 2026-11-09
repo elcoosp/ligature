@@ -120,3 +120,12 @@ name = "codegen_else"
 metric = "time"
 budget = 6000.0
 note = "M11 reference median 1067 µs (codegen/else bench, release, Linux x86_64); ≈5.6× headroom"
+
+# Codegen over the list-component surface (M13): per-item instance identity —
+# the `Vec<Option<Child>>` store, the plan-op mirroring in the reconcile, and
+# the per-item children replay ride generate_module.
+[[budget]]
+name = "codegen_list_component"
+metric = "time"
+budget = 4800.0
+note = "M13 reference median 901 µs (codegen/list-component bench, release, Linux x86_64); ≈5.3× headroom"
