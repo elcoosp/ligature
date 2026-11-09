@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (32)
+## Behavior fixtures (33)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -54,6 +54,7 @@ table).
 | `for-keyed` | keyed list reconciliation (M5): `<For key={(t) => t}>` / `v-for … :key="t"` — identity keys on both legs, `plan_keyed` LIS-stable moves in the generated unit |
 | `for-list` | `<For>` mount over a list signal |
 | `list-component` | per-item component identity in keyed lists (M13): a `<Badge count={t} />` inside a keyed `<For>`/`v-for` body — the generated `Vec<Option<Badge>>` store mirrors the keyed plan (inserts build + attach into the item's hole, removes dispose, moves reposition the same instance), and the per-item replay drives each instance's props |
+| `list-slot` | per-item slot assembly in keyed lists (M14): a `<Slot name="row">` with an item-bound fallback directly on a keyed `<For>`/`v-for` body — every live item mounts the fallback into its outlet hole through the per-item replay (`mount_slot`, idempotent) with the item text bound, moves relocate the same mounted content without rebuilds, and removals dispose it with the item |
 | `map-children` | `.map` child expression (unkeyed list; the Vue leg uses `v-for`) |
 | `map-keyed` | keyed `.map` children (M6): `key={item}` on the mapped element / `:key="item"` on the `v-for` element — the key stripped from the item fragment, `ForIr.key = Local(item)` |
 | `memo-derived` | `createMemo`/`computed` read in a text hole |
