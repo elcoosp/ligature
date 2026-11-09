@@ -226,7 +226,8 @@ fn samples_for(name: &str) -> usize {
         | "codegen_list_component"
         | "codegen_list_slot"
         | "codegen_for_event"
-        | "codegen_for_event_composed" => 40,
+        | "codegen_for_event_composed"
+        | "codegen_for_composed_content" => 40,
         "runtime_instantiate" | "runtime_update_mask" | "patch_apply_1" | "patch_dispatch_hit" => {
             800
         }
@@ -309,6 +310,16 @@ fn for_event_source(root: &Path) -> String {
 /// source.
 fn for_event_composed_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/for-event-composed/input.solid.tsx");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The composed-content fixture (the M18 codegen bench's workload: the
+/// fill-carried composed reconcile, the per-mount fill assembly in the
+/// mounting arm, the receiver-guarded ctx unwraps, and the per-item fire
+/// fn), read from the committed fixture so the gate and the parity harness
+/// share one source.
+fn for_composed_content_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/for-composed-content/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -420,6 +431,14 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(u);
             })
         }
+        "codegen_for_composed_content" => {
+            let src = for_composed_content_source(root);
+            let m = lig_parse_solid::lower_module(&src, "for-composed-content.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
+                black_box(u);
+            })
+        }
         "session_compile_counter" => session_compile_counter(),
         "runtime_instantiate" => median_us(samples_for(name), || {
             let mut h = CountingHost { commits: 0 };
@@ -481,6 +500,7 @@ const REGISTRY: &[&str] = &[
     "codegen_list_slot",
     "codegen_for_event",
     "codegen_for_event_composed",
+    "codegen_for_composed_content",
     "session_compile_counter",
     "runtime_instantiate",
     "runtime_update_mask",
@@ -655,12 +675,13 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 19 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 20 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
         // codegen_for_event, M16 adds session_compile_counter, M17 adds
-        // codegen_for_event_composed), all named, no dupes.
-        assert_eq!(REGISTRY.len(), 19);
+        // codegen_for_event_composed, M18 adds
+        // codegen_for_composed_content), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 20);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();

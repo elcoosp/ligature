@@ -276,12 +276,16 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
     assert!(stdout.contains("7385"), "D-8-pinned byte count: {stdout}");
     assert!(
-        stdout.contains("all 19 row(s) within budget"),
+        stdout.contains("all 20 row(s) within budget"),
         "summary present: {stdout}"
     );
     assert!(
         stdout.contains("codegen_composed"),
         "M9 composed row: {stdout}"
+    );
+    assert!(
+        stdout.contains("codegen_for_composed_content"),
+        "M18 composed-content row: {stdout}"
     );
     assert!(
         stdout.contains("codegen_branch"),

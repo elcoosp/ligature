@@ -352,7 +352,10 @@ fn run_build(paths: &[PathBuf], out: &Path, profile: Profile) -> Result<(), CliE
         };
         let name = file_label(&path);
         if let Some(e) = &unit.codegen_error {
+            // CodegenFailure is a miette Diagnostic (M18): print the message
+            // and its help-text (the fix, in words) like the emit seam does.
             eprintln!("lig build: {name}: codegen failed: {e}");
+            eprintln!("  help: {}", e.help);
             return Err(CliError::Internal);
         }
         if !unit.admitted {
