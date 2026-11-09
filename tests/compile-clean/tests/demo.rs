@@ -4,8 +4,8 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    show_else, slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic,
-    slots_named, slots_nested, slots_structural, template_ref, v_model,
+    list_component, show_else, slots_branch_component, slots_branch_outlet, slots_component,
+    slots_dynamic, slots_named, slots_nested, slots_structural, template_ref, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::MockHost;
@@ -484,6 +484,75 @@ fn branch_components_rebuild_and_dispose_per_mount() {
         Some("three"),
         "the fresh instance's bind re-rendered"
     );
+}
+
+/// The M13 per-item instance identity, end to end: a component use inside a
+/// keyed For body builds one instance per live item — the keyed plan's
+/// inserts build + attach into the item's component hole, removes take +
+/// dispose the instance's slab, keyed moves reposition the SAME instance
+/// (no rebuild — identity survives reorders), and the per-item replay drives
+/// each instance's props.
+#[test]
+fn list_components_carry_per_item_identity() {
+    let mut h = MockHost::new();
+    let mut app = list_component::App::build(&mut h, list_component::AppProps::default());
+    // Two items mounted on the initial flush → two instances, each attached
+    // in its item's component hole with its prop bound by the replay.
+    assert_eq!(app.badge.len(), 2, "one instance per live item");
+    let alpha = app.badge[0].as_ref().expect("row 0 instance");
+    let beta = app.badge[1].as_ref().expect("row 1 instance");
+    assert_eq!(alpha.count, "alpha", "props initialized through the replay");
+    assert_eq!(beta.count, "beta");
+    let alpha_node = alpha.frag.hole(0);
+    let beta_node = beta.frag.hole(0);
+    assert_eq!(h.text_of(alpha_node), Some("alpha"), "the child renders");
+    assert_eq!(h.text_of(beta_node), Some("beta"));
+
+    // A keyed rotate ([beta, alpha]) MOVES the instances without rebuilding
+    // them: the same node handles reappear at the new positions (a rebuild
+    // would carry fresh instance-seq NodeIds).
+    app.set_rows(vec!["beta".into(), "alpha".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.badge.len(), 2, "a keyed move rebuilds nothing");
+    assert_eq!(
+        app.badge[0].as_ref().expect("moved beta").frag.hole(0),
+        beta_node,
+        "the moved item kept its instance"
+    );
+    assert_eq!(
+        app.badge[1].as_ref().expect("stable alpha").frag.hole(0),
+        alpha_node,
+        "the LIS-stable item kept its instance"
+    );
+    assert_eq!(
+        h.text_of(beta_node),
+        Some("beta"),
+        "the moved instance still renders at its new position"
+    );
+
+    // A removal takes + disposes the instance (the store shrinks with the
+    // list, and the removed instance's node is gone from the host).
+    app.set_rows(vec!["beta".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.badge.len(), 1, "the removed item's instance is gone");
+    assert_eq!(
+        app.badge[0].as_ref().expect("beta survives").frag.hole(0),
+        beta_node,
+        "the surviving item kept its instance"
+    );
+
+    // A fresh key builds a FRESH instance (new slab, new node handle) with
+    // its prop bound by the replay.
+    app.set_rows(vec!["beta".into(), "gamma".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    let gamma = app.badge[1].as_ref().expect("fresh gamma instance");
+    assert_eq!(gamma.count, "gamma", "the fresh instance's prop is bound");
+    assert_ne!(
+        gamma.frag.hole(0),
+        alpha_node,
+        "a new key builds a new instance, not the disposed one"
+    );
+    assert_eq!(h.text_of(gamma.frag.hole(0)), Some("gamma"));
 }
 
 /// The M10 branch-time slot assembly, end to end: an outlet inside a branch

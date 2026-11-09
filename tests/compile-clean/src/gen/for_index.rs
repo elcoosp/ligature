@@ -70,7 +70,7 @@ pub mod generated {
             for i in (common..old).rev() {
                 self.frag.list_remove(h, slot, i);
             }
-            for (i, it) in items.iter().enumerate().take(common) {
+            for (i, it) in items.iter().enumerate() {
                 if let Some(f) = self.frag.list_item_mut(slot, i) {
                     apply_item_f1(f, h, it.clone(), i as i64);
                 }
