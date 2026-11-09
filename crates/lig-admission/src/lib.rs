@@ -98,8 +98,16 @@ pub fn admit(module: &ViewModule, profile: Profile) -> AdmissionReport {
         }
     }
     // 3. Per-fragment walks.
-    for frag in &module.fragments {
-        admit_fragment(module, frag, profile, &mut report);
+    let owned_bodies = owned_body_fragments(module);
+    for (idx, frag) in module.fragments.iter().enumerate() {
+        admit_fragment(
+            module,
+            lig_core::id::FragmentId::new(idx as u32),
+            frag,
+            profile,
+            &mut report,
+            &owned_bodies,
+        );
     }
     // 4. Deep prop chains (§6.5 Lint): prop reads through ≥2 field hops in
     //    any lowered expression (first hit wins; spans are per-expression).
@@ -122,9 +130,11 @@ pub fn admit(module: &ViewModule, profile: Profile) -> AdmissionReport {
 
 fn admit_fragment(
     module: &ViewModule,
+    frag_id: lig_core::id::FragmentId,
     frag: &FragmentIr,
     profile: Profile,
     report: &mut AdmissionReport,
+    owned_bodies: &std::collections::HashSet<u32>,
 ) {
     for d in &frag.dynamics {
         let (start, end) = d.span;
@@ -154,28 +164,109 @@ fn admit_fragment(
                 }
             }
             DynamicKind::For(for_ir) => {
-                // LIG-E118: event handlers inside list item bodies are
-                // outside the v1 subset (per-item dispatch needs keyed
-                // components — M2). Fail-closed here, not at codegen.
-                if let Some(body) = module.fragments.get(for_ir.body.get() as usize) {
-                    for d2 in &body.dynamics {
-                        if matches!(d2.kind, DynamicKind::Event { .. }) {
-                            let mut diag = LigDiagnostic::error(
-                                "LIG-E118",
-                                "event handlers inside <For> bodies are not admitted in v1",
-                                lig_core::span::Span::new(start, end),
-                            );
-                            diag.help = Some(
-                                "hoist the handler to the list level, or extract a keyed component (M2)"
-                                    .into(),
-                            );
-                            report.diagnostics.push(diag);
-                        }
-                    }
-                }
+                // LIG-E118, M15: an event handler DIRECTLY on a For body
+                // admits — per-item dispatch rides the keyed instance
+                // machinery (M13's per-item stores, the per-item replay,
+                // index-addressed fire fns). The body's SUBTREE keeps the
+                // fail-closed discipline: events inside list-item branches,
+                // nested lists, and COMPOSED lists (branch- or slot-owned —
+                // their dispatch addressing is the follow-up) deny with one
+                // precise reason at the event's own span. The v1 check was
+                // flat (the body's direct dynamics only), so nested events
+                // slipped through admission to the codegen backstop; the
+                // walk closes that hole.
+                let owner_direct = !owned_bodies.contains(&frag_id.get());
+                let mut seen = std::collections::HashSet::new();
+                walk_item_body_events(module, for_ir.body, owner_direct, report, &mut seen);
             }
             _ => {}
         }
+    }
+}
+
+/// Fragments owned as a branch/list/slot body by some dynamic (the
+/// `branch_owner_of` codegen rule, mirrored): a For whose OWNER fragment is
+/// in this set hangs on a branch or inside another list — a composed list,
+/// whose dispatch addressing is not the `&mut self` shape.
+fn owned_body_fragments(module: &ViewModule) -> std::collections::HashSet<u32> {
+    let mut owned = std::collections::HashSet::new();
+    for f in &module.fragments {
+        for d in &f.dynamics {
+            match &d.kind {
+                DynamicKind::If(i) => {
+                    owned.insert(i.then.get());
+                    if let Some(el) = i.else_ {
+                        owned.insert(el.get());
+                    }
+                }
+                DynamicKind::For(fo) => {
+                    owned.insert(fo.body.get());
+                }
+                DynamicKind::Slot {
+                    fallback: Some(fb), ..
+                } => {
+                    owned.insert(fb.get());
+                }
+                _ => {}
+            }
+        }
+    }
+    owned
+}
+
+/// The M15 item-body event walk: events on a DIRECT For body admit
+/// (`owner_direct`), events anywhere deeper in the item subtree deny with
+/// `LIG-E118` at their own span. `seen` dedups shared sub-fragments.
+fn walk_item_body_events(
+    module: &ViewModule,
+    frag_id: lig_core::id::FragmentId,
+    owner_direct: bool,
+    report: &mut AdmissionReport,
+    seen: &mut std::collections::HashSet<u32>,
+) {
+    if !seen.insert(frag_id.get()) {
+        return;
+    }
+    let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
+        return;
+    };
+    for d in &frag.dynamics {
+        match &d.kind {
+            DynamicKind::Event { .. } => {
+                if !owner_direct {
+                    let (start, end) = d.span;
+                    let mut diag = LigDiagnostic::error(
+                        "LIG-E118",
+                        "event handlers beyond the direct list item body are not admitted in v1",
+                        lig_core::span::Span::new(start, end),
+                    );
+                    diag.help = Some(
+                        "hoist the handler to the list level, or extract a keyed component".into(),
+                    );
+                    report.diagnostics.push(diag);
+                }
+            }
+            DynamicKind::If(i) => {
+                walk_item_body_events(module, i.then, false, report, seen);
+                if let Some(el) = i.else_ {
+                    walk_item_body_events(module, el, false, report, seen);
+                }
+            }
+            DynamicKind::For(fo) => {
+                // A nested list: its owner is a For body (never a direct-ctx
+                // fragment), so the inner body's events stay denied.
+                walk_item_body_events(module, fo.body, false, report, seen);
+            }
+            DynamicKind::Slot {
+                fallback: Some(fb), ..
+            } => {
+                walk_item_body_events(module, *fb, false, report, seen);
+            }
+            _ => {}
+        }
+    }
+    for &c in &frag.children {
+        walk_item_body_events(module, c, false, report, seen);
     }
 }
 
@@ -299,12 +390,42 @@ mod tests {
     }
 
     #[test]
-    fn event_handlers_in_for_bodies_are_e118() {
+    fn for_handler_direct_item_body_admits() {
+        // M15: an event handler DIRECTLY on a For body admits — per-item
+        // dispatch rides the keyed instance machinery (M13's stores + the
+        // per-item replay); the v1 denial's premise is gone.
         let src = "import { For } from \"solid-js\";\nexport function A() {\n  const [items, setItems] = createSignal([1, 2]);\n  return (\n    <ul>\n      <For each={items()}>{(n) => <li onClick={() => setItems([n])}>{n}</li>}</For>\n    </ul>\n  );\n}\n";
         let m = lower(src);
         let r = admit(&m, Profile::Layout);
+        assert!(r.is_admitted(), "{r:?}");
+        assert!(r.denies().next().is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn for_handler_in_item_branch_is_e118() {
+        // M15 boundary: events nested deeper inside the item subtree — a
+        // branch-in-item here — keep the fail-closed denial (per-item ×
+        // per-mount composition is the follow-up). The walk must CATCH the
+        // nested event (the v1 flat check only looked at the body's direct
+        // dynamics and let this shape slip through to codegen).
+        let src = "import { For, Show } from \"solid-js\";\nexport function A() {\n  const [items, setItems] = createSignal([1, 2]);\n  return (\n    <For each={items()}>\n      {(n) => (\n        <Show when={n > 0}>\n          <li onClick={() => setItems([n])}>{n}</li>\n        </Show>\n      )}\n    </For>\n  );\n}\n";
+        let m = lower(src);
+        let r = admit(&m, Profile::Layout);
         assert!(!r.is_admitted(), "{r:?}");
-        assert!(r.denies().any(|d| d.code == "LIG-E118"));
+        let e118: Vec<_> = r.denies().filter(|d| d.code == "LIG-E118").collect();
+        assert_eq!(e118.len(), 1, "one precise reason: {r:?}");
+    }
+
+    #[test]
+    fn for_handler_in_nested_list_is_e118() {
+        // M15 boundary: a For inside a For body is control-flow-in-item —
+        // its item events keep the denial (nested-list dispatch is the
+        // follow-up).
+        let src = "import { For } from \"solid-js\";\nexport function A() {\n  const [groups, setGroups] = createSignal([[1, 2]]);\n  return (\n    <For each={groups()}>\n      {(g) => (\n        <For each={g}>\n          {(n) => <li onClick={() => setGroups([[n]])}>{n}</li>}\n        </For>\n      )}\n    </For>\n  );\n}\n";
+        let m = lower(src);
+        let r = admit(&m, Profile::Layout);
+        assert!(!r.is_admitted(), "{r:?}");
+        assert!(r.denies().any(|d| d.code == "LIG-E118"), "{r:?}");
     }
 
     #[test]
