@@ -198,11 +198,30 @@ fn generate_component_pieces(
             _ => None,
         })
         .collect();
+    // M14: the fallback contents of For-body outlets run PER ITEM (the
+    // per-item replay mounts them and applies their item-bound binds) —
+    // their reactions get no general run arms (the item addressing does
+    // not exist at flush scope; one reaction, N live items).
+    let for_body_slot_fallbacks: Vec<FragmentId> = for_bodies
+        .iter()
+        .filter_map(|b| module.fragments.get(b.get() as usize))
+        .flat_map(|body| body.dynamics.iter())
+        .filter_map(|d| match &d.kind {
+            DynamicKind::Slot {
+                fallback: Some(fb), ..
+            } => Some(*fb),
+            _ => None,
+        })
+        .collect();
     let rxs: Vec<RxInfo<'_>> = module
         .reactions
         .iter()
         .enumerate()
-        .filter(|(_, r)| fragment_in_tree(&frags, r.owner) && !for_bodies.contains(&r.owner))
+        .filter(|(_, r)| {
+            fragment_in_tree(&frags, r.owner)
+                && !for_bodies.contains(&r.owner)
+                && !for_body_slot_fallbacks.contains(&r.owner)
+        })
         .map(|(id, r)| RxInfo {
             id,
             decl: r,
@@ -1096,7 +1115,8 @@ fn generate_component_pieces(
                         if for_ir.key.is_some() {
                             key_methods.push(emit_key_method(module, for_ir, &item_ty)?);
                         }
-                        item_methods.push(emit_item_method(module, for_ir, &item_ty)?);
+                        item_methods
+                            .push(emit_item_method(module, &frags, &prefix, for_ir, &item_ty)?);
                     }
                     DynamicKind::Component(c) => {
                         // Prop-pass (§7.6): direct writes on the child's
@@ -3850,6 +3870,8 @@ fn collect_body_reads(module: &ViewModule, body: FragmentId) -> Vec<StrId> {
 /// with `item`/`index` locals substituted and parent state reads via `self`.
 fn emit_item_method(
     module: &ViewModule,
+    frags: &[FragInfo],
+    prefix: &str,
     for_ir: &lig_ir::fragment::ForIr,
     item_ty: &Ty,
 ) -> Result<proc_macro2::TokenStream, CodegenError> {
@@ -3938,11 +3960,30 @@ fn emit_item_method(
                 // method (the instance store and the plan-op mirroring are
                 // reconcile state) — the item-bind replay emits nothing here.
             }
+            DynamicKind::Slot { fallback, .. } => {
+                // M14 per-item slot assembly: the outlet's own fallback
+                // mounts into EVERY live item's outlet hole — idempotently
+                // (`mount_slot` is a no-op on an already-mounted item),
+                // inside the per-item replay — and the fallback's scalar
+                // binds apply with the item/index substituted. Fills for
+                // list-body outlets are the cross-component follow-up (the
+                // M9 unmatched-fill backstop denies them); content beyond
+                // scalar binds keeps the codegen backstop.
+                emit_item_slot_arm(
+                    module,
+                    frags,
+                    prefix,
+                    for_ir,
+                    item_ty,
+                    *fallback,
+                    di,
+                    &mut commits,
+                )?;
+            }
             DynamicKind::If(_)
             | DynamicKind::For(_)
             | DynamicKind::Html
             | DynamicKind::Ref
-            | DynamicKind::Slot { .. }
             | DynamicKind::Children
             | DynamicKind::PropPass { .. }
             | DynamicKind::Style => {
@@ -3962,6 +4003,129 @@ fn emit_item_method(
             #(#commits)*
         }
     })
+}
+
+/// The M14 per-item slot arm (§7.4 + §7.5): one For-body outlet's mount
+/// and bind commits for the item replay. The outlet's own fallback mounts
+/// into the item's outlet hole (idempotent — `mount_slot` skips a mounted
+/// item), then its scalar binds apply to the mounted content with the
+/// item/index substituted. Fills for list-body outlets are the
+/// cross-component follow-up (the M9 unmatched-fill backstop denies them
+/// at the parent's codegen); content beyond scalar binds keeps the
+/// codegen backstop.
+fn emit_item_slot_arm(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    prefix: &str,
+    for_ir: &lig_ir::fragment::ForIr,
+    item_ty: &Ty,
+    fallback: Option<FragmentId>,
+    di: usize,
+    commits: &mut Vec<proc_macro2::TokenStream>,
+) -> Result<(), CodegenError> {
+    let Some(fb_id) = fallback else {
+        // A bare outlet with no fallback stays an empty hole per item (the
+        // use-site fill story is the follow-up — the backstop denies fills
+        // that would never mount).
+        return Ok(());
+    };
+    let Some(fb_info) = frags.iter().find(|f| f.id == fb_id) else {
+        return Err(CodegenError::Unsupported(
+            "list-body outlet fallback missing from the component tree",
+        ));
+    };
+    let fb_tpl = tpl_ident(prefix, fb_info.template_id);
+    let fb_holes = hole_ident(prefix, fb_info.id.get() as usize);
+    let fb_branches = branch_ident(prefix, fb_info.id.get() as usize);
+    let fb_frag = &module.fragments[fb_id.get() as usize];
+    let mut binds: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (fdi, fd) in fb_frag.dynamics.iter().enumerate() {
+        if !expr_state_reads(module, fd.expr).is_empty() {
+            return Err(CodegenError::Unsupported(
+                "state-reading binds inside per-item slot content are not admitted in v1 — \
+                 the flush fan-out over live items is the follow-up",
+            ));
+        }
+        let v = gen_item_expr(module, fd.expr, for_ir, item_ty)?;
+        match &fd.kind {
+            DynamicKind::Text => {
+                // The item binding is the apply fn's `String` param (deref
+                // coerces at `&str`); the index binding is `i64` and must
+                // stringify (the emit_item_method discipline, per item).
+                let is_str = match module.exprs.get(fd.expr) {
+                    lig_ir::expr::Expr::Local(l) if *l == for_ir.item => true,
+                    lig_ir::expr::Expr::Local(l) if for_ir.index.is_some_and(|ix| ix == *l) => {
+                        false
+                    }
+                    other => matches!(
+                        codegen_ty_of(module, other),
+                        Ty::Str | Ty::List(_) | Ty::Bool
+                    ),
+                };
+                if is_str {
+                    binds.push(quote! { c.set_text(h, #fdi, &(#v)); });
+                } else {
+                    binds.push(quote! {
+                        {
+                            let mut buf = [0u8; 20];
+                            c.set_text(h, #fdi, ::lig_runtime::format_i64(&mut buf, #v));
+                        }
+                    });
+                }
+            }
+            DynamicKind::Class => {
+                binds.push(quote! { c.set_class(h, #fdi, Some(&(#v))); });
+            }
+            DynamicKind::Attr { key } => {
+                let key_lit = syn::LitStr::new(module.strings.get(*key), Span::call_site());
+                let is_str = matches!(
+                    codegen_ty_of(module, module.exprs.get(fd.expr)),
+                    Ty::Str | Ty::List(_) | Ty::Bool
+                );
+                if is_str {
+                    binds.push(quote! {
+                        c.set_attr(h, #fdi, #key_lit, Some(::lig_runtime::AttrVal::Str(&(#v))));
+                    });
+                } else {
+                    binds.push(quote! {
+                        c.set_attr(
+                            h,
+                            #fdi,
+                            #key_lit,
+                            Some(::lig_runtime::AttrVal::Num((#v) as f64)),
+                        );
+                    });
+                }
+            }
+            DynamicKind::StyleProp { prop } => {
+                let prop_id = prop.get();
+                binds.push(quote! {
+                    c.set_style_dyn(h, #fdi, &[(#prop_id, ::lig_runtime::PropVal::Raw(&(#v)))]);
+                });
+            }
+            _ => {
+                return Err(CodegenError::Unsupported(
+                    "per-item slot content admits scalar binds only — events, refs, and \
+                     structural content inside list-body outlets keep the codegen backstop \
+                     (the per-item dispatch/identity follow-ups)",
+                ));
+            }
+        }
+    }
+    commits.push(quote! {
+        f.mount_slot(
+            h,
+            #di,
+            ::lig_runtime::SlotOrigin::Fallback,
+            #fb_tpl,
+            #fb_holes,
+            #fb_branches,
+        );
+        if let Some(c) = f.slot_fallback_mut(#di) {
+            #(#binds)*
+        }
+    });
+    Ok(())
 }
 
 /// `gen_expr` with `item`/`index` locals resolved (item bodies see the item
