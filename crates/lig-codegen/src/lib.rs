@@ -641,6 +641,13 @@ fn generate_component_pieces(
                         // Per-mount instance rebuild (mount path) and dispose
                         // (unmount path) for each leg's component uses (M10
                         // per-mount identity, generalized to the else leg).
+                        // The M18 fill mounts and the M10 branch-time assembly
+                        // share the per-leg mask widening, so the assembly
+                        // buffers declare before the rebuild loop.
+                        let mut leg_assembly: Vec<Vec<proc_macro2::TokenStream>> =
+                            leg_frag_irs.iter().map(|_| Vec::new()).collect();
+                        let mut leg_assembly_masks: Vec<u64> =
+                            leg_frag_irs.iter().map(|_| 0u64).collect();
                         let mut leg_rebuilds: Vec<Vec<proc_macro2::TokenStream>> =
                             leg_frag_irs.iter().map(|_| Vec::new()).collect();
                         let mut leg_disposes: Vec<Vec<proc_macro2::TokenStream>> =
@@ -687,6 +694,149 @@ fn generate_component_pieces(
                                         }
                                     }
                                 });
+                                // M18: the use-site fills mount INTO the fresh
+                                // instance at mount time — the child's outlets
+                                // take this use site's fill by name, else the
+                                // outlet's own fallback (the same resolution
+                                // the build-phase assembly runs for direct
+                                // uses). The fill content's parent-owned
+                                // reactions join the mount mask (the fresh
+                                // list/binds initialize on the next flush
+                                // pass); fallback reactions belong to the
+                                // child — they mark and flush on the instance.
+                                let Some(child_root) = module.component_root(c.component) else {
+                                    continue;
+                                };
+                                let child_frag = &module.fragments[child_root.get() as usize];
+                                for (odi, od) in child_frag.dynamics.iter().enumerate() {
+                                    let DynamicKind::Slot {
+                                        name: slot_name,
+                                        fallback,
+                                    } = &od.kind
+                                    else {
+                                        continue;
+                                    };
+                                    let mounted = c.slots.iter().find(|s| s.name == *slot_name);
+                                    let (content_id, is_fallback) = if let Some(s) = mounted
+                                        && let Some(fb) = s.fallback
+                                    {
+                                        (fb, false)
+                                    } else if let Some(fb) = *fallback {
+                                        (fb, true)
+                                    } else {
+                                        continue;
+                                    };
+                                    let content_frag = &module.fragments[content_id.get() as usize];
+                                    // Fill fragments belong to the parent's
+                                    // tree (the parent prefix); fallback
+                                    // fragments to the child's.
+                                    let owner_prefix = if frags.iter().any(|f| f.id == content_id) {
+                                        prefix.clone()
+                                    } else {
+                                        format!("{child_name}_")
+                                    };
+                                    let tpl = tpl_ident(
+                                        &owner_prefix,
+                                        content_frag.template.get() as usize,
+                                    );
+                                    let holes =
+                                        hole_ident(&owner_prefix, content_id.get() as usize);
+                                    let branches =
+                                        branch_ident(&owner_prefix, content_id.get() as usize);
+                                    let origin = if is_fallback {
+                                        quote!(::lig_runtime::SlotOrigin::Fallback)
+                                    } else {
+                                        quote!(::lig_runtime::SlotOrigin::Fill)
+                                    };
+                                    leg_rebuilds[li].push(quote! {
+                                        if let Some(inst) = self.#field.as_mut() {
+                                            inst.frag.mount_slot(h, #odi, #origin, #tpl, #holes, #branches);
+                                        }
+                                    });
+                                    // Content event attaches at mount time:
+                                    // fill records land on the parent's slab,
+                                    // fallback records on the child's (the
+                                    // M7 ownership discipline, per mount).
+                                    for (edi, ed) in content_frag.dynamics.iter().enumerate() {
+                                        let DynamicKind::Event { event, delegate } = &ed.kind
+                                        else {
+                                            continue;
+                                        };
+                                        let Some(rx_id) = ed.reaction else {
+                                            continue;
+                                        };
+                                        let ev = syn::Ident::new(
+                                            &format!("{event:?}"),
+                                            Span::call_site(),
+                                        );
+                                        let hid = rx_id.get();
+                                        if is_fallback {
+                                            leg_rebuilds[li].push(quote! {
+                                                if let Some(inst) = self.#field.as_mut() {
+                                                    if let Some(n) = inst
+                                                        .frag
+                                                        .slot_fallback(#odi)
+                                                        .map(|c| c.hole(#edi))
+                                                    {
+                                                        inst.frag.attach_foreign(
+                                                            n,
+                                                            ::lig_runtime::EventKind::#ev,
+                                                            ::lig_runtime::HandlerId(#hid),
+                                                            #delegate,
+                                                            h,
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                        } else {
+                                            leg_rebuilds[li].push(quote! {
+                                                if let Some(inst) = self.#field.as_mut() {
+                                                    if let Some(n) = inst
+                                                        .frag
+                                                        .slot_fill(#odi)
+                                                        .map(|c| c.hole(#edi))
+                                                    {
+                                                        self.frag.attach_foreign(
+                                                            n,
+                                                            ::lig_runtime::EventKind::#ev,
+                                                            ::lig_runtime::HandlerId(#hid),
+                                                            #delegate,
+                                                            h,
+                                                        );
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                    if is_fallback {
+                                        // The fallback's binds initialize here:
+                                        // the child's build flushed BEFORE this
+                                        // content mounted (the M6/M7 fallback
+                                        // init-flush, per mount).
+                                        let fb_mask = subtree_init_mask(module, content_id);
+                                        if fb_mask != 0 {
+                                            let fb_mask_lit = syn::LitInt::new(
+                                                &format!("{fb_mask:#x}"),
+                                                Span::call_site(),
+                                            );
+                                            leg_rebuilds[li].push(quote! {
+                                                if let Some(inst) = self.#field.as_mut() {
+                                                    inst.frag.mark_mask(#fb_mask_lit);
+                                                    ::lig_runtime::flush(inst, h);
+                                                }
+                                            });
+                                        }
+                                    } else {
+                                        // The fill's parent-owned reactions join
+                                        // the mount mask (M10's widening, for
+                                        // branch-mounted instances): the fresh
+                                        // content's binds — and a fill-carried
+                                        // list's reconcile — run on the next
+                                        // flush pass.
+                                        leg_assembly_masks[li] |=
+                                            subtree_init_mask(module, content_id);
+                                    }
+                                }
                                 leg_disposes[li].push(quote! {
                                     if let Some(inst) = self.#field.take() {
                                         inst.frag.teardown(h);
@@ -720,10 +870,6 @@ fn generate_component_pieces(
                         // content) or their own fallback (any branch) at
                         // mount time, then the walk recurses into the freshly
                         // mounted content.
-                        let mut leg_assembly: Vec<Vec<proc_macro2::TokenStream>> =
-                            leg_frag_irs.iter().map(|_| Vec::new()).collect();
-                        let mut leg_assembly_masks: Vec<u64> =
-                            leg_frag_irs.iter().map(|_| 0u64).collect();
                         if branch_has_slots {
                             // The owning use site: author-side content
                             // names it through the ctx chain's innermost
@@ -1511,6 +1657,18 @@ fn generate_component_pieces(
         });
     }
     for use_site in &component_uses {
+        // M18: a BRANCH-mounted use's fills mount in the mounting arm (M10
+        // per-mount identity: the instance is an `Option` until the branch
+        // mounts — the build body cannot touch it). The pre-M18 loop emitted
+        // the mount unguarded, a latent M10 fail-open the M18 fixture
+        // exposed (a fill carried into a branch-mounted child emitted
+        // `s.<field>.frag.mount_slot` on a `None` Option).
+        if matches!(
+            ctx_of(module, &frags, &ctx_map, use_site.owner),
+            Ctx::Branch { .. }
+        ) {
+            continue;
+        }
         let Some(child_root) =
             module.component_root(lig_core::id::ComponentId::new(use_site.comp_idx as u32))
         else {
@@ -2174,11 +2332,16 @@ enum Ctx {
     /// (`slot_fallback_mut` — a fill matched to an outlet that lives inside
     /// the child's fallback content, M9). `base` is the context of the
     /// fragment the OUTLET hangs on (`Direct` = the child's own root, the
-    /// M7 shape; composed = a fill of a nested outlet, M9).
+    /// M7 shape; composed = a fill of a nested outlet, M9). `per_mount`
+    /// marks a use site mounted on a BRANCH (M10 identity): the instance
+    /// field is `Option<Child>` and every read/unwrap guards on it (M18 —
+    /// the pre-M18 emission assumed a plain field and failed to compile on
+    /// per-mount fills).
     Fill {
         field: String,
         slot: usize,
         fill: bool,
+        per_mount: bool,
         base: Box<Ctx>,
     },
     /// The outlet fallback mounted on `self.frag` at slot outlet `slot`.
@@ -2302,6 +2465,7 @@ fn map_child_outlets(
     let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
         return;
     };
+    let per_mount = owner_on_branch(module, use_site.owner);
     for (di, d) in frag.dynamics.iter().enumerate() {
         let DynamicKind::Slot {
             name: slot_name,
@@ -2319,6 +2483,7 @@ fn map_child_outlets(
                     field: use_site.field.clone(),
                     slot: di,
                     fill: true,
+                    per_mount,
                     base: Box::new(base.clone()),
                 },
             );
@@ -2337,6 +2502,7 @@ fn map_child_outlets(
                     field: use_site.field.clone(),
                     slot: di,
                     fill: false,
+                    per_mount,
                     base: Box::new(base.clone()),
                 },
                 use_site,
@@ -2345,6 +2511,19 @@ fn map_child_outlets(
             );
         }
     }
+}
+
+/// Whether the use site's owner fragment is the branch of an If anywhere in
+/// the module (M10 per-mount identity): fragment ids belong to exactly one
+/// component tree, so the IR-global scan matches the ctx walk's `Branch`
+/// classification. The instance field is an `Option` there, and every
+/// content ctx unwrapping it guards on the Option (M18).
+fn owner_on_branch(module: &ViewModule, owner: FragmentId) -> bool {
+    module.fragments.iter().any(|f| {
+        f.dynamics.iter().any(
+            |d| matches!(&d.kind, DynamicKind::If(i) if i.then == owner || i.else_ == Some(owner)),
+        )
+    })
 }
 
 /// Walk one of the use site's OWN fill contents for nested outlets (M9)
@@ -2366,6 +2545,7 @@ fn map_fill_outlets(
     let Some(frag) = module.fragments.get(frag_id.get() as usize) else {
         return;
     };
+    let per_mount = owner_on_branch(module, use_site.owner);
     for (di, d) in frag.dynamics.iter().enumerate() {
         let DynamicKind::Slot {
             name: slot_name,
@@ -2383,6 +2563,7 @@ fn map_fill_outlets(
                     field: use_site.field.clone(),
                     slot: di,
                     fill: true,
+                    per_mount,
                     base: Box::new(base.clone()),
                 },
             );
@@ -2394,6 +2575,7 @@ fn map_fill_outlets(
                     field: use_site.field.clone(),
                     slot: di,
                     fill: true,
+                    per_mount,
                     base: Box::new(base.clone()),
                 },
                 use_site,
@@ -2411,6 +2593,7 @@ fn map_fill_outlets(
                 field: use_site.field.clone(),
                 slot: di,
                 fill: false,
+                per_mount,
                 base: Box::new(base.clone()),
             };
             map.insert(fb.get(), fb_ctx.clone());
@@ -2472,6 +2655,7 @@ fn map_branch_outlets(
                 field: use_site.field.clone(),
                 slot: di,
                 fill: true,
+                per_mount: owner_on_branch(module, use_site.owner),
                 base: Box::new(branch_ctx.clone()),
             };
             map.insert(fb.get(), fill_ctx.clone());
@@ -2853,6 +3037,7 @@ fn ctx_scope(ctx: &Ctx, inner: proc_macro2::TokenStream) -> proc_macro2::TokenSt
             field,
             slot,
             fill,
+            per_mount,
             base,
         } => {
             let slot = *slot;
@@ -2863,7 +3048,13 @@ fn ctx_scope(ctx: &Ctx, inner: proc_macro2::TokenStream) -> proc_macro2::TokenSt
                 quote! { slot_fallback_mut }
             };
             if matches!(&**base, Ctx::Direct) {
-                quote! { if let Some(c) = self.#field.frag.#acc(#slot) { #inner } }
+                if *per_mount {
+                    // M10 per-mount identity: the instance is an `Option` —
+                    // the unwrap guards on it (M18).
+                    quote! { if let Some(c) = self.#field.as_mut().and_then(|inst| inst.frag.#acc(#slot)) { #inner } }
+                } else {
+                    quote! { if let Some(c) = self.#field.frag.#acc(#slot) { #inner } }
+                }
             } else {
                 let recv = ctx_recv(base);
                 let step = quote! { if let Some(c) = #recv.#acc(#slot) { #inner } };
@@ -2899,13 +3090,20 @@ fn ctx_frag_read(ctx: &Ctx) -> proc_macro2::TokenStream {
             field,
             slot,
             fill,
+            per_mount,
             base,
         } => {
             let slot = *slot;
             let field = syn::Ident::new(field, Span::call_site());
             if matches!(&**base, Ctx::Direct) {
                 if *fill {
-                    quote! { self.#field.frag.slot_fill(#slot) }
+                    if *per_mount {
+                        quote! { self.#field.as_ref().and_then(|inst| inst.frag.slot_fill(#slot)) }
+                    } else {
+                        quote! { self.#field.frag.slot_fill(#slot) }
+                    }
+                } else if *per_mount {
+                    quote! { self.#field.as_ref().and_then(|inst| inst.frag.slot_fallback(#slot)) }
                 } else {
                     quote! { self.#field.frag.slot_fallback(#slot) }
                 }
@@ -2977,6 +3175,7 @@ fn ctx_frag_mut(ctx: &Ctx) -> proc_macro2::TokenStream {
             field,
             slot,
             fill,
+            per_mount,
             base,
         } => {
             let slot = *slot;
@@ -2987,7 +3186,11 @@ fn ctx_frag_mut(ctx: &Ctx) -> proc_macro2::TokenStream {
                 quote! { slot_fallback_mut }
             };
             if matches!(&**base, Ctx::Direct) {
-                quote! { self.#field.frag.#acc(#slot) }
+                if *per_mount {
+                    quote! { self.#field.as_mut().and_then(|inst| inst.frag.#acc(#slot)) }
+                } else {
+                    quote! { self.#field.frag.#acc(#slot) }
+                }
             } else {
                 let base_read = ctx_frag_mut(base);
                 quote! { #base_read.and_then(|f| f.#acc(#slot)) }
