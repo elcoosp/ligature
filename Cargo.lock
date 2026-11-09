@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "compile-clean"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "lig-runtime",
  "mock-host",
@@ -584,7 +584,7 @@ dependencies = [
 
 [[package]]
 name = "dummy-host"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "lig-patch",
 ]
@@ -1050,7 +1050,7 @@ dependencies = [
 
 [[package]]
 name = "lig-admission"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "insta",
  "lig-core",
@@ -1060,7 +1060,7 @@ dependencies = [
 
 [[package]]
 name = "lig-cli"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "clap",
  "lig-admission",
@@ -1081,7 +1081,7 @@ dependencies = [
 
 [[package]]
 name = "lig-codegen"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "criterion",
  "insta",
@@ -1098,7 +1098,7 @@ dependencies = [
 
 [[package]]
 name = "lig-core"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "insta",
  "miette",
@@ -1108,7 +1108,7 @@ dependencies = [
 
 [[package]]
 name = "lig-expr"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "lig-core",
  "lig-ir",
@@ -1120,7 +1120,7 @@ dependencies = [
 
 [[package]]
 name = "lig-incremental"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "lig-admission",
  "lig-codegen",
@@ -1136,7 +1136,7 @@ dependencies = [
 
 [[package]]
 name = "lig-ir"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "criterion",
  "insta",
@@ -1147,7 +1147,7 @@ dependencies = [
 
 [[package]]
 name = "lig-parse-solid"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "criterion",
  "insta",
@@ -1166,7 +1166,7 @@ dependencies = [
 
 [[package]]
 name = "lig-parse-vue"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "criterion",
  "lig-core",
@@ -1183,7 +1183,7 @@ dependencies = [
 
 [[package]]
 name = "lig-patch"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "criterion",
  "libc",
@@ -1192,7 +1192,7 @@ dependencies = [
 
 [[package]]
 name = "lig-reactivity"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "insta",
  "lig-core",
@@ -1201,14 +1201,14 @@ dependencies = [
 
 [[package]]
 name = "lig-runtime"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "criterion",
 ]
 
 [[package]]
 name = "lig-sourcemap"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "lig-codegen",
  "lig-core",
@@ -1219,7 +1219,7 @@ dependencies = [
 
 [[package]]
 name = "lig-style"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "insta",
  "lig-core",
@@ -1229,7 +1229,7 @@ dependencies = [
 
 [[package]]
 name = "lig-taffy-profile"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "insta",
  "lig-core",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "mock-host"
-version = "1.2.0"
+version = "1.2.1"
 dependencies = [
  "insta",
  "lig-runtime",
