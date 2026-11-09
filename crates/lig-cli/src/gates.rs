@@ -707,7 +707,13 @@ pub fn errors_gen() -> i32 {
     entries.sort();
     for path in &entries {
         let text = std::fs::read_to_string(path).expect("read error doc");
-        let stem = path.file_stem().unwrap().to_string_lossy().into_owned();
+        // Path components fall back to the display path instead of panicking
+        // on stemless names (`.md`, filesystem roots) — a gate must fail with
+        // a message, never an unwind (M16 debt: the weak-error unwraps).
+        let stem = path.file_stem().map_or_else(
+            || path.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
         let title = text
             .lines()
             .find_map(|l| l.strip_prefix(&format!("# {stem} — ")))
@@ -753,7 +759,10 @@ pub fn errors_gen() -> i32 {
     let mut embedded = 0usize;
     for path_md in &entries {
         let text = std::fs::read_to_string(path_md).expect("read error doc");
-        let stem = path_md.file_stem().unwrap().to_string_lossy().into_owned();
+        let stem = path_md.file_stem().map_or_else(
+            || path_md.display().to_string(),
+            |n| n.to_string_lossy().into_owned(),
+        );
         // Raw-string delimiters adapt to the content: a literal quote
         // followed by the fence inside the Markdown would terminate the raw
         // string, so grow the fence (0 hashes first — clippy wants minimal).
@@ -866,7 +875,10 @@ fn run_admission_case(case_dir: &std::path::Path) -> Result<(), String> {
     }
     // NFR-5 rendering contract for deny/lint cases: file:line:col header,
     // code, ≤120-char offending excerpt, and the catalog URL.
-    let name = case_dir.file_name().unwrap().to_string_lossy().into_owned();
+    let name = case_dir.file_name().map_or_else(
+        || case_dir.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     let rendered = match lig_parse_solid::lower_module(&source, &name) {
         Ok(m) => {
             let rep = lig_admission::admit(&m, profile);
@@ -892,13 +904,10 @@ fn run_admission_case(case_dir: &std::path::Path) -> Result<(), String> {
 }
 
 fn expect_clean(case_dir: &std::path::Path, source: &str) -> Result<(), String> {
-    let name = case_dir
-        .parent()
-        .unwrap()
-        .file_name()
-        .unwrap()
-        .to_string_lossy()
-        .into_owned();
+    let name = case_dir.parent().and_then(|p| p.file_name()).map_or_else(
+        || case_dir.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    );
     match lig_parse_solid::lower_module(source, "input.solid.tsx") {
         Ok(m) => {
             let rep = lig_admission::admit(&m, lig_admission::Profile::Layout);
