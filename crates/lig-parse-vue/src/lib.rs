@@ -109,19 +109,20 @@ pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagn
     Ok(module)
 }
 
-/// The M10/M13 own-tree contract (mirrors the Solid leg): slot outlets
-/// inside v-for bodies of a component's own template deny with one precise
-/// reason (per-item slot assembly is still the keyed-component follow-up
-/// for outlets). Before M10 the outlet lowered silently broken: the item
-/// template carried a never-mounted outlet hole. Component uses admit since
-/// M13 — per-item instance identity: the generated reconcile mirrors the
-/// keyed plan onto a `Vec<Option<Child>>` instance store (build+attach on
-/// insert, teardown on remove, reposition on move), so each live item owns
-/// its instance — DIRECT item-body uses only. Component uses inside
-/// list-body v-if branches stay denied (the sticky `in_for` discipline:
-/// an If inside a list item is still per-item, and the branch-context
-/// composition is the follow-up). v-if branches outside lists admit
-/// (per-mount identity).
+/// The M10/M13/M14 own-tree contract (mirrors the Solid leg): slot outlets
+/// inside v-for bodies of a component's own template admit DIRECT item
+/// bodies since M14 — per-item slot assembly: every live item mounts the
+/// outlet's own fallback into the item's outlet hole, and the per-item
+/// replay drives the fallback's item-bound binds. Before M10 the outlet
+/// lowered silently broken: the item template carried a never-mounted
+/// outlet hole. Outlets inside list-body v-if branches stay denied (the
+/// sticky `in_for` discipline: branch-in-item slot composition is the
+/// follow-up). Component uses admit since M13 — per-item instance identity:
+/// the generated reconcile mirrors the keyed plan onto a
+/// `Vec<Option<Child>>` instance store (build+attach on insert, teardown on
+/// remove, reposition on move), so each live item owns its instance —
+/// DIRECT item-body uses only; branch-in-item uses stay denied. v-if
+/// branches outside lists admit (per-mount identity).
 fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigDiagnostic>) {
     // The walk state: `(fragment, in_for, item_branch)` — see the Solid
     // leg's [`own_tree_contract`] for the sticky discipline.
@@ -137,10 +138,10 @@ fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigD
                           instance identity covers the direct item-body use; branch-in-item \
                           composition is the follow-up (hoist the use out of the body)",
                 ),
-                (DynamicKind::Slot { .. }, true, _) => Some(
-                    "slot outlets inside list item bodies are not admitted — per-item slot \
-                          assembly is the keyed-component follow-up (hoist the outlet out of the \
-                          body)",
+                (DynamicKind::Slot { .. }, true, true) => Some(
+                    "slot outlets inside list item branches are not admitted — per-item slot \
+                          assembly covers the direct item-body outlet; branch-in-item slot \
+                          composition is the follow-up (hoist the outlet out of the body)",
                 ),
                 _ => None,
             };
@@ -2510,8 +2511,8 @@ impl ComponentLowering<'_> {
                 }),
                 DynamicKind::Slot { .. } => in_list_item.then(|| {
                     "slot outlets inside list item bodies of slot content are not admitted — \
-                     per-item slot assembly is the keyed-component follow-up (hoist the outlet out \
-                     of the body)"
+                     per-item slot assembly covers the OWN-TREE list body; composed fill/fallback \
+                     resolution is the follow-up (hoist the outlet out of the body)"
                         .to_string()
                 }),
                 DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
@@ -3360,19 +3361,14 @@ const on = ref(true);
         }
     }
 
-    /// The M10/M13 own-tree contract (Vue leg): OUTLETS inside v-for bodies
-    /// of the component's OWN template still deny with one precise reason
-    /// (per-item slot assembly remains the keyed-component follow-up for
-    /// outlets) — closing the silent fail-open where the item template
-    /// lowered with a never-mounted outlet hole. Component uses admit since
-    /// M13 (per-item instance identity). If branches admit (the per-mount
-    /// identity story).
+    /// The M14 lift (Vue leg): slot outlets admit DIRECTLY on v-for bodies
+    /// of the component's own template — per-item slot assembly: every live
+    /// item mounts the outlet's own fallback into the item's outlet hole,
+    /// and the per-item replay drives the fallback's item-bound binds.
+    /// Component uses admit since M13 (per-item instance identity).
     #[test]
-    fn own_tree_for_bodies_deny_outlets() {
-        let cases: [(&str, &str); 1] = [
-            // Outlet inside a v-for body of the component's own template
-            (
-                r#"<script setup lang="ts">
+    fn own_tree_for_bodies_admit_outlets() {
+        let src = r#"<script setup lang="ts">
 defineOptions({ name: "Inner" });
 const items = ref(["a"]);
 </script>
@@ -3381,23 +3377,55 @@ const items = ref(["a"]);
     <span v-for="item in items" :key="item"><slot name="a"><em>{{ item }}</em></slot></span>
   </ul>
 </template>
-"#,
-                "Outlet in own-tree list",
-            ),
-        ];
-        for (src, what) in cases {
-            match lower_module(src, "own_list.vue") {
-                Ok(_) => panic!("{what}: expected LIG-E001, got success"),
-                Err(diags) => {
-                    assert!(
-                        diags.iter().any(|d| d.code == "LIG-E001"),
-                        "{what}: expected LIG-E001, got {diags:?}"
-                    );
-                    assert!(
-                        diags.iter().any(|d| d.message.contains("per-item")),
-                        "{what}: expected the per-item reason, got {diags:?}"
-                    );
-                }
+"#;
+        let m = lower_module(src, "own_list.vue").unwrap_or_else(|diags| {
+            panic!("outlet in own-tree list body: expected admission, got {diags:?}")
+        });
+        let v = lig_ir::validate::validate(&m);
+        assert!(v.is_empty(), "invariants must hold: {v:?}");
+        assert!(
+            m.fragments
+                .iter()
+                .any(|f| f.dynamics.iter().any(|d| matches!(
+                    &d.kind,
+                    lig_ir::DynamicKind::Slot {
+                        fallback: Some(_),
+                        ..
+                    }
+                ))),
+            "the item template carries the outlet with its fallback"
+        );
+    }
+
+    /// The M14 boundary (Vue leg): an outlet inside a v-if branch hanging on
+    /// a v-for body keeps the sticky `in_for` denial — per-item slot
+    /// assembly covers the DIRECT item-body outlet; branch-in-item slot
+    /// composition is the follow-up.
+    #[test]
+    fn own_tree_item_branches_still_deny_outlets() {
+        let src = r#"<script setup lang="ts">
+defineOptions({ name: "Inner" });
+const items = ref(["a"]);
+</script>
+<template>
+  <ul>
+    <span v-for="item in items" :key="item">
+      <b v-if="true"><slot name="a"><em>{{ item }}</em></slot></b>
+    </span>
+  </ul>
+</template>
+"#;
+        match lower_module(src, "branch_outlet_list.vue") {
+            Ok(_) => panic!("outlet in a list-item branch: expected LIG-E001, got success"),
+            Err(diags) => {
+                assert!(
+                    diags.iter().any(|d| d.code == "LIG-E001"),
+                    "the sticky in-for contract fires: {diags:?}"
+                );
+                assert!(
+                    diags.iter().any(|d| d.message.contains("branch")),
+                    "the branch-in-item reason: {diags:?}"
+                );
             }
         }
     }

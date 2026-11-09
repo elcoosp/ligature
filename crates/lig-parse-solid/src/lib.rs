@@ -117,20 +117,21 @@ pub fn lower_module(source: &str, path: &str) -> Result<ViewModule, Vec<LigDiagn
     Ok(module)
 }
 
-/// The M10/M13 own-tree contract: slot outlets inside FOR bodies of a
-/// component's own template deny with one precise reason (per-item slot
-/// assembly is still the keyed-component follow-up for outlets). Before M10
-/// the outlet lowered silently broken: the item template carried a
-/// never-mounted outlet hole (nothing mounts fills/fallbacks per item).
-/// Component uses admit since M13 — per-item instance identity: the
-/// generated reconcile mirrors the keyed plan onto a `Vec<Option<Child>>`
-/// instance store (build+attach on insert, teardown on remove, reposition
-/// on move), so each live item owns its instance — DIRECT item-body uses
-/// only. Component uses inside list-body BRANCHES stay denied (the sticky
-/// `in_for` discipline: an If inside a list item is still per-item, and the
-/// branch-context composition is the follow-up). If branches outside lists
-/// admit — the per-mount identity story (rebuilt per mount, disposed on
-/// unmount).
+/// The M10/M13/M14 own-tree contract: slot outlets inside FOR bodies of a
+/// component's own template admit DIRECT item bodies since M14 — per-item
+/// slot assembly: every live item mounts the outlet's own fallback into the
+/// item's outlet hole, and the per-item replay drives the fallback's
+/// item-bound binds. Before M10 the outlet lowered silently broken: the
+/// item template carried a never-mounted outlet hole (nothing mounts
+/// fills/fallbacks per item). Outlets inside list-item BRANCHES stay
+/// denied (the sticky `in_for` discipline: branch-in-item slot composition
+/// is the follow-up). Component uses admit since M13 — per-item instance
+/// identity: the generated reconcile mirrors the keyed plan onto a
+/// `Vec<Option<Child>>` instance store (build+attach on insert, teardown on
+/// remove, reposition on move), so each live item owns its instance —
+/// DIRECT item-body uses only; branch-in-item uses stay denied. If
+/// branches outside lists admit — the per-mount identity story (rebuilt
+/// per mount, disposed on unmount).
 fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigDiagnostic>) {
     // The walk state: `(fragment, in_for, item_branch)`. `in_for` marks For
     // bodies (the outlet denial is sticky through nested branches);
@@ -148,10 +149,10 @@ fn own_tree_contract(module: &ViewModule, root: FragmentId, diags: &mut Vec<LigD
                           instance identity covers the direct item-body use; branch-in-item \
                           composition is the follow-up (hoist the use out of the body)",
                 ),
-                (DynamicKind::Slot { .. }, true, _) => Some(
-                    "slot outlets inside list item bodies are not admitted — per-item slot \
-                          assembly is the keyed-component follow-up (hoist the outlet out of \
-                          the body)",
+                (DynamicKind::Slot { .. }, true, true) => Some(
+                    "slot outlets inside list item branches are not admitted — per-item slot \
+                          assembly covers the direct item-body outlet; branch-in-item slot \
+                          composition is the follow-up (hoist the outlet out of the body)",
                 ),
                 _ => None,
             };
@@ -1672,8 +1673,8 @@ impl ComponentLowering<'_, '_> {
                 }),
                 DynamicKind::Slot { .. } => in_list_item.then(|| {
                     "slot outlets inside list item bodies of slot content are not admitted — \
-                     per-item slot assembly is the keyed-component follow-up (hoist the outlet out \
-                     of the body)"
+                     per-item slot assembly covers the OWN-TREE list body; composed fill/fallback \
+                     resolution is the follow-up (hoist the outlet out of the body)"
                         .to_string()
                 }),
                 DynamicKind::Children | DynamicKind::PropPass { .. } | DynamicKind::Style => Some(
