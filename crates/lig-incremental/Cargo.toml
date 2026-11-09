@@ -16,8 +16,17 @@ lig-parse-solid = { workspace = true }
 lig-parse-vue = { workspace = true }
 lig-reactivity = { workspace = true }
 lig-sourcemap = { workspace = true }
+miette = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "session"
+harness = false
 
 [lints]
 workspace = true
