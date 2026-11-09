@@ -1,14 +1,15 @@
 import { For, Show } from "solid-js";
 
+export function Cell() {
+  return <Slot name="cell" />;
+}
+
 export function Rows() {
-  const [on, setOn] = createSignal(true);
-  const [items, setItems] = createSignal(["a", "b"]);
+  const [rows, setRows] = createSignal(["a", "b"]);
   const [picked, setPicked] = createSignal("");
   return (
-    <Show when={on()}>
-      <For each={items()} key={(n) => n}>
-        {(n) => <li onClick={() => setPicked(n)}>{n}</li>}
-      </For>
-    </Show>
+    <Cell cell={<For each={rows()} key={(r) => r}>
+      {(r) => <li onClick={() => setPicked(r)}>{r}</li>}
+    </For>} />
   );
 }
