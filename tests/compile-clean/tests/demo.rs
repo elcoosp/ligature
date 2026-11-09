@@ -3,10 +3,10 @@
 //! compile-clean fixture run end-to-end.
 
 use compile_clean::{
-    component_use, counter, dynamic_style, effect_multi, event_object, for_event, for_keyed,
-    for_list, list_component, list_slot, show_else, slots_branch_component, slots_branch_outlet,
-    slots_component, slots_dynamic, slots_named, slots_nested, slots_structural, template_ref,
-    v_model,
+    component_use, counter, dynamic_style, effect_multi, event_object, for_event,
+    for_event_composed, for_keyed, for_list, list_component, list_slot, show_else,
+    slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic, slots_named,
+    slots_nested, slots_structural, template_ref, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::{Commit, MockHost};
@@ -895,4 +895,94 @@ fn list_events_dispatch_per_item() {
     assert_eq!(fresh, before + 1, "the fresh item attached once");
     app.fire_f1_d0(&mut h, 1, &EvData::new());
     assert_eq!(app.picked, "gamma", "the fresh item's handler dispatches");
+}
+
+/// The M17 composed-list event surface, end to end: the For body hangs
+/// inside a Show branch, and its DIRECT handler still attaches per fresh
+/// item — through the composed reconcile's receiver-parameterized insert
+/// arms — and dispatches index-addressed through the same per-item fire fn
+/// shape as the direct list (M15). The branch cycle mounts, disposes, and
+/// remounts the records with the branch; keyed moves inside the branch carry
+/// them; a stale index stays a no-op.
+#[test]
+fn composed_list_events_dispatch_per_item() {
+    let mut h = MockHost::new();
+    let mut app =
+        for_event_composed::PickPanel::build(&mut h, for_event_composed::PickPanelProps::default());
+    // The branch mounts on the initial flush with both items → one Attach
+    // per live item, each at that item's own button node inside the branch's
+    // list slot.
+    let attaches = |h: &MockHost| {
+        h.commits
+            .iter()
+            .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
+            .count()
+    };
+    assert_eq!(
+        attaches(&h),
+        2,
+        "one attach per live item on the branch mount"
+    );
+    let branch = app.frag.branch(0).expect("the then leg mounts");
+    assert_eq!(
+        branch.list_len(0),
+        2,
+        "alpha/beta mounted inside the branch"
+    );
+    let alpha_node = branch.list_item(0, 0).map(|f| f.hole(0)).expect("item 0");
+    let beta_node = branch.list_item(0, 1).map(|f| f.hole(0)).expect("item 1");
+    assert_ne!(alpha_node, beta_node, "each item owns its own button node");
+
+    // Dispatch: index-addressed through the source, so the live item's value
+    // substitutes exactly like the direct list (M15) does.
+    app.fire_f2_d0(&mut h, 0, &EvData::new());
+    assert_eq!(app.picked, "alpha", "item 0's handler picked alpha");
+    app.fire_f2_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "beta", "item 1's handler picked beta");
+
+    // A keyed rotation inside the branch moves the SAME handler records:
+    // no re-attach, and the live index addresses the rotated item.
+    let before = attaches(&h);
+    app.set_rows(vec!["beta".into(), "alpha".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    let branch = app
+        .frag
+        .branch(0)
+        .expect("the branch survives the rotation");
+    assert_eq!(
+        branch.list_item(0, 1).map(|f| f.hole(0)),
+        Some(alpha_node),
+        "the LIS-stable item kept its slab (and its handler record)"
+    );
+    assert_eq!(attaches(&h), before, "a keyed move re-attaches nothing");
+    app.fire_f2_d0(&mut h, 0, &EvData::new());
+    assert_eq!(app.picked, "beta", "live index 0 is now beta");
+
+    // The branch cycle: unmounting disposes the records with the branch,
+    // remounting attaches fresh ones — per-mount semantics (M10) composed
+    // with per-item dispatch (M15/M17).
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(app.frag.branch(0).is_none(), "the branch unmounted");
+    app.set_on(true);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(
+        attaches(&h),
+        before + 2,
+        "the remount attached one record per fresh item"
+    );
+    let branch = app.frag.branch(0).expect("the then leg remounted");
+    assert_ne!(
+        branch.list_item(0, 0).map(|f| f.hole(0)),
+        Some(alpha_node),
+        "a remounted branch rebuilds fresh slabs"
+    );
+    app.fire_f2_d0(&mut h, 0, &EvData::new());
+    assert_eq!(app.picked, "beta", "the remounted item 0 dispatches");
+
+    // A stale index stays a no-op (source-addressed, never a panic).
+    app.set_rows(vec!["beta".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    app.fire_f2_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "beta", "a stale index is a no-op, not a panic");
 }
