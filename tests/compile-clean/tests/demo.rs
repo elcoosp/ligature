@@ -3,8 +3,8 @@
 //! compile-clean fixture run end-to-end.
 
 use compile_clean::{
-    component_use, counter, dynamic_style, effect_multi, event_object, for_keyed, for_list,
-    list_component, list_slot, show_else, slots_branch_component, slots_branch_outlet,
+    component_use, counter, dynamic_style, effect_multi, event_object, for_event, for_keyed,
+    for_list, list_component, list_slot, show_else, slots_branch_component, slots_branch_outlet,
     slots_component, slots_dynamic, slots_named, slots_nested, slots_structural, template_ref,
     v_model,
 };
@@ -808,4 +808,91 @@ fn show_else_mounts_binds_and_disposes_per_mount() {
         Some("late"),
         "the remounted then leg re-initializes through the mount marking"
     );
+}
+
+/// The M15 per-item event dispatch, end to end: an event handler DIRECTLY on
+/// a keyed For body attaches per fresh item (one Attach commit per item, at
+/// the event's hole), dispatches index-addressed through the per-item fire
+/// fn (the live item's value substitutes into the handler body, and the
+/// setter writes cascade through the standard flush), keyed rotations move
+/// the SAME handlers with their items (no re-attach), removals dispose the
+/// records with the item's slab, and a stale index dispatches as a no-op.
+#[test]
+fn list_events_dispatch_per_item() {
+    let mut h = MockHost::new();
+    let mut app = for_event::Picks::build(&mut h, for_event::PicksProps::default());
+    // Two items mounted on the initial flush → two Attach commits, one per
+    // item, each at that item's own button node (distinct slabs), all with
+    // the same handler reaction id and delegation flag.
+    let attaches: Vec<_> = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
+        .collect();
+    assert_eq!(attaches.len(), 2, "one attach per live item");
+    let nodes: Vec<_> = (0..2)
+        .map(|i| {
+            app.frag
+                .list_item(0, i)
+                .map(|f| f.hole(0))
+                .expect("item fragment")
+        })
+        .collect();
+    assert_ne!(nodes[0], nodes[1], "each item owns its own button node");
+    assert_eq!(app.frag.list_len(0), 2, "alpha/beta mounted");
+
+    // Dispatch: fire on the live index substitutes THAT item — item 0 is
+    // alpha, item 1 is beta.
+    app.fire_f1_d0(&mut h, 0, &EvData::new());
+    assert_eq!(app.picked, "alpha", "item 0's handler picked alpha");
+    app.fire_f1_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "beta", "item 1's handler picked beta");
+
+    // A keyed rotate moves the SAME items without rebuilding: no new Attach
+    // commits (the handler records move with their fragments), and the live
+    // index now addresses the rotated item.
+    let before = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
+        .count();
+    let alpha_node = nodes[0];
+    app.set_rows(vec!["beta".into(), "alpha".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(
+        app.frag
+            .list_item(0, 1)
+            .map(|f| f.hole(0))
+            .expect("alpha moved to 1"),
+        alpha_node,
+        "the LIS-stable item kept its slab (and its handler record)"
+    );
+    let after = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
+        .count();
+    assert_eq!(before, after, "a keyed move re-attaches nothing");
+    app.fire_f1_d0(&mut h, 0, &EvData::new());
+    assert_eq!(app.picked, "beta", "live index 0 is now beta");
+
+    // A removal disposes the item's slab (its handler record with it); a
+    // stale index dispatches as a no-op — the source no longer has the item.
+    app.set_rows(vec!["beta".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.frag.list_len(0), 1, "alpha removed");
+    app.fire_f1_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "beta", "a stale index is a no-op, not a panic");
+
+    // A fresh key mounts a fresh item and attaches ITS handler exactly once.
+    app.set_rows(vec!["beta".into(), "gamma".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    let fresh = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
+        .count();
+    assert_eq!(fresh, before + 1, "the fresh item attached once");
+    app.fire_f1_d0(&mut h, 1, &EvData::new());
+    assert_eq!(app.picked, "gamma", "the fresh item's handler dispatches");
 }
