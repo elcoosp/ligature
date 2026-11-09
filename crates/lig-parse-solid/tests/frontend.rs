@@ -446,28 +446,29 @@ export function Panel({ title }) {
     );
 }
 
-/// The M13 boundary (Solid leg): nested outlets inside LIST bodies of
-/// content stay denied with LIG-E001 — per-item slot assembly remains the
-/// keyed-component follow-up for OUTLETS. Component uses in list bodies
-/// admit since M13 (per-item instance identity). The BRANCH cases M9
-/// denied admit since M10 (per-mount identity + the branch-time slot
-/// assembly).
+/// The M13→M18 boundary (Solid leg): the list-body outlet case this test
+/// carried since M13 (a bare outlet directly on a content For body) ADMITS
+/// since M18 — the composed owner-direct lift (see
+/// `composed_content_list_bodies_admit_events_and_outlets`). What stays
+/// fail-closed here: an outlet inside a BRANCH hanging on a content list
+/// body — the sticky branch-in-item denial, unchanged by the lift (the
+/// lift covers the body's OWN surface only).
 #[test]
 fn slot_content_stays_fail_closed_on_structural_instances() {
     let cases: [(&str, &str); 1] = [
-        // Nested outlet inside a For body on content
+        // Nested outlet inside a BRANCH on a content list body
         (
-            r#"import { For } from "solid-js";
+            r#"import { For, Show } from "solid-js";
 export function App() {
   return (
     <Panel
       title="x"
-      header={<For each={["a"]}>{(t) => <Slot name="inner" />}</For>}
+      header={<For each={["a"]}>{(t) => <Show when={t.length > 0}><Slot name="inner" /></Show>}</For>}
     />
   );
 }
 "#,
-            "Outlet in content list",
+            "Outlet in a content item branch",
         ),
     ];
     for (body, what) in cases {
@@ -672,4 +673,76 @@ export function Inner({ items }) {
             );
         }
     }
+}
+
+/// The M18 lift (Solid leg): a COMPOSED CONTENT list body — a `For` hanging
+/// inside a fill — admits its own DIRECT surface. An event handler and a
+/// slot outlet directly on the item body lower: the composed reconcile's
+/// receiver-parameterized insert arms attach the handler per fresh item
+/// (M17's machinery, the content leg), and the shared per-item replay
+/// mounts the outlet's own fallback into every live item's hole (M14's
+/// machinery through any receiver). This completes the contract ADR-0030
+/// and the LIG-E118 catalog entry already document: composed = branch- OR
+/// slot-owned.
+#[test]
+fn composed_content_list_bodies_admit_events_and_outlets() {
+    let src = r#"import { For, Show } from "solid-js";
+
+export function Cell() {
+  return <Slot name="cell" />;
+}
+
+export function PickList() {
+  const [on, setOn] = createSignal(true);
+  const [rows, setRows] = createSignal(["alpha", "beta"]);
+  const [picked, setPicked] = createSignal("");
+  return (
+    <Show when={on()}>
+      <Cell cell={<For each={rows()} key={(r) => r}>
+        {(r) => (
+          <li onClick={() => setPicked(r)}>
+            <Slot name="row"><i class="pick">{r}</i></Slot>
+          </li>
+        )}
+      </For>} />
+    </Show>
+  );
+}
+"#;
+    let m =
+        lig_parse_solid::lower_module(src, "for-composed-content.tsx").unwrap_or_else(|diags| {
+            panic!(
+                "event+outlet on a composed content list body: expected admission, got {diags:?}"
+            )
+        });
+    let v = lig_ir::validate::validate(&m);
+    assert!(v.is_empty(), "invariants must hold: {v:?}");
+    let body = m
+        .fragments
+        .iter()
+        .find(|f| {
+            f.dynamics
+                .iter()
+                .any(|d| matches!(d.kind, lig_ir::DynamicKind::Event { .. }))
+                && f.dynamics
+                    .iter()
+                    .any(|d| matches!(d.kind, lig_ir::DynamicKind::Slot { .. }))
+        })
+        .expect("the item body carries both the handler and the outlet");
+    assert!(
+        body.dynamics
+            .iter()
+            .any(|d| matches!(d.kind, lig_ir::DynamicKind::Event { .. })),
+        "the owner-direct handler lowers"
+    );
+    assert!(
+        body.dynamics.iter().any(|d| matches!(
+            &d.kind,
+            lig_ir::DynamicKind::Slot {
+                fallback: Some(_),
+                ..
+            }
+        )),
+        "the owner-direct outlet lowers with its item-bound fallback"
+    );
 }
