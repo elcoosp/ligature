@@ -276,7 +276,7 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
     assert!(stdout.contains("7385"), "D-8-pinned byte count: {stdout}");
     assert!(
-        stdout.contains("all 15 row(s) within budget"),
+        stdout.contains("all 16 row(s) within budget"),
         "summary present: {stdout}"
     );
     assert!(
@@ -292,6 +292,10 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(
         stdout.contains("codegen_list_component"),
         "M13 list-component row: {stdout}"
+    );
+    assert!(
+        stdout.contains("codegen_list_slot"),
+        "M14 list-slot row: {stdout}"
     );
 }
 
