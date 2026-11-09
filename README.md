@@ -9,14 +9,14 @@
     <code>quote!</code> → <code>syn</code> → <code>prettyplease</code> pipeline emit readable Rust
     that runs on a <code>#![no_std]</code> slab runtime behind an object-safe <code>Host</code> trait.
     For teams that want a reactive UI layer with a known, enforced subset — embedded to web hosts —
-    CI byte-compares both frontend legs of 34 conformance fixtures against the committed contract on every push.
+    CI byte-compares both frontend legs of 35 conformance fixtures against the committed contract on every push.
   </p>
   <p>
     <a href="https://github.com/elcoosp/ligature/actions/workflows/ci.yml"><img src="https://img.shields.io/github/actions/workflow/status/elcoosp/ligature/ci.yml?style=flat-square&label=CI" alt="CI status"/></a>
     <a href="docs/adr/0012-msrv-and-dependency-pins.md"><img src="https://img.shields.io/badge/MSRV-1.97%2B-informational?style=flat-square" alt="MSRV 1.97+"/></a>
     <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-informational?style=flat-square" alt="License: MIT OR Apache-2.0"/></a>
     <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.3.0-blue?style=flat-square" alt="Version 1.3.0"/></a>
-    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-34%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="34 conformance fixtures, both frontend legs"/></a>
+    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-35%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="35 conformance fixtures, both frontend legs"/></a>
   </p>
 </div>
 
@@ -63,12 +63,12 @@ dist/
 
 ## Features
 
-- **Two frontends, one contract.** Solid TSX and Vue SFC lower into the same canonical View IR; `lig fixtures verify` byte-compares both legs of 34 conformance fixtures in CI, and a fixture without both legs fails the gate. Template refs are the M12 parity addition: `ref={box}` and `ref="box"` / `:ref="box"` lower to the same `Ref` capture, byte-identical across legs.
+- **Two frontends, one contract.** Solid TSX and Vue SFC lower into the same canonical View IR; `lig fixtures verify` byte-compares both legs of 35 conformance fixtures in CI, and a fixture without both legs fails the gate. Template refs are the M12 parity addition: `ref={box}` and `ref="box"` / `:ref="box"` lower to the same `Ref` capture, byte-identical across legs.
 - **Fail-closed admission ladder.** Every construct lands in exactly one Deny/Lint/Allow tier — 11 rules in `docs/admission/rules.md`, each backed by an allow fixture and a deny/lint fixture, synced 1:1 by a CI gate. A Deny means zero output downstream.
 - **Byte-reproducible codegen.** `quote!` → `syn::File` → `prettyplease` emits Rust that is byte-identical across runs: `lig reproducibility` diffs the committed counter unit (7,385 B, component digest `0x85d06a5c087b3589`) against a fresh generation, and a readability budget is enforced by a syn visitor.
 - **no_std runtime with keyed reconciliation.** The runtime is `#![no_std]` + alloc with `forbid(unsafe_code)`: `Copy` node handles, an object-safe `Host` commit stream, LIS-stable keyed list diffs, and a const-scheduled flush loop. CI proves bare-metal builds for `thumbv7em-none-eabihf` and `aarch64-unknown-none-softfloat`.
 - **Incremental by construction.** FNV-1a digest-gated memos skip unchanged work in `lig build` and `lig watch`; build-order cycles surface as `LIG-E020` denials instead of hangs; chained source maps attribute every generated position back to source, per reaction arm. Since M16 the session stages walk named `tracing` spans (`session_compile`/`lower`/`admit`/`codegen`/`emit`) and `emit_units` fails as a typed miette `Diagnostic` (`ligature::emit`) with help-text — the embed API is observable and fails like the CLI does.
-- **Composed slot content, assembled at every mount.** Fills and fallbacks are full component surfaces: dynamic binds, events, refs, If/For (M8), grandchild component uses with reactive prop-pass, nested outlets whose fills and fallbacks mount with their content (M9), and per-mount component identity plus branch-time assembly — a component or outlet inside a branch mounts, initializes, disposes, and rebuilds with its branch (M10) — on BOTH legs of a conditional: the else leg mounts, assembles, and disposes exactly like the then leg (M11). Components compose in keyed lists too (M13): a component use in a `For`/`v-for` body owns a per-item instance store the keyed plan mirrors — inserts build + attach, removes dispose, and LIS-stable moves reposition the SAME instance. And since M14, slot outlets do the per-item story on their own: an outlet directly on a list body mounts its fallback into EVERY live item's outlet hole through the per-item replay, the mounted content moves with its item without rebuilds and disposes with it, and the fallback's item-bound binds re-apply per replay. Every component use's root attaches at its use hole exactly once per mount, in every ownership shape. And since M15, event handlers work in list bodies too: a handler directly on a `For`/`v-for` body attaches once per fresh item at its own node and dispatches index-addressed through a generated per-item fire fn — the live item's value substitutes into the handler body, keyed moves carry the handler record without re-attaching, removals dispose it with the item's slab, and stale indices are no-ops.
+- **Composed slot content, assembled at every mount.** Fills and fallbacks are full component surfaces: dynamic binds, events, refs, If/For (M8), grandchild component uses with reactive prop-pass, nested outlets whose fills and fallbacks mount with their content (M9), and per-mount component identity plus branch-time assembly — a component or outlet inside a branch mounts, initializes, disposes, and rebuilds with its branch (M10) — on BOTH legs of a conditional: the else leg mounts, assembles, and disposes exactly like the then leg (M11). Components compose in keyed lists too (M13): a component use in a `For`/`v-for` body owns a per-item instance store the keyed plan mirrors — inserts build + attach, removes dispose, and LIS-stable moves reposition the SAME instance. And since M14, slot outlets do the per-item story on their own: an outlet directly on a list body mounts its fallback into EVERY live item's outlet hole through the per-item replay, the mounted content moves with its item without rebuilds and disposes with it, and the fallback's item-bound binds re-apply per replay. Every component use's root attaches at its use hole exactly once per mount, in every ownership shape. And since M15, event handlers work in list bodies: a handler directly on a `For`/`v-for` body attaches once per fresh item at its own node and dispatches index-addressed through a generated per-item fire fn — the live item's value substitutes into the handler body, keyed moves carry the handler record without re-attaching, removals dispose it with the item's slab, and stale indices are no-ops. And since M17, the body doesn't have to hang at the component root: a handler directly on a COMPOSED list body — a `For` inside a branch or slot content — attaches through the composed reconcile's receiver-parameterized insert arms and dispatches through the same fire fn, while handlers deeper in the item subtree (branches in items, nested lists) still deny with the precise code.
 - **A hot-patch protocol with a budget.** One patch dylib, an atomically swapped jump table, never-`dlclose` semantics; `lig patch-spike` chains two patch generations with stub thunks and enforces save→frame under 1 second on Linux and macOS (measured ~125–140 ms).
 - **Performance budgets as a gate, not a vibe.** `docs/benchmarks/budgets.toml` pins one ceiling per bench workload — at least 5x headroom over the recorded reference median — enforced in release mode by `lig budgets` in CI.
 
@@ -140,13 +140,7 @@ Runnable consumer examples live in `crates/lig-incremental/examples` — run the
 ```sh
 cargo run -p lig-incremental --example compile_and_emit   # cold pass → memo reuse → digest-gated emit → the generated unit
 cargo run -p lig-incremental --example render_denial      # a LIG-E114 denial, rendered with its fix and catalog URL
-```
-
-Runnable consumer examples live in `crates/lig-incremental/examples` — run them without touching `dist/`:
-
-```sh
-cargo run -p lig-incremental --example compile_and_emit   # cold pass → memo reuse → digest-gated emit → the generated unit
-cargo run -p lig-incremental --example render_denial      # a LIG-E114 denial, rendered with its fix and catalog URL
+cargo run -p lig-incremental --example composed_events    # M17: a handler on a list body inside a branch — and the zone that still denies
 ```
 
 Generated units are plain Rust built on `lig_runtime`'s prelude — see the committed example
@@ -167,21 +161,25 @@ path, a const `Schedule`, static template tables, and `build`/`fire_*` entry poi
 > it), M15 (per-item event dispatch: a handler directly on a
 > list body attaches per fresh item and dispatches index-addressed
 > through a generated per-item fire fn — the live item substitutes
-> into the handler body), and M16 (the consumer surface: the first
+> into the handler body), M16 (the consumer surface: the first
 > runnable `examples/`, `tracing` spans across the session stages, a
-> typed `EmitError` with miette help-text on the emission seam) complete, with the View IR
+> typed `EmitError` with miette help-text on the emission seam), and
+> M17 (composed-list events: a handler directly on a branch- or
+> slot-owned list body attaches through the composed reconcile's
+> receiver-parameterized insert arms and dispatches through the same
+> per-item fire fn; list-carrying branches remount through the mount
+> mark) complete, with the View IR
 > schema at v5 and the compiled subset deliberately small: constructs outside the contract
-> (slot outlets and events inside list-item branches, events on composed or
-> nested list bodies, callback calls, raw DOM access) deny with a precise code rather than mis-compile. CI runs on Linux and macOS;
+> (events inside list-item branches and nested list bodies, callback calls, raw DOM access) deny with a precise code rather than mis-compile. CI runs on Linux and macOS;
 > the patch protocol is unix-only `dlopen` (`lig doctor` reports it unavailable on Windows).
 > MSRV is 1.97, edition 2024, toolchain pinned at 1.99.1. The release workflow publishes
 > changelogs, not crates — build from source.
 
 ## Learn more
 
-- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m16/REPORT.md`](docs/m16/REPORT.md) — what each milestone delivered and measured (M16, the consumer surface, is delivered on this tree at [`docs/m16/REPORT.md`](docs/m16/REPORT.md))
+- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m17/REPORT.md`](docs/m17/REPORT.md) — what each milestone delivered and measured (M17, composed-list events, is delivered on this tree at [`docs/m17/REPORT.md`](docs/m17/REPORT.md))
 - [`docs/appendix-a.md`](docs/appendix-a.md) — the annotated generated unit every gate pins
-- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023), the else leg (0024), template refs on the Vue leg (0025), per-item instance identity (0026), per-item slot assembly (0027), per-item event dispatch (0028), the consumer surface (0029)
+- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023), the else leg (0024), template refs on the Vue leg (0025), per-item instance identity (0026), per-item slot assembly (0027), per-item event dispatch (0028), the consumer surface (0029), composed-list events (0030)
 - [`docs/admission/rules.md`](docs/admission/rules.md) — the Deny/Lint/Allow rule table; the 15-doc diagnostic catalog under [`docs/errors/`](docs/errors/)
 - Benchmarks: [`docs/benchmarks/budgets.toml`](docs/benchmarks/budgets.toml) (enforced ceilings), [`docs/benchmarks/save-to-frame.md`](docs/benchmarks/save-to-frame.md) (patch protocol numbers), [`docs/benchmarks/oxc-vs-swc.md`](docs/benchmarks/oxc-vs-swc.md) (the parser re-benchmark)
 - [`fixtures/README.md`](fixtures/README.md) — the conformance contract both frontends must satisfy
