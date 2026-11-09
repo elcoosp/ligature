@@ -179,7 +179,7 @@ struct GeneratedMemo {
     profile: Profile,
 }
 
-/// A incremental compilation session: inputs + memos + revision counter.
+/// An incremental compilation session: inputs + memos + revision counter.
 #[derive(Debug, Default)]
 pub struct Session {
     sources: BTreeMap<PathBuf, SourceInput>,
@@ -259,6 +259,7 @@ impl Session {
             .and_then(|m| m.lowered.as_ref())
             .is_some_and(|m| m.source_digest == source_digest);
         if !valid {
+            let _guard = tracing::info_span!("lower", unit = %path.display()).entered();
             let outcome = lower_source(source, &file_name(path));
             let memo = UnitMemo {
                 lowered: Some(LoweredMemo {
@@ -346,7 +347,9 @@ impl Session {
             }
         };
 
-        // Stage 2: admission (profile tiering).
+        // Stage 2: admission (profile tiering) + build-order cycle recovery
+        // (LIG-E020) — one observable `admit` span over the tiering work.
+        let admit_guard = tracing::info_span!("admit", unit = %path.display()).entered();
         let report = admit(&module, profile);
         let mut diagnostics: Vec<LigDiagnostic> = Vec::new();
         let mut admitted = report.is_admitted();
@@ -361,6 +364,7 @@ impl Session {
         }
 
         let source_text = self.sources[path].text.clone();
+        drop(admit_guard);
         if !admitted {
             let unit = CompiledUnit {
                 path: path.to_path_buf(),
@@ -381,6 +385,7 @@ impl Session {
         }
 
         // Stage 4: codegen (D-8 byte-reproducible).
+        let _codegen_guard = tracing::info_span!("codegen", unit = %path.display()).entered();
         match generate_module(&module) {
             Ok(gm) => {
                 let text_digest = digest(gm.text.as_bytes());
@@ -436,6 +441,8 @@ impl Session {
         let mut reused = Vec::new();
         let paths = self.sources.keys().cloned().collect::<Vec<_>>();
         for path in &paths {
+            let _pass_guard =
+                tracing::info_span!("session_compile", unit = %path.display()).entered();
             let (text, digest) = {
                 let src = &self.sources[path];
                 (src.text.clone(), src.digest)
@@ -534,6 +541,7 @@ mod tests {
     use super::{CompileReport, Session, unit_stem};
     use lig_admission::Profile;
     use std::path::{Path, PathBuf};
+    use std::sync::{Arc, Mutex};
 
     fn counter() -> &'static str {
         lig_parse_solid::tests_support::COUNTER_TSX
@@ -541,6 +549,58 @@ mod tests {
 
     fn p(name: &str) -> PathBuf {
         PathBuf::from(name)
+    }
+
+    /// A minimal capturing subscriber: records the name of every span
+    /// created on the installing thread (the M16 observability seam's test
+    /// instrument — no `tracing-subscriber` dependency needed).
+    #[derive(Clone, Default)]
+    struct SpanRecorder {
+        names: Arc<Mutex<Vec<&'static str>>>,
+    }
+
+    impl SpanRecorder {
+        fn recorded(&self) -> Vec<&'static str> {
+            self.names.lock().expect("recorder mutex").clone()
+        }
+    }
+
+    impl tracing::Subscriber for SpanRecorder {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            self.names
+                .lock()
+                .expect("recorder mutex")
+                .push(span.metadata().name());
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {}
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[test]
+    fn compile_passes_record_stage_spans() {
+        // The observability seam: one full pass walks its stages inside
+        // named spans (lower → admit → codegen, one per unit), so embedded
+        // consumers can trace and time the pipeline without touching it.
+        let recorder = SpanRecorder::default();
+        let mut s = Session::new();
+        s.set_source(p("counter.tsx"), counter());
+        tracing::subscriber::with_default(recorder.clone(), || {
+            let _ = s.compile(Profile::Layout);
+        });
+        let names = recorder.recorded();
+        for stage in ["session_compile", "lower", "admit", "codegen"] {
+            assert!(
+                names.contains(&stage),
+                "the pass records a `{stage}` span; got {names:?}"
+            );
+        }
     }
 
     #[test]
