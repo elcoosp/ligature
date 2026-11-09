@@ -121,6 +121,23 @@ fn bench_codegen_for_event(c: &mut Criterion) {
     });
 }
 
+/// Lower the composed-event fixture once (M17: per-item event dispatch on
+/// composed list bodies — the ctx-classified composed reconcile emission, the
+/// receiver-parameterized attach arms, and the list-carrying branch's mount
+/// mark ride the module pipeline), then time repeated codegen of the same
+/// IR.
+fn bench_codegen_for_event_composed(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/for-event-composed/input.solid.tsx");
+    let module =
+        lig_parse_solid::lower_module(src, "for-event-composed.tsx").expect("fixture lowers");
+    c.bench_function("codegen/for-event-composed", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("for-event-composed codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
@@ -130,6 +147,7 @@ criterion_group!(
     bench_codegen_else,
     bench_codegen_list_component,
     bench_codegen_list_slot,
-    bench_codegen_for_event
+    bench_codegen_for_event,
+    bench_codegen_for_event_composed
 );
 criterion_main!(benches);
