@@ -53,9 +53,9 @@ pub static REGISTRY: &[ErrorCode] = &[
     },
     ErrorCode {
         code: "LIG-E118",
-        title: "Event handler beyond the direct list item body",
+        title: "Event handler beyond the list item body",
         reserved: true,
-        stage: "M1;",
+        stage: "M1",
     },
     ErrorCode {
         code: "LIG-E401",
