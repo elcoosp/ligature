@@ -4,7 +4,7 @@
 //! dynamic; functions are static; literals are static; identifiers are
 //! dynamic (they read reactive state).
 
-use oxc_ast::ast::{Expression, UnaryOperator};
+use oxc_ast::ast::Expression;
 
 /// Whether an expression is dynamic (needs a runtime update) under the
 /// dom-expressions syntax heuristic.
@@ -29,20 +29,6 @@ pub fn is_dynamic(expr: &Expression<'_>) -> bool {
         // is dynamic
         _ => true,
     }
-}
-
-/// Whether a JSX attribute value is static-by-syntax (inlinable into the
-/// template string).
-#[must_use]
-pub fn is_static_attr_value(expr: &Expression<'_>) -> bool {
-    !is_dynamic(expr)
-}
-
-/// Whether a unary expression is the logical `!` (used by conditional
-/// lowering).
-#[must_use]
-pub fn is_logical_not(expr: &Expression<'_>) -> bool {
-    matches!(expr, Expression::UnaryExpression(u) if u.operator == UnaryOperator::LogicalNot)
 }
 
 #[cfg(test)]
