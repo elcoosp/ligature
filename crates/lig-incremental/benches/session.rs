@@ -7,14 +7,31 @@
 //! cold pass plus `emit_units_to` into a fresh `MemSink` — what an embedded
 //! consumer pays per pass with no filesystem involved. The watch-sync seam
 //! adds the tick workload: one `sync` diff over an 8-source snapshot with
-//! one edit — the call the `lig watch` loop runs per tick.
+//! one edit — the call the `lig watch` loop runs per tick. The observer seam
+//! adds the observe workload: the same cold pass with the stage events
+//! delivered to a counting observer — what an embedding consumer pays for
+//! the programmatic event stream on top of the plain pass.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use lig_admission::Profile;
 use lig_incremental::Session;
 use lig_incremental::emit::{MemSink, emit_units_to};
+use lig_incremental::observe::{SessionObserver, StageEvent};
 use lig_parse_solid::tests_support::COUNTER_TSX;
 use std::hint::black_box;
+
+/// A counting observer — the observe workload's event sink: every stage
+/// event counted, none retained (the cheapest useful observer).
+#[derive(Default)]
+struct CountingObserver {
+    stages: usize,
+}
+
+impl SessionObserver for CountingObserver {
+    fn on_stage(&mut self, _event: &StageEvent) {
+        self.stages += 1;
+    }
+}
 
 /// Time a cold pass: a fresh session, one source, one compile — every stage
 /// recomputes (the digest gate has nothing to reuse yet).
@@ -40,6 +57,22 @@ fn bench_session_emit_mem(c: &mut Criterion) {
             let units = s.units();
             let mut sink = MemSink::new();
             black_box(emit_units_to(&mut sink, &units, "taffy", false).expect("mem emit"));
+        });
+    });
+}
+
+/// Time a cold pass under observation (the observer seam): a fresh session
+/// with a counting observer installed, one source, one `compile_with` —
+/// every stage recomputes AND reports its event, the programmatic view of
+/// the same pass `session/compile_counter` drives unobserved.
+fn bench_session_observe(c: &mut Criterion) {
+    c.bench_function("session/observe", |b| {
+        b.iter(|| {
+            let mut observer = CountingObserver::default();
+            let mut s = Session::new();
+            s.set_source("counter.tsx", COUNTER_TSX);
+            black_box(s.compile_with(Profile::Layout, &mut observer));
+            black_box(observer.stages);
         });
     });
 }
@@ -82,10 +115,31 @@ fn bench_session_sync(c: &mut Criterion) {
     });
 }
 
+/// Time the session emission seam (M19): a fresh session, one source, one
+/// compile, one `Session::emit_to` into a fresh `MemSink` — the one-call
+/// front of the sink seam, with the BR-1 admission gate and the profile
+/// ledger name riding the call.
+fn bench_session_emit_to(c: &mut Criterion) {
+    c.bench_function("session/emit_to", |b| {
+        b.iter(|| {
+            let mut s = Session::new();
+            s.set_source("counter.tsx", COUNTER_TSX);
+            s.compile(Profile::Layout);
+            let mut sink = MemSink::new();
+            black_box(
+                s.emit_to(&mut sink, Profile::Layout, false)
+                    .expect("session emit"),
+            );
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_session_compile,
+    bench_session_observe,
     bench_session_emit_mem,
+    bench_session_emit_to,
     bench_session_sync
 );
 criterion_main!(benches);
