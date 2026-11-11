@@ -119,6 +119,19 @@ fn counter_tpl() -> &'static [TplNode] {
     TPL
 }
 
+/// A counting observer — the observer-seam measurement's event sink (the
+/// bench drives the same shape: every stage event counted, none retained).
+#[derive(Default)]
+struct SeamObserver {
+    stages: usize,
+}
+
+impl lig_incremental::observe::SessionObserver for SeamObserver {
+    fn on_stage(&mut self, _event: &lig_incremental::observe::StageEvent) {
+        self.stages += 1;
+    }
+}
+
 static TPL: &[TplNode] = &[TplNode::Element {
     tag: "div",
     attrs: &[],
@@ -218,7 +231,11 @@ fn samples_for(name: &str) -> usize {
     match name {
         "lower_solid_counter" | "lower_vue_counter" => 120,
         "canonical_json_counter" => 200,
-        "codegen_counter" | "session_compile_counter" | "session_emit_mem" => 60,
+        "codegen_counter"
+        | "session_compile_counter"
+        | "session_emit_mem"
+        | "session_observe"
+        | "session_emit_to" => 60,
         "codegen_composed"
         | "codegen_branch"
         | "codegen_ref"
@@ -375,6 +392,36 @@ fn session_sync() -> f64 {
     })
 }
 
+/// One full cold pass under observation (the observer-seam workload: the
+/// `session/observe` bench drives the same thing) — set_source + compile
+/// with every stage event delivered to a counting observer: the seam's
+/// cost on top of the plain pass the compile row measures.
+fn session_observe() -> f64 {
+    median_us(samples_for("session_observe"), || {
+        let mut observer = SeamObserver::default();
+        let mut s = lig_incremental::Session::new();
+        s.set_source("counter.tsx", COUNTER_TSX);
+        let r = s.compile_with(lig_admission::Profile::Layout, &mut observer);
+        black_box(r);
+        black_box(observer.stages);
+    })
+}
+
+/// One cold pass plus the one-call session emission seam (the
+/// `session/emit_to` bench drives the same thing) — compile + `emit_to`
+/// into a fresh `MemSink`, the BR-1 gate and the profile ledger name
+/// riding the call.
+fn session_emit_to() -> f64 {
+    median_us(samples_for("session_emit_to"), || {
+        let mut s = lig_incremental::Session::new();
+        s.set_source("counter.tsx", COUNTER_TSX);
+        s.compile(lig_admission::Profile::Layout);
+        let mut sink = lig_incremental::emit::MemSink::new();
+        let r = s.emit_to(&mut sink, lig_admission::Profile::Layout, false);
+        black_box(r.expect("session emit"));
+    })
+}
+
 /// One measurement by ledger name. Time rows return median µs; the bytes row
 /// returns a byte count. The workload of each row is the same one the
 /// matching criterion bench drives (§14.2 — the ledger rows are 1:1 with the
@@ -523,6 +570,8 @@ fn measure(name: &str, root: &Path) -> f64 {
             let u = generate_component(&m, ComponentId::new(0)).expect("codegen");
             u.text.len() as f64
         }
+        "session_observe" => session_observe(),
+        "session_emit_to" => session_emit_to(),
         other => panic!("budgets: unregistered measurement {other} (sync check gap)"),
     }
 }
@@ -543,7 +592,9 @@ const REGISTRY: &[&str] = &[
     "codegen_for_event_composed",
     "codegen_for_composed_content",
     "session_compile_counter",
+    "session_observe",
     "session_emit_mem",
+    "session_emit_to",
     "session_sync",
     "runtime_instantiate",
     "runtime_update_mask",
@@ -718,15 +769,16 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 22 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 24 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
         // codegen_for_event, M16 adds session_compile_counter, M17 adds
         // codegen_for_event_composed, M18 adds
         // codegen_for_composed_content, the sink seam adds
-        // session_emit_mem, the sync seam adds session_sync), all named,
-        // no dupes.
-        assert_eq!(REGISTRY.len(), 22);
+        // session_emit_mem, the sync seam adds session_sync, the observer
+        // seam adds session_observe, the session emission seam adds
+        // session_emit_to), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 24);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
