@@ -1072,7 +1072,6 @@ dependencies = [
  "lig-parse-vue",
  "lig-patch",
  "lig-runtime",
- "lig-sourcemap",
  "oxc_sourcemap",
  "serde",
  "serde_json",
