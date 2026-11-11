@@ -8,6 +8,8 @@
 //! every unit in the pass is admitted.
 
 use crate::CompiledUnit;
+use crate::Session;
+use lig_admission::Profile;
 use miette::Diagnostic;
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -473,13 +475,76 @@ fn hex(v: u64) -> String {
     format!("{v:#018x}")
 }
 
+/// The session-level emission seam (M19): one call takes the last compile
+/// pass's units into any sink — the fail-closed BR-1 gate rides the seam
+/// itself, where a consumer cannot skip it.
+impl Session {
+    /// Emit every unit of the last [`Session::compile`] pass into `sink`
+    /// with the digest gating of [`emit_units_to`] — the session front of
+    /// the emission-target seam: one call from `compile` to the full §9.5
+    /// artifact set, no unit borrowing and no profile string at the call
+    /// site (the profile rides its ledger name via [`Profile::name`]). Pass
+    /// the profile the last compile ran — it names the pass in
+    /// `build-state.json` and `manifest.toml`.
+    ///
+    /// Fail-closed at the seam (BR-1): a session holding a denied unit (a
+    /// lowering failure or an admission denial) or a codegen-backstop
+    /// failure refuses the WHOLE emission — nothing writes, the typed error
+    /// names the blocking stem with the fix. This is the contract the CLI
+    /// holds ("a denied pass never touches dist/"), now enforced inside the
+    /// seam; a session with no compiled units refuses the same way.
+    ///
+    /// # Errors
+    /// A typed [`EmitError`] when any unit blocks the pass (BR-1) or a sink
+    /// write fails — `code` `ligature::emit`, with miette help-text naming
+    /// the fix.
+    pub fn emit_to(
+        &self,
+        sink: &mut dyn ArtifactSink,
+        profile: Profile,
+        prune: bool,
+    ) -> Result<EmissionReport, EmitError> {
+        if self.memos.is_empty() {
+            return Err(EmitError::contract(
+                "session",
+                "the session holds no compiled units — nothing to emit".to_string(),
+                "run `Session::compile` first — the seam emits the units the last pass \
+                 produced, digest-gated as always"
+                    .to_string(),
+            ));
+        }
+        let units = self.units();
+        if let Some(blocked) = units
+            .iter()
+            .find(|u| !u.admitted || u.codegen_error.is_some() || u.generated.is_none())
+        {
+            let reason = if blocked.codegen_error.is_some() {
+                "the codegen backstop failed this unit"
+            } else {
+                "a Deny-tier diagnostic blocks this unit"
+            };
+            return Err(EmitError::contract(
+                &blocked.stem,
+                format!(
+                    "{}: the pass is not fully admitted — {reason}; nothing may write (BR-1)",
+                    blocked.stem
+                ),
+                "a denied pass writes nothing — resolve the unit's diagnostics \
+                 (`lig explain <code>` names the fix) and re-run the compile"
+                    .to_string(),
+            ));
+        }
+        emit_units_to(sink, &units, profile.name(), prune)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{ArtifactSink, MemSink, emit_units, emit_units_to, load_state};
     use crate::Session;
     use lig_admission::Profile;
     use miette::Diagnostic;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     fn counter_session() -> Session {
         let mut s = Session::new();
@@ -489,6 +554,11 @@ mod tests {
         );
         s.compile(Profile::Layout);
         s
+    }
+
+    /// The M0 reference source, for the multi-unit session tests.
+    fn counter_tsx() -> &'static str {
+        lig_parse_solid::tests_support::COUNTER_TSX
     }
 
     /// The five artifact paths one counter emission lands, in the §9.5 layout.
@@ -715,5 +785,165 @@ mod tests {
             .map(|h| h.to_string())
             .expect("miette help-text present");
         assert!(help.contains("writable"), "the help names the fix: {help}");
+    }
+
+    /// The LIG-E117 denial workload: lowers fine, then the admit stage
+    /// denies on the layout-only profile — the session-level BR-1 refusal.
+    const DENIED: &str = concat!(
+        "import { createSignal } from \"solid-js\";\n",
+        "export function A() {\n",
+        "  const [h, setH] = createSignal(\"<b>x</b>\");\n",
+        "  return <div innerHTML={h()} />;\n",
+        "}\n",
+    );
+
+    /// The M18 codegen-backstop workload: lowers and admits, then the
+    /// codegen backstop fails — the other session-level BR-1 refusal.
+    const STATE_FALLBACK: &str = concat!(
+        "import { createSignal, For } from \"solid-js\";\n",
+        "export function Inner() {\n",
+        "  const [label, setLabel] = createSignal(\"static\");\n",
+        "  const [items, setItems] = createSignal([\"alpha\"]);\n",
+        "  return (\n",
+        "    <ul>\n",
+        "      <For each={items()} key={(r) => r}>\n",
+        "        {(r) => <Slot name=\"row\"><i class=\"row\">{label}</i></Slot>}\n",
+        "      </For>\n",
+        "    </ul>\n",
+        "  );\n",
+        "}\n",
+    );
+
+    #[test]
+    fn session_emit_to_writes_the_full_set_through_any_sink() {
+        // The session emission seam: one call from `compile` to the full
+        // §9.5 artifact set in ANY sink — no unit borrowing, no profile
+        // string at the call site (the profile rides its ledger name), and
+        // the artifacts are the bytes the free fn writes.
+        let s = counter_session();
+        let mut sink = MemSink::new();
+        let pass = s
+            .emit_to(&mut sink, Profile::Layout, false)
+            .expect("the session emits into the sink");
+        assert_eq!(pass.written, vec!["counter".to_string()]);
+        for path in artifact_paths() {
+            let bytes = sink
+                .get(&path)
+                .unwrap_or_else(|| panic!("{path} emitted by the session seam"));
+            assert!(!bytes.is_empty(), "{path} is non-empty");
+        }
+        // Byte-identical to the free-fn path over the same units: the seam
+        // is the same emission body, session-fronted.
+        let units = s.units();
+        let mut free = MemSink::new();
+        emit_units_to(&mut free, &units, "taffy", false).expect("the free fn emits");
+        for path in artifact_paths() {
+            assert_eq!(
+                sink.get(&path),
+                free.get(&path),
+                "{path} is byte-identical across the two seams"
+            );
+        }
+    }
+
+    #[test]
+    fn session_emit_to_refuses_a_denied_pass_fail_closed() {
+        // BR-1 at the seam: ONE denied unit refuses the WHOLE emission —
+        // nothing writes, not even the admitted unit's artifacts — and the
+        // typed error names the blocking stem with the fix.
+        let mut s = Session::new();
+        s.set_source(PathBuf::from("counter.tsx"), counter_tsx());
+        s.set_source(PathBuf::from("denied.tsx"), DENIED);
+        s.compile(Profile::Layout);
+        let mut sink = MemSink::new();
+        let err = s
+            .emit_to(&mut sink, Profile::Layout, false)
+            .expect_err("a denied pass refuses the emission");
+        assert!(
+            err.message.contains("denied"),
+            "names the blocking stem: {err}"
+        );
+        assert!(
+            err.message.contains("BR-1"),
+            "names the fail-closed contract: {err}"
+        );
+        assert!(
+            err.code().map(|c| c.to_string()).as_deref() == Some("ligature::emit"),
+            "a stable code: {err:?}"
+        );
+        let help = err
+            .help()
+            .map(|h| h.to_string())
+            .expect("miette help-text present");
+        assert!(help.contains("explain"), "the help names the fix: {help}");
+        assert!(
+            sink.paths().is_empty(),
+            "nothing wrote — not even the admitted unit: {:?}",
+            sink.paths()
+        );
+    }
+
+    #[test]
+    fn session_emit_to_refuses_a_codegen_backstop_pass() {
+        // The other BR-1 refusal: the codegen backstop failed one unit —
+        // the pass is not fully admitted, nothing writes.
+        let mut s = Session::new();
+        s.set_source(PathBuf::from("state_fallback.tsx"), STATE_FALLBACK);
+        s.compile(Profile::Layout);
+        let mut sink = MemSink::new();
+        let err = s
+            .emit_to(&mut sink, Profile::Layout, false)
+            .expect_err("a codegen-failed pass refuses the emission");
+        assert!(
+            err.message.contains("codegen backstop"),
+            "names the failure family: {err}"
+        );
+        assert!(
+            err.message.contains("state_fallback"),
+            "names the blocking stem: {err}"
+        );
+        assert!(sink.paths().is_empty(), "nothing wrote");
+    }
+
+    #[test]
+    fn session_emit_to_before_any_pass_names_the_fix() {
+        // A session with nothing compiled refuses with one precise reason —
+        // forgetting the compile is the consumer bug the seam catches.
+        let s = Session::new();
+        let mut sink = MemSink::new();
+        let err = s
+            .emit_to(&mut sink, Profile::Layout, false)
+            .expect_err("nothing compiled yet");
+        assert!(err.message.contains("no compiled"), "the reason: {err}");
+        let help = err
+            .help()
+            .map(|h| h.to_string())
+            .expect("miette help-text present");
+        assert!(help.contains("compile"), "the help names the fix: {help}");
+        assert!(sink.paths().is_empty(), "nothing wrote");
+    }
+
+    #[test]
+    fn session_emit_to_prunes_like_the_free_fn() {
+        // The prune contract rides the seam: a unit that left the session
+        // has its artifacts pruned from the sink.
+        let mut s = Session::new();
+        s.set_source(PathBuf::from("a.tsx"), counter_tsx());
+        s.set_source(PathBuf::from("b.tsx"), counter_tsx());
+        s.compile(Profile::Layout);
+        let mut sink = MemSink::new();
+        s.emit_to(&mut sink, Profile::Layout, false)
+            .expect("both units emit");
+        s.remove_source(Path::new("b.tsx"));
+        s.compile(Profile::Layout);
+        let pass = s
+            .emit_to(&mut sink, Profile::Layout, true)
+            .expect("the prune pass runs");
+        assert!(pass.written.is_empty(), "a.tsx digest still holds");
+        assert_eq!(pass.pruned, vec!["b".to_string()]);
+        assert!(
+            sink.get("b.rs").is_none() && sink.get("a.rs").is_some(),
+            "b is gone, a survives"
+        );
     }
 }
