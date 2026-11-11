@@ -32,7 +32,7 @@ xtask→CLI gate migration.
 
 - **TDD**: 199 tests across 37 test binaries; the Vue frontend landed with
   unit tests (SFC scanner, template parser, lowering) plus integration
-  coverage through the two-leg parity gate and the CLI surface (`tests/cli.rs`
+  coverage through the two-leg parity gate and the CLI surface (`crates/lig-cli/tests/cli.rs`
   now locks the gate subcommands too).
 - **clippy pedantic**: `cargo clippy --workspace --all-targets -- -D warnings`
   green, including benches; no new allowlist rows.
