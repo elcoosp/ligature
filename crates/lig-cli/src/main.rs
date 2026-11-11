@@ -390,13 +390,11 @@ fn emit_and_report(
         .iter()
         .filter_map(|p| session.unit(p))
         .collect();
-    let profile_str = if profile == Profile::Web {
-        "web"
-    } else {
-        "taffy"
-    };
+    // The ledger name rides the profile itself (M19): the mapping lives in
+    // the library now (`Profile::name`), not in a per-consumer match — the
+    // build-state/manifest spelling and the CLI flag share it.
     let emission =
-        lig_incremental::emit::emit_units(out, &units, profile_str, prune).map_err(|e| {
+        lig_incremental::emit::emit_units(out, &units, profile.name(), prune).map_err(|e| {
             // EmitError is a miette Diagnostic: print the message and its
             // help-text (the fix, in words) on the CLI surface too.
             eprintln!("lig {what}: {e}");
