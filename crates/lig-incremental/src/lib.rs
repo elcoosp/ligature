@@ -18,6 +18,7 @@
 #![deny(missing_docs)]
 
 pub mod emit;
+pub mod observe;
 
 use lig_admission::{Profile, admit};
 use lig_codegen::{GenLinks, generate_module};
@@ -26,9 +27,10 @@ use lig_core::hash::fnv1a64;
 use lig_core::span::Span;
 use lig_ir::ViewModule;
 use lig_reactivity::component_build_order;
+use observe::{SessionObserver, Stage, StageEvent, StageOutcome};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 /// The FNV-1a 64 digest that gates every memo (D-9's currency).
 #[must_use]
@@ -424,16 +426,34 @@ impl Session {
     }
 
     /// The `lowered` query: parse + lower through the frontend the extension
-    /// selects, memoized on the source digest.
-    fn query_lowered(&mut self, path: &Path, source: &str, source_digest: u64) -> &LoweredMemo {
+    /// selects, memoized on the source digest. Fires the `lower` stage event
+    /// — `Computed`/`Failed` with the stage's wall clock on a recompute,
+    /// `Reused` at zero when the memo still validated (D-9).
+    fn query_lowered(
+        &mut self,
+        path: &Path,
+        source: &str,
+        source_digest: u64,
+        observer: &mut Option<&mut dyn SessionObserver>,
+    ) -> &LoweredMemo {
         let valid = self
             .memos
             .get(path)
             .and_then(|m| m.lowered.as_ref())
             .is_some_and(|m| m.source_digest == source_digest);
-        if !valid {
-            let _guard = tracing::info_span!("lower", unit = %path.display()).entered();
+        if valid {
+            fire_stage(
+                observer,
+                Stage::Lower,
+                path,
+                StageOutcome::Reused,
+                Duration::ZERO,
+            );
+        } else {
+            let t0 = Instant::now();
+            let lower_guard = tracing::info_span!("lower", unit = %path.display()).entered();
             let outcome = lower_source(source, &file_name(path));
+            let lowered = outcome.is_ok();
             let memo = UnitMemo {
                 lowered: Some(LoweredMemo {
                     source_digest,
@@ -443,6 +463,18 @@ impl Session {
                 unit: None,
             };
             self.memos.insert(path.to_path_buf(), memo);
+            drop(lower_guard);
+            fire_stage(
+                observer,
+                Stage::Lower,
+                path,
+                if lowered {
+                    StageOutcome::Computed
+                } else {
+                    StageOutcome::Failed
+                },
+                t0.elapsed(),
+            );
         }
         self.memos
             .get_mut(path)
@@ -452,22 +484,29 @@ impl Session {
 
     /// The `generated` query: admission (profile-dependent) → build-order
     /// cycle check (LIG-E020) → codegen, memoized on source digest + profile.
+    /// Fires the `admit` and `codegen` stage events — `Reused` for both when
+    /// the memo still validated, the stages' own events on a recompute.
     fn query_generated(
         &mut self,
         path: &Path,
         source_digest: u64,
         profile: Profile,
+        observer: &mut Option<&mut dyn SessionObserver>,
     ) -> &GeneratedMemo {
         let valid = self
             .memos
             .get(path)
             .and_then(|m| m.generated.as_ref())
             .is_some_and(|m| m.source_digest == source_digest && m.profile == profile);
-        if !valid {
+        if valid {
+            for stage in [Stage::Admit, Stage::Codegen] {
+                fire_stage(observer, stage, path, StageOutcome::Reused, Duration::ZERO);
+            }
+        } else {
             // The computed output rides the unit memo (`CompiledUnit::
             // generated` / `codegen_error`); the generated memo only ever
             // records the memo key.
-            let _ = self.compute_generated(path, profile);
+            let _ = self.compute_generated(path, profile, observer);
             let entry = self
                 .memos
                 .entry(path.to_path_buf())
@@ -484,11 +523,15 @@ impl Session {
     }
 
     /// Compute (not memoize) the `generated` query: stage-by-stage, storing
-    /// the resulting [`CompiledUnit`] on the memo entry.
+    /// the resulting [`CompiledUnit`] on the memo entry. The `admit` and
+    /// `codegen` stages report their events (with their own wall clocks) to
+    /// the observer as they finish — a stage that never runs reports
+    /// nothing.
     fn compute_generated(
         &mut self,
         path: &Path,
         profile: Profile,
+        observer: &mut Option<&mut dyn SessionObserver>,
     ) -> Result<GeneratedOutput, CodegenFailure> {
         // Stage 1: the lowered module (owned clone — borrow-split from the
         // memo table below; lowering is the memoized expensive stage).
@@ -525,6 +568,7 @@ impl Session {
         // Stage 2: admission (profile tiering) + build-order cycle recovery
         // (LIG-E020) — one observable `admit` span over the tiering work.
         let admit_guard = tracing::info_span!("admit", unit = %path.display()).entered();
+        let admit_t0 = Instant::now();
         let report = admit(&module, profile);
         let mut diagnostics: Vec<LigDiagnostic> = Vec::new();
         let mut admitted = report.is_admitted();
@@ -539,6 +583,7 @@ impl Session {
         }
 
         let source_text = self.sources[path].text.clone();
+        let admit_elapsed = admit_t0.elapsed();
         drop(admit_guard);
         if !admitted {
             let unit = CompiledUnit {
@@ -556,12 +601,30 @@ impl Session {
                 .get_mut(path)
                 .expect("lowered memo entry exists")
                 .unit = Some(unit);
+            fire_stage(
+                observer,
+                Stage::Admit,
+                path,
+                StageOutcome::Failed,
+                admit_elapsed,
+            );
             return Ok(GeneratedOutput::denied());
         }
+        fire_stage(
+            observer,
+            Stage::Admit,
+            path,
+            StageOutcome::Computed,
+            admit_elapsed,
+        );
 
         // Stage 4: codegen (D-8 byte-reproducible).
-        let _codegen_guard = tracing::info_span!("codegen", unit = %path.display()).entered();
-        match generate_module(&module) {
+        let codegen_t0 = Instant::now();
+        let codegen_guard = tracing::info_span!("codegen", unit = %path.display()).entered();
+        let generated = generate_module(&module);
+        let codegen_elapsed = codegen_t0.elapsed();
+        drop(codegen_guard);
+        match generated {
             Ok(gm) => {
                 let text_digest = digest(gm.text.as_bytes());
                 let out = GeneratedOutput {
@@ -584,6 +647,13 @@ impl Session {
                     .get_mut(path)
                     .expect("lowered memo entry exists")
                     .unit = Some(unit);
+                fire_stage(
+                    observer,
+                    Stage::Codegen,
+                    path,
+                    StageOutcome::Computed,
+                    codegen_elapsed,
+                );
                 Ok(out)
             }
             Err(e) => {
@@ -608,14 +678,50 @@ impl Session {
                     .get_mut(path)
                     .expect("lowered memo entry exists")
                     .unit = Some(unit);
+                fire_stage(
+                    observer,
+                    Stage::Codegen,
+                    path,
+                    StageOutcome::Failed,
+                    codegen_elapsed,
+                );
                 Err(failure)
             }
         }
     }
 
     /// One full compile pass: run every query for every source, reuse memos
-    /// wherever the recorded digests still validate (D-9).
+    /// wherever the recorded digests still validate (D-9). The unobserved
+    /// form — the same pass [`Session::compile_with`] runs, with no events
+    /// built and no observer driven.
     pub fn compile(&mut self, profile: Profile) -> CompileReport {
+        self.compile_impl(profile, &mut None)
+    }
+
+    /// One full compile pass, observed — the session-observer seam: the same
+    /// digest-gated pass [`Session::compile`] runs, with one [`StageEvent`]
+    /// per stage per unit (`lower` → `admit` → `codegen`) and the pass
+    /// report delivered to `observer` as they happen. See [`observe`] for
+    /// the event shape and the observer contract;
+    /// [`observe::TracingObserver`] forwards the events to `tracing` when a
+    /// subscriber should see the per-stage numbers.
+    pub fn compile_with(
+        &mut self,
+        profile: Profile,
+        observer: &mut dyn SessionObserver,
+    ) -> CompileReport {
+        self.compile_impl(profile, &mut Some(observer))
+    }
+
+    /// The one compile body both entry points drive: an
+    /// `Option<&mut dyn SessionObserver>` seat that stays `None` on the
+    /// unobserved path (no events built) and reborrows the caller's
+    /// observer per fire on the observed one.
+    fn compile_impl(
+        &mut self,
+        profile: Profile,
+        observer: &mut Option<&mut dyn SessionObserver>,
+    ) -> CompileReport {
         let t0 = Instant::now();
         let mut recompiled = Vec::new();
         let mut reused = Vec::new();
@@ -637,20 +743,24 @@ impl Session {
                 .get(path)
                 .and_then(|m| m.generated.as_ref())
                 .is_some_and(|m| m.source_digest == digest && m.profile == profile);
-            let _ = self.query_lowered(path, &text, digest);
-            let _ = self.query_generated(path, digest, profile);
+            let _ = self.query_lowered(path, &text, digest, observer);
+            let _ = self.query_generated(path, digest, profile, observer);
             if had_lowered && had_generated {
                 reused.push(path.clone());
             } else {
                 recompiled.push(path.clone());
             }
         }
-        CompileReport {
+        let report = CompileReport {
             revision: self.revision,
             recompiled,
             reused,
             elapsed: t0.elapsed(),
+        };
+        if let Some(observed) = observer.as_deref_mut() {
+            observed.on_pass(&report);
         }
+        report
     }
 }
 
@@ -658,6 +768,25 @@ fn file_name(path: &Path) -> std::borrow::Cow<'_, str> {
     path.file_name().map_or("input.tsx".into(), |n| {
         std::borrow::Cow::from(n.to_string_lossy().into_owned())
     })
+}
+
+/// Fire one stage event to the observer seat, if occupied — the seam's
+/// single fire point (an unoccupied seat builds no event at all).
+fn fire_stage(
+    observer: &mut Option<&mut dyn SessionObserver>,
+    stage: Stage,
+    unit: &Path,
+    outcome: StageOutcome,
+    elapsed: Duration,
+) {
+    if let Some(observed) = observer.as_deref_mut() {
+        observed.on_stage(&StageEvent {
+            stage,
+            unit: unit.to_path_buf(),
+            outcome,
+            elapsed,
+        });
+    }
 }
 
 /// The LIG-E020 diagnostic for a component cycle: names the cycle path and
