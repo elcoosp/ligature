@@ -64,6 +64,18 @@ metric = "time"
 budget = 25.0
 note = "M5 measures plan_keyed (the shipped sequential keyed planner, 64-item reorder; M5 reference median 3.8 µs — the M4 row measured the keyed_diff core at 2.6 µs); ≈6.6× headroom"
 
+[[budget]]
+name = "runtime_mount_lifecycle"
+metric = "time"
+budget = 1.5
+note = "M20 reference median 0.29 µs (runtime/mount_lifecycle bench, release, Linux x86_64 — mount, one save-tick through Mounted::update, dispose); ≈5× headroom"
+
+[[budget]]
+name = "runtime_flush_checked_cycle"
+metric = "time"
+budget = 0.2
+note = "M21 reference median 37 ns (runtime/flush_checked_cycle bench, release, Linux x86_64 — the ping-pong cycle through flush_checked, exactly MAX_PASSES capped passes then the typed error); ≈5× headroom"
+
 # Patch protocol (§11.3, ADR-013 — the runtime half of save→frame).
 [[budget]]
 name = "patch_apply_1"
