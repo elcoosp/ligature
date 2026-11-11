@@ -193,3 +193,21 @@ name = "session_sync"
 metric = "time"
 budget = 70.0
 note = "sync-seam reference median 13.3 µs (session/sync bench, release, Linux x86_64, re-measured 13.2-16.0 across three runs); ≈5.3× headroom"
+
+# The observer seam (M19): one cold session pass with the stage events
+# delivered to a counting observer — the programmatic event stream on top
+# of the plain pass the session_compile_counter row drives unobserved.
+[[budget]]
+name = "session_observe"
+metric = "time"
+budget = 3500.0
+note = "observer-seam reference median 679 µs (session/observe bench, release, Linux x86_64; the unobserved pass measured 678 µs — the event stream costs ≈0.2%); ≈5.2× headroom"
+
+# The session emission seam (M19): one cold pass plus the one-call
+# `Session::emit_to` into a fresh in-memory MemSink — the BR-1 admission
+# gate and the profile ledger name ride the call.
+[[budget]]
+name = "session_emit_to"
+metric = "time"
+budget = 4500.0
+note = "session-emission-seam reference median 867 µs (session/emit_to bench, release, Linux x86_64; the free-fn emit_mem pass measured 850 µs — the one-call front adds the BR-1 gate ≈2%); ≈5.2× headroom"
