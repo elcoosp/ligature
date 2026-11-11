@@ -27,6 +27,22 @@ pub enum Profile {
     Web,
 }
 
+impl Profile {
+    /// The ledger name the profile rides (`taffy` | `web`): the
+    /// `build-state.json` / `manifest.toml` profile field, the CLI flag
+    /// value, and the emission seam all share this one mapping — it lives
+    /// in the library, not in a per-consumer match. These exact strings
+    /// are load-bearing: the digest gate keys the recorded build state on
+    /// them.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Layout => "taffy",
+            Self::Web => "web",
+        }
+    }
+}
+
 /// The result of admitting one module.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AdmissionReport {
@@ -308,6 +324,15 @@ mod tests {
         assert!(r.is_admitted(), "{:?}", r.diagnostics);
         assert!(r.lints().next().is_none());
         assert!(r.allowed > 0);
+    }
+
+    #[test]
+    fn profile_names_are_the_load_bearing_ledger_names() {
+        // The emission seam writes these into build-state.json and
+        // manifest.toml, and the CLI flag spellings match — the mapping is
+        // load-bearing, so it is pinned here where it lives.
+        assert_eq!(Profile::Layout.name(), "taffy");
+        assert_eq!(Profile::Web.name(), "web");
     }
 
     #[test]
