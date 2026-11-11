@@ -727,9 +727,13 @@ pub fn errors_gen() -> i32 {
             let _ = rest;
             (false, "active".to_string())
         } else {
-            // e.g. `reserved (M2)` / `deny (M1)` / `lint (M1)`
+            // e.g. `reserved (M2)` / `deny (M1)` / `lint (M1)` — the split
+            // includes the status line's punctuation (`;`, `,`) so the
+            // stage token is the bare milestone name (the narrowed-status
+            // form `deny (M1; narrowed by M15, ...)` parses to `M1`, not
+            // `M1;`).
             let stage = status
-                .split(['(', ' ', ')'])
+                .split(['(', ' ', ')', ';', ','])
                 .find(|t| t.starts_with('M'))
                 .unwrap_or("M1")
                 .to_string();
