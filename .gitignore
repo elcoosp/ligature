@@ -10,4 +10,5 @@ tests/*/target
 
 # local ship delivery (the agent leaves these untracked; the user runs ship.sh)
 /ship.sh
+/ship.toml
 /.github/pr-body.md
