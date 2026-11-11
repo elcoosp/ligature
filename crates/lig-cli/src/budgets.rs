@@ -218,7 +218,7 @@ fn samples_for(name: &str) -> usize {
     match name {
         "lower_solid_counter" | "lower_vue_counter" => 120,
         "canonical_json_counter" => 200,
-        "codegen_counter" | "session_compile_counter" => 60,
+        "codegen_counter" | "session_compile_counter" | "session_emit_mem" => 60,
         "codegen_composed"
         | "codegen_branch"
         | "codegen_ref"
@@ -231,7 +231,7 @@ fn samples_for(name: &str) -> usize {
         "runtime_instantiate" | "runtime_update_mask" | "patch_apply_1" | "patch_dispatch_hit" => {
             800
         }
-        "runtime_list_diff_keyed" => 400,
+        "runtime_list_diff_keyed" | "session_sync" => 400,
         "gen_counter_bytes" => 1,
         _ => 100,
     }
@@ -333,6 +333,45 @@ fn session_compile_counter() -> f64 {
         s.set_source("counter.tsx", COUNTER_TSX);
         let r = s.compile(lig_admission::Profile::Layout);
         black_box(r);
+    })
+}
+
+/// One cold pass plus an in-memory emission (the sink-seam workload: the
+/// `session/emit_mem` bench drives the same thing) — set_source + compile
+/// + `emit_units_to` into a fresh `MemSink`, no filesystem involved.
+fn session_emit_mem() -> f64 {
+    median_us(samples_for("session_emit_mem"), || {
+        let mut s = lig_incremental::Session::new();
+        s.set_source("counter.tsx", COUNTER_TSX);
+        s.compile(lig_admission::Profile::Layout);
+        let units = s.units();
+        let mut sink = lig_incremental::emit::MemSink::new();
+        let r = lig_incremental::emit::emit_units_to(&mut sink, &units, "taffy", false);
+        black_box(r.expect("mem emit"));
+    })
+}
+
+/// One watch tick (the sync-seam workload: the `session/sync` bench drives
+/// the same thing) — a cold 8-source registration pass plus one `sync` diff
+/// over a fresh snapshot with one edit.
+fn session_sync() -> f64 {
+    use std::path::PathBuf;
+    let edited = COUNTER_TSX.replace("Add", "Add2");
+    median_us(samples_for("session_sync"), || {
+        let mut s = lig_incremental::Session::new();
+        for i in 0..8 {
+            s.set_source(format!("unit{i}.tsx"), COUNTER_TSX);
+        }
+        let fresh: Vec<(PathBuf, &str)> = (0..8)
+            .map(|i| {
+                if i == 3 {
+                    (PathBuf::from(format!("unit{i}.tsx")), edited.as_str())
+                } else {
+                    (PathBuf::from(format!("unit{i}.tsx")), COUNTER_TSX)
+                }
+            })
+            .collect();
+        black_box(s.sync(fresh, &[]));
     })
 }
 
@@ -440,6 +479,8 @@ fn measure(name: &str, root: &Path) -> f64 {
             })
         }
         "session_compile_counter" => session_compile_counter(),
+        "session_emit_mem" => session_emit_mem(),
+        "session_sync" => session_sync(),
         "runtime_instantiate" => median_us(samples_for(name), || {
             let mut h = CountingHost { commits: 0 };
             let f = Fragment::new(&mut h, counter_tpl(), HOLE_ANCHORS, BRANCH_ANCHORS);
@@ -502,6 +543,8 @@ const REGISTRY: &[&str] = &[
     "codegen_for_event_composed",
     "codegen_for_composed_content",
     "session_compile_counter",
+    "session_emit_mem",
+    "session_sync",
     "runtime_instantiate",
     "runtime_update_mask",
     "runtime_list_diff_keyed",
@@ -675,13 +718,15 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 20 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 22 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
         // codegen_for_event, M16 adds session_compile_counter, M17 adds
         // codegen_for_event_composed, M18 adds
-        // codegen_for_composed_content), all named, no dupes.
-        assert_eq!(REGISTRY.len(), 20);
+        // codegen_for_composed_content, the sink seam adds
+        // session_emit_mem, the sync seam adds session_sync), all named,
+        // no dupes.
+        assert_eq!(REGISTRY.len(), 22);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
