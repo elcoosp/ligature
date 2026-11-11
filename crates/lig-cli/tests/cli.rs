@@ -276,7 +276,7 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
     assert!(stdout.contains("7385"), "D-8-pinned byte count: {stdout}");
     assert!(
-        stdout.contains("all 24 row(s) within budget"),
+        stdout.contains("all 26 row(s) within budget"),
         "summary present: {stdout}"
     );
     assert!(
@@ -322,6 +322,14 @@ fn budgets_gate_reports_the_ledger_table() {
         "sink-seam row: {stdout}"
     );
     assert!(stdout.contains("session_sync"), "sync-seam row: {stdout}");
+    assert!(
+        stdout.contains("runtime_mount_lifecycle"),
+        "M20 mount-seam row: {stdout}"
+    );
+    assert!(
+        stdout.contains("runtime_flush_checked_cycle"),
+        "M21 checked-flush row: {stdout}"
+    );
 }
 
 #[test]
