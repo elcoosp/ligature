@@ -130,7 +130,10 @@ pub fn ir_to_rust(
     let mut b = SourceMapBuilder::default();
     // One generated file per source module (§9.5) — the emitted unit name.
     b.set_file("generated.rs");
-    let gen_id = b.add_source_and_content("generated.rs", generated);
+    // The generated source entry rides the map for the chained consumer
+    // (`chain` carries every source entry + content across); its id has no
+    // token referencing it — every IR-side token anchors to `ir_id`.
+    let _ = b.add_source_and_content("generated.rs", generated);
     let ir_id = b.add_source_and_content("ir", "");
 
     // Collect (dst_line, dst_col, src_line, src_col, label-kind, label) then
@@ -197,7 +200,6 @@ pub fn ir_to_rust(
             Some(name),
         );
     }
-    let _ = gen_id;
     Ok(b.into_owned_sourcemap().into_inner())
 }
 
