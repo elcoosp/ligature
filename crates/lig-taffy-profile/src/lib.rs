@@ -82,14 +82,8 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
 
     let mut assigns: Vec<String> = Vec::new();
     let mut unmapped: Vec<String> = Vec::new();
-    let push = |field: &str,
-                value: String,
-                css: &str,
-                assigns: &mut Vec<String>,
-                unmapped: &mut Vec<String>| {
+    let push = |field: &str, value: String, assigns: &mut Vec<String>| {
         assigns.push(format!("s.{field} = {value};"));
-        let _ = css;
-        let _ = unmapped;
     };
 
     // Group consecutive rect/list entries positionally: prop_id -> values.
@@ -130,9 +124,7 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
                 push(
                     "margin",
                     format!("taffy::Rect {{ top: {t}, right: {r}, bottom: {b}, left: {l} }}"),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 );
             }
             TaffyField::Padding { .. } => {
@@ -140,9 +132,7 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
                 push(
                     "padding",
                     format!("taffy::Rect {{ top: {t}, right: {r}, bottom: {b}, left: {l} }}"),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 );
             }
             TaffyField::Gap { .. } => {
@@ -157,9 +147,7 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
                 push(
                     "gap",
                     format!("taffy::Size {{ width: {w}, height: {h} }}"),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 );
             }
             _ => unmapped.push(css.to_string()),
@@ -175,30 +163,22 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
                 Some("flex") => push(
                     "display",
                     "taffy::style::Display::Flex".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("block") => push(
                     "display",
                     "taffy::style::Display::Block".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("grid") => push(
                     "display",
                     "taffy::style::Display::Grid".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("none") => push(
                     "display",
                     "taffy::style::Display::None".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 _ => unmapped.push(css.to_string()),
             },
@@ -206,23 +186,17 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
                 Some("static") => push(
                     "position",
                     "taffy::style::Position::Static".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("relative") => push(
                     "position",
                     "taffy::style::Position::Relative".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("absolute") => push(
                     "position",
                     "taffy::style::Position::Absolute".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 _ => unmapped.push(css.to_string()),
             },
@@ -260,43 +234,31 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
                 }
             }
             TaffyField::AspectRatio => match v {
-                StyleValue::Num(n) => push(
-                    "aspect_ratio",
-                    format!("Some({})", fnum(n)),
-                    css,
-                    &mut assigns,
-                    &mut unmapped,
-                ),
+                StyleValue::Num(n) => {
+                    push("aspect_ratio", format!("Some({})", fnum(n)), &mut assigns);
+                }
                 _ => unmapped.push(css.to_string()),
             },
             TaffyField::FlexDirection => match keyword(&v) {
                 Some("row") => push(
                     "flex_direction",
                     "taffy::style::FlexDirection::Row".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("column") => push(
                     "flex_direction",
                     "taffy::style::FlexDirection::Column".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("row-reverse") => push(
                     "flex_direction",
                     "taffy::style::FlexDirection::RowReverse".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("column-reverse") => push(
                     "flex_direction",
                     "taffy::style::FlexDirection::ColumnReverse".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 _ => unmapped.push(css.to_string()),
             },
@@ -304,69 +266,57 @@ pub fn lower_to_taffy_const_fn(ir: &StyleIr, name: &str) -> LoweredStyle {
                 Some("nowrap") => push(
                     "flex_wrap",
                     "taffy::style::FlexWrap::NoWrap".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("wrap") => push(
                     "flex_wrap",
                     "taffy::style::FlexWrap::Wrap".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 Some("wrap-reverse") => push(
                     "flex_wrap",
                     "taffy::style::FlexWrap::WrapReverse".into(),
-                    css,
                     &mut assigns,
-                    &mut unmapped,
                 ),
                 _ => unmapped.push(css.to_string()),
             },
             TaffyField::FlexGrow => {
                 if let StyleValue::Num(n) = v {
-                    push("flex_grow", fnum(n), css, &mut assigns, &mut unmapped);
+                    push("flex_grow", fnum(n), &mut assigns);
                 } else {
                     unmapped.push(css.to_string());
                 }
             }
             TaffyField::FlexShrink => {
                 if let StyleValue::Num(n) = v {
-                    push("flex_shrink", fnum(n), css, &mut assigns, &mut unmapped);
+                    push("flex_shrink", fnum(n), &mut assigns);
                 } else {
                     unmapped.push(css.to_string());
                 }
             }
             TaffyField::FlexBasis => {
                 if let Some(d) = dimension(&v) {
-                    push("flex_basis", d, css, &mut assigns, &mut unmapped);
+                    push("flex_basis", d, &mut assigns);
                 } else {
                     unmapped.push(css.to_string());
                 }
             }
             TaffyField::AlignItems => match align_kw(&v) {
-                Some(k) => push("align_items", k, css, &mut assigns, &mut unmapped),
+                Some(k) => push("align_items", k, &mut assigns),
                 None => unmapped.push(css.to_string()),
             },
             TaffyField::AlignSelf => match align_kw(&v) {
-                Some(k) => push(
-                    "align_self",
-                    format!("Some({k})"),
-                    css,
-                    &mut assigns,
-                    &mut unmapped,
-                ),
+                Some(k) => push("align_self", format!("Some({k})"), &mut assigns),
                 None => unmapped.push(css.to_string()),
             },
             TaffyField::JustifyContent => {
                 match content_kw(&v).map(|s| s.replace("AlignContent", "JustifyContent")) {
-                    Some(k) => push("justify_content", k, css, &mut assigns, &mut unmapped),
+                    Some(k) => push("justify_content", k, &mut assigns),
                     None => unmapped.push(css.to_string()),
                 }
             }
             TaffyField::AlignContent => match content_kw(&v) {
-                Some(k) => push("align_content", k, css, &mut assigns, &mut unmapped),
+                Some(k) => push("align_content", k, &mut assigns),
                 None => unmapped.push(css.to_string()),
             },
             _ => unmapped.push(css.to_string()),
