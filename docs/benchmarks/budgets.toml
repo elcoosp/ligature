@@ -174,3 +174,22 @@ name = "codegen_for_composed_content"
 metric = "time"
 budget = 6500.0
 note = "M18 reference median 1251 µs (codegen/for-composed-content bench, release, Linux x86_64, re-measured 1152-1251 across three runs); ≈5.2× headroom"
+
+# The emission-target seam (sink seam): one cold session pass plus
+# emit_units_to into a fresh in-memory MemSink — sourcemap verify, the IR
+# JSON, the merged map, the manifest, and the state file ride the pass, no
+# filesystem involved (what an embedded consumer pays per pass).
+[[budget]]
+name = "session_emit_mem"
+metric = "time"
+budget = 4700.0
+note = "sink-seam reference median 883 µs (session/emit_mem bench, release, Linux x86_64, re-measured 852-1094 across three runs); ≈5.3× headroom"
+
+# The watch-sync seam: one cold 8-source registration pass plus one sync
+# diff over a fresh snapshot with one edit — the call the lig watch loop
+# runs per tick.
+[[budget]]
+name = "session_sync"
+metric = "time"
+budget = 70.0
+note = "sync-seam reference median 13.3 µs (session/sync bench, release, Linux x86_64, re-measured 13.2-16.0 across three runs); ≈5.3× headroom"
