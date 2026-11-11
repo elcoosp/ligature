@@ -154,3 +154,14 @@ pub mod ternary_child {
 pub mod v_model {
     include!("gen/v_model.rs");
 }
+
+/// The mount seam (M20), wired for the demo units: the component-unit impl
+/// lives next to the `include!`d unit it names — in a real embedding crate
+/// this is the one consumer impl the seam asks for, the root fragment (the
+/// generated state's `frag` field) as the teardown surface. `counter` is the
+/// walkthrough unit the `host_mount` example drives.
+impl lig_runtime::mount::ComponentUnit for counter::Counter {
+    fn fragment(&mut self) -> &mut lig_runtime::Fragment {
+        &mut self.frag
+    }
+}
