@@ -284,7 +284,7 @@ fn session_over(paths: &[PathBuf], what: &str) -> Result<Session, CliError> {
 
 fn run_check(paths: &[PathBuf], deny_warn: bool, profile: Profile) -> Result<(), CliError> {
     let mut session = session_over(paths, "check")?;
-    let report = session.compile(profile);
+    session.compile(profile);
     let mut denied = false;
     for path in session.sources() {
         let Some(unit) = session.unit(&path) else {
@@ -331,7 +331,6 @@ fn run_check(paths: &[PathBuf], deny_warn: bool, profile: Profile) -> Result<(),
             }
         }
     }
-    let _ = report;
     if denied {
         Err(CliError::Denied)
     } else {
@@ -464,31 +463,25 @@ fn run_watch(
     );
     loop {
         std::thread::sleep(interval);
+        // The tick, as one sync call (the watch-sync seam): read the fresh
+        // snapshot and hand it to the session — additions, edits, and
+        // removals come back as one report. Explicit roots are kept even
+        // when missing from disk, and a present-but-unreadable scanned
+        // source keeps its last registered text (re-fed from the session).
         let seen = collect_sources(&roots);
-        let mut changed = false;
-        // Additions and edits.
+        let mut fresh: Vec<(PathBuf, String)> = Vec::with_capacity(seen.len());
         for path in &seen {
-            let Ok(text) = std::fs::read_to_string(path) else {
-                continue;
-            };
-            let fresh = lig_incremental::digest(text.as_bytes());
-            let current = session
-                .unit(path)
-                .map_or(u64::MAX, lig_incremental::CompiledUnit::source_hash);
-            let known = session.sources().iter().any(|p| p == path);
-            if !known || fresh != current {
-                session.set_source(path, text);
-                changed = true;
+            match std::fs::read_to_string(path) {
+                Ok(text) => fresh.push((path.clone(), text)),
+                Err(_) => {
+                    if let Some(text) = session.source_text(path) {
+                        fresh.push((path.clone(), text.to_string()));
+                    }
+                }
             }
         }
-        // Removals.
-        for path in session.sources() {
-            if !seen.contains(&path) && !paths.contains(&path) {
-                session.remove_source(&path);
-                changed = true;
-            }
-        }
-        if !changed {
+        let sync_report = session.sync(fresh, &roots);
+        if sync_report.is_empty() {
             continue;
         }
         pass += 1;
