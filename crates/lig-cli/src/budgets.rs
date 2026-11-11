@@ -21,6 +21,7 @@ use lig_parse_solid::tests_support::COUNTER_TSX;
 use lig_runtime::host::{
     AttrVal, EventKind, HandlerId, HookId, Host, NodeId, PropVal, StyleConstId, TemplateDesc,
 };
+use lig_runtime::mount::{ComponentUnit, Mounted};
 use lig_runtime::{AnchorStep, DirtySet, Fragment, Reactions, Schedule, TplNode, plan_keyed};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -180,6 +181,86 @@ impl Reactions for NullReactions {
     fn run(&mut self, _h: &mut dyn Host, _r: u8) {}
 }
 
+/// A ping-pong cycle (r0 writes r1, r1 writes r0) — the checked-flush
+/// workload's never-converging schedule, the worst case the fail-safe cap
+/// bounds (the `runtime/flush_checked_cycle` bench drives the same shape).
+struct CycleReactions {
+    dirty: DirtySet,
+}
+
+static CYCLE_REACTIONS_SCHEDULE: Schedule = Schedule {
+    order: &[0, 1],
+    writes: &[1 << 1, 1 << 0],
+    writes_hi: &[],
+};
+
+impl Reactions for CycleReactions {
+    fn schedule(&self) -> &'static Schedule {
+        &CYCLE_REACTIONS_SCHEDULE
+    }
+    fn dirty(&mut self) -> &mut DirtySet {
+        &mut self.dirty
+    }
+    fn run(&mut self, _h: &mut dyn Host, _r: u8) {}
+}
+
+/// The mount-seam workload's unit (M20): the counter-shaped state a
+/// generated `build` emits — root fragment, one text bind — with the
+/// `ComponentUnit` impl the mount front drives. Same shape the
+/// `runtime/mount_lifecycle` bench drives.
+struct MountUnit {
+    count: i64,
+    frag: Fragment,
+}
+
+const MOUNT_BIND: u8 = 0;
+
+static MOUNT_SCHEDULE: Schedule = Schedule {
+    order: &[MOUNT_BIND],
+    writes: &[0],
+    writes_hi: &[],
+};
+
+impl MountUnit {
+    fn build(h: &mut dyn Host) -> Self {
+        let mut s = Self {
+            count: 0,
+            frag: Fragment::new(h, counter_tpl(), HOLE_ANCHORS, BRANCH_ANCHORS),
+        };
+        s.frag.mark_mask(1 << MOUNT_BIND);
+        lig_runtime::flush(&mut s, h);
+        s
+    }
+
+    /// The generated setter shape: write the field, mark the bits.
+    fn set_count(&mut self, v: i64) {
+        self.count = v;
+        self.frag.mark_mask(1 << MOUNT_BIND);
+    }
+}
+
+impl Reactions for MountUnit {
+    fn schedule(&self) -> &'static Schedule {
+        &MOUNT_SCHEDULE
+    }
+    fn dirty(&mut self) -> &mut DirtySet {
+        &mut self.frag.dirty
+    }
+    fn run(&mut self, host: &mut dyn Host, r: u8) {
+        if r == MOUNT_BIND {
+            let mut buf = [0u8; 20];
+            let text = lig_runtime::format_i64(&mut buf, self.count);
+            self.frag.set_text(host, 0, text);
+        }
+    }
+}
+
+impl ComponentUnit for MountUnit {
+    fn fragment(&mut self) -> &mut Fragment {
+        &mut self.frag
+    }
+}
+
 /// The un-patched body the safepoint falls back to / routes from.
 fn patchable_v0() -> u64 {
     0
@@ -245,9 +326,12 @@ fn samples_for(name: &str) -> usize {
         | "codegen_for_event"
         | "codegen_for_event_composed"
         | "codegen_for_composed_content" => 40,
-        "runtime_instantiate" | "runtime_update_mask" | "patch_apply_1" | "patch_dispatch_hit" => {
-            800
-        }
+        "runtime_instantiate"
+        | "runtime_update_mask"
+        | "runtime_mount_lifecycle"
+        | "runtime_flush_checked_cycle"
+        | "patch_apply_1"
+        | "patch_dispatch_hit" => 800,
         "runtime_list_diff_keyed" | "session_sync" => 400,
         "gen_counter_bytes" => 1,
         _ => 100,
@@ -554,6 +638,36 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(plan_keyed(&old, &new));
             })
         }
+        "runtime_mount_lifecycle" => {
+            // The mount seam's full lifecycle (M20): mount, one save-tick
+            // through `Mounted::update`, dispose — the three calls an
+            // embedding host loop repeats per surface (the bench drives the
+            // same body).
+            median_us(samples_for(name), || {
+                let mut h = CountingHost { commits: 0 };
+                let mut m = Mounted::mount(&mut h, MountUnit::build);
+                let tick = m.update(&mut h, |s| s.set_count(1));
+                black_box(tick.is_ok());
+                let state = m.dispose(&mut h);
+                black_box(state);
+            })
+        }
+        "runtime_flush_checked_cycle" => {
+            // The checked flush's fail-safe cap (M21): the ping-pong cycle
+            // through `flush_checked` — exactly MAX_PASSES capped passes,
+            // then the typed error (the bench drives the same body; the
+            // dirty bit is boxed so the convergence loop cannot be
+            // const-folded).
+            median_us(samples_for(name), || {
+                let mut h = CountingHost { commits: 0 };
+                let mut c = CycleReactions {
+                    dirty: DirtySet::new(),
+                };
+                c.dirty.set(black_box(0usize));
+                let checked = lig_runtime::flush_checked(&mut c, &mut h);
+                black_box(checked.is_err());
+            })
+        }
         "patch_apply_1" => median_us(samples_for(name), || {
             black_box(lig_patch::commit_table(synthetic_table(APPLY_ENTRIES)));
         }),
@@ -598,6 +712,8 @@ const REGISTRY: &[&str] = &[
     "session_sync",
     "runtime_instantiate",
     "runtime_update_mask",
+    "runtime_mount_lifecycle",
+    "runtime_flush_checked_cycle",
     "runtime_list_diff_keyed",
     "patch_apply_1",
     "patch_dispatch_hit",
@@ -769,7 +885,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 24 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 26 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
         // codegen_for_event, M16 adds session_compile_counter, M17 adds
@@ -777,8 +893,10 @@ mod tests {
         // codegen_for_composed_content, the sink seam adds
         // session_emit_mem, the sync seam adds session_sync, the observer
         // seam adds session_observe, the session emission seam adds
-        // session_emit_to), all named, no dupes.
-        assert_eq!(REGISTRY.len(), 24);
+        // session_emit_to, the mount seam adds runtime_mount_lifecycle,
+        // the checked flush seam adds runtime_flush_checked_cycle), all
+        // named, no dupes.
+        assert_eq!(REGISTRY.len(), 26);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
