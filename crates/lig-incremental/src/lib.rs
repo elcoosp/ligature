@@ -275,6 +275,30 @@ struct GeneratedMemo {
     profile: Profile,
 }
 
+/// The diff one [`Session::sync`] pass applied to the source set: the paths
+/// that entered (added), changed text (edited), or left (removed). Paths are
+/// sorted; empty when the snapshot matched the session exactly.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct SyncReport {
+    /// Sources the snapshot introduced.
+    pub added: Vec<PathBuf>,
+    /// Sources whose registered text changed (their memos invalidate
+    /// through the digest gate on the next compile).
+    pub edited: Vec<PathBuf>,
+    /// Sources absent from the snapshot and not in `keep` — dropped
+    /// together with their memos.
+    pub removed: Vec<PathBuf>,
+}
+
+impl SyncReport {
+    /// Whether the snapshot matched the session exactly (a watch tick with
+    /// nothing to do).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.added.is_empty() && self.edited.is_empty() && self.removed.is_empty()
+    }
+}
+
 /// An incremental compilation session: inputs + memos + revision counter.
 #[derive(Debug, Default)]
 pub struct Session {
@@ -329,6 +353,59 @@ impl Session {
     #[must_use]
     pub fn revision(&self) -> u64 {
         self.revision
+    }
+
+    /// The registered text for `path`, if any — the input accessor watch
+    /// integrations use to re-feed the last known text of a file that still
+    /// exists but could not be read this tick (it stays registered with its
+    /// old text rather than leaving the session).
+    #[must_use]
+    pub fn source_text(&self, path: &Path) -> Option<&str> {
+        self.sources.get(path).map(|s| s.text.as_str())
+    }
+
+    /// Diff a fresh source snapshot (path → text) into the session — the
+    /// watch tick as one seam call. Additions and changed texts register
+    /// with the D-9 no-op discipline (identical texts are not edits and
+    /// never invalidate memos); session sources absent from the snapshot
+    /// are dropped with their memos, unless listed in `keep` — the CLI
+    /// watch passes its explicit root paths so a deleted root keeps its
+    /// last registered text instead of being pruned.
+    ///
+    /// Returns the [`SyncReport`] of what changed (paths sorted; a
+    /// duplicated snapshot path takes its last text).
+    pub fn sync<I, S>(&mut self, fresh: I, keep: &[PathBuf]) -> SyncReport
+    where
+        I: IntoIterator<Item = (PathBuf, S)>,
+        S: Into<String>,
+    {
+        let mut report = SyncReport::default();
+        let fresh: BTreeMap<PathBuf, String> =
+            fresh.into_iter().map(|(p, t)| (p, t.into())).collect();
+        for (path, text) in &fresh {
+            let text_digest = digest(text.as_bytes());
+            let unchanged = self
+                .sources
+                .get(path)
+                .is_some_and(|old| old.digest == text_digest);
+            if unchanged {
+                continue;
+            }
+            let added = !self.sources.contains_key(path);
+            self.set_source(path.clone(), text.clone());
+            if added {
+                report.added.push(path.clone());
+            } else {
+                report.edited.push(path.clone());
+            }
+        }
+        for path in self.sources.keys().cloned().collect::<Vec<_>>() {
+            if !fresh.contains_key(&path) && !keep.contains(&path) {
+                self.remove_source(&path);
+                report.removed.push(path);
+            }
+        }
+        report
     }
 
     /// The compiled unit for `path` after the last [`Session::compile`] pass.
@@ -387,12 +464,14 @@ impl Session {
             .and_then(|m| m.generated.as_ref())
             .is_some_and(|m| m.source_digest == source_digest && m.profile == profile);
         if !valid {
-            let outcome = self.compute_generated(path, profile);
+            // The computed output rides the unit memo (`CompiledUnit::
+            // generated` / `codegen_error`); the generated memo only ever
+            // records the memo key.
+            let _ = self.compute_generated(path, profile);
             let entry = self
                 .memos
                 .entry(path.to_path_buf())
                 .or_insert_with(UnitMemo::empty);
-            let _ = outcome;
             entry.generated = Some(GeneratedMemo {
                 source_digest,
                 profile,
@@ -906,4 +985,115 @@ mod tests {
         "  </button>\n",
         "</template>\n",
     );
+
+    #[test]
+    fn sync_reports_added_edited_removed() {
+        // The watch-sync seam: one call diffs a fresh source snapshot
+        // against the session — additions and edits register (the edit
+        // bumps the revision, the addition appears), an unchanged entry is
+        // a no-op, and a registered source absent from the snapshot is
+        // dropped with its memos.
+        let mut s = Session::new();
+        s.set_source(p("a.tsx"), counter());
+        s.set_source(p("b.tsx"), counter());
+        s.set_source(p("d.tsx"), counter());
+        let edited = counter().replace("Add", "Add2");
+        let report = s.sync(
+            vec![
+                (p("a.tsx"), edited.as_str()), // edit
+                (p("c.vue"), VUE_COUNTER),     // addition
+                (p("b.tsx"), counter()),       // unchanged — no-op
+                                               // d.tsx is absent — removed
+            ],
+            &[],
+        );
+        assert_eq!(report.added, vec![p("c.vue")]);
+        assert_eq!(report.edited, vec![p("a.tsx")]);
+        assert_eq!(report.removed, vec![p("d.tsx")]);
+        assert_eq!(s.sources(), vec![p("a.tsx"), p("b.tsx"), p("c.vue")]);
+        assert_eq!(s.revision(), 6, "initial 3 + edit + addition + removal");
+    }
+
+    #[test]
+    fn sync_is_a_noop_on_an_identical_snapshot() {
+        // The no-op-edit discipline (D-9) holds through sync: an identical
+        // snapshot registers nothing, bumps no revision, keeps every memo.
+        let mut s = Session::new();
+        s.sync(
+            vec![(p("a.tsx"), counter()), (p("b.vue"), VUE_COUNTER)],
+            &[],
+        );
+        s.compile(Profile::Layout);
+        let rev = s.revision();
+        let report = s.sync(
+            vec![(p("a.tsx"), counter()), (p("b.vue"), VUE_COUNTER)],
+            &[],
+        );
+        assert!(report.is_empty(), "identical snapshot: {report:?}");
+        assert_eq!(s.revision(), rev, "no phantom edits");
+        let r = s.compile(Profile::Layout);
+        assert!(r.all_reused(), "memos survive the no-op sync");
+    }
+
+    #[test]
+    fn sync_keeps_explicit_roots_not_in_the_snapshot() {
+        // The CLI watch passes its explicit root paths as `keep`: a root
+        // that vanished from disk (or failed to read) keeps its last
+        // registered text — the pre-seam watch-loop discipline — while a
+        // scanned source absent from the snapshot leaves the session.
+        let mut s = Session::new();
+        s.sync(
+            vec![(p("root.tsx"), counter()), (p("scan.tsx"), counter())],
+            &[],
+        );
+        let report = s.sync(vec![(p("root.tsx"), counter())], &[p("root.tsx")]);
+        assert_eq!(
+            report.removed,
+            vec![p("scan.tsx")],
+            "the absent scan leaves"
+        );
+        assert!(s.sources().contains(&p("root.tsx")), "the kept root stays");
+        // Without keep, the same vanished root leaves too.
+        let report = s.sync(Vec::<(std::path::PathBuf, &str)>::new(), &[]);
+        assert_eq!(report.removed, vec![p("root.tsx")]);
+        assert_eq!(
+            s.sources(),
+            Vec::<std::path::PathBuf>::new(),
+            "without keep the vanished root leaves too"
+        );
+    }
+
+    #[test]
+    fn sync_then_compile_recompiles_exactly_the_synced_units() {
+        // The engine story end to end: sync feeds the digest gate — only
+        // the added and edited units recompute; unchanged units reuse.
+        let mut s = Session::new();
+        s.set_source(p("a.tsx"), counter());
+        s.set_source(p("b.vue"), VUE_COUNTER);
+        s.compile(Profile::Layout);
+        let edited = counter().replace("Add", "Add2");
+        let report = s.sync(
+            vec![
+                (p("a.tsx"), edited.as_str()),
+                (p("b.vue"), VUE_COUNTER),
+                (p("c.tsx"), counter()),
+            ],
+            &[],
+        );
+        let r = s.compile(Profile::Layout);
+        assert_eq!(r.recompiled.len(), report.added.len() + report.edited.len());
+        assert_eq!(r.reused, vec![p("b.vue")], "the untouched unit is reused");
+    }
+
+    #[test]
+    fn source_text_reads_back_the_registered_text() {
+        // The session's own input accessor: watch integrations re-feed the
+        // last known text for a file that still exists but failed to read
+        // (the pre-seam loop kept it registered with stale text — the
+        // seam preserves that through the accessor).
+        let mut s = Session::new();
+        assert_eq!(s.source_text(&p("missing.tsx")), None);
+        s.set_source(p("a.tsx"), counter());
+        assert_eq!(s.source_text(&p("a.tsx")), Some(counter()));
+    }
 }
