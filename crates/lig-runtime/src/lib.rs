@@ -21,6 +21,7 @@ pub mod dirty;
 pub mod fmt;
 pub mod fragment;
 pub mod host;
+pub mod mount;
 pub mod pure;
 pub mod reconcile;
 pub mod schedule;
@@ -36,8 +37,9 @@ pub use host::{
     AttrVal, EvData, EventKind, HandlerId, HookId, Host, NodeId, PropVal, StyleConstId,
     TemplateDesc,
 };
+pub use mount::{ComponentUnit, Mounted};
 pub use reconcile::{ListOp, SeqOp, key_hash, keyed_diff, lis_sequence, plan_keyed, unkeyed_diff};
-pub use schedule::{MAX_PASSES, Reactions, Schedule, flush};
+pub use schedule::{CycleError, MAX_PASSES, Reactions, Schedule, flush, flush_checked};
 pub use template::{AnchorStep, Template, TplAttr, TplNode};
 
 /// The `lig-runtime` version — published independently of the compiler
