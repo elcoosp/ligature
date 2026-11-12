@@ -14,6 +14,11 @@ oxc_sourcemap = { workspace = true }
 
 [dev-dependencies]
 lig-parse-solid = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "link_table"
+harness = false
 
 [lints]
 workspace = true
