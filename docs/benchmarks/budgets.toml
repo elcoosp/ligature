@@ -223,3 +223,15 @@ name = "session_emit_to"
 metric = "time"
 budget = 4500.0
 note = "session-emission-seam reference median 867 µs (session/emit_to bench, release, Linux x86_64; the free-fn emit_mem pass measured 850 µs — the one-call front adds the BR-1 gate ≈2%); ≈5.2× headroom"
+
+# The watch-tick seam (M23): one prebuilt 8-source session takes one
+# `Session::tick` over a fresh snapshot with one edit — the sync diff, the
+# digest-gated recompile of exactly the edited unit (seven memos reuse),
+# and the fail-closed in-memory emission. The sink is fresh per iteration
+# (the emit_mem convention), so the row bounds the COLD tick end-to-end:
+# the full 8-unit artifact set rides it.
+[[budget]]
+name = "session_watch_tick"
+metric = "time"
+budget = 40000.0
+note = "watch-tick-seam reference median 7485 µs (session/watch_tick bench, release, Linux x86_64; 8 units into a fresh sink ≈ 8× the emit_mem row plus one recompile); ≈5.3× headroom"
