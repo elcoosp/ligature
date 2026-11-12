@@ -73,6 +73,80 @@ fn snapshot_counter_generated_code() {
     let text = counter_code();
     insta::assert_snapshot!("counter_generated", text);
 }
+
+/// M22: the emitter records the §9.4 link table — every reaction/template
+/// marker gets its exact byte offset in the final (prettyplease) text,
+/// sorted by offset, one entry per recorded name. Consumers never text-scan.
+#[test]
+fn link_table_records_exact_marker_offsets() {
+    let module = lig_parse_solid::lower_module(COUNTER_TSX, "counter.tsx").expect("lower");
+    let unit = generate_component(&module, lig_core::id::ComponentId::new(0)).expect("codegen");
+    assert!(
+        !unit.links.links.is_empty(),
+        "the recorded link table must not be empty for the counter"
+    );
+    assert_eq!(
+        unit.links.links.len(),
+        unit.links.reactions.len() + unit.links.templates.len(),
+        "one recorded link per reaction and template marker"
+    );
+    // Strictly ascending offsets — the map's positional order.
+    assert!(
+        unit.links
+            .links
+            .windows(2)
+            .all(|w| w[0].generated_offset < w[1].generated_offset),
+        "recorded links must be sorted by generated offset: {:?}",
+        unit.links.links
+    );
+    // Every offset anchors its own marker — exact, not scanned at consume time.
+    for link in &unit.links.links {
+        let at = &unit.text[link.generated_offset as usize..];
+        assert!(
+            at.starts_with("const ") || at.starts_with("static "),
+            "offset {} for ordinal {} does not anchor a marker: {at:.40}",
+            link.generated_offset,
+            link.ir_ordinal
+        );
+    }
+    // Reactions carry their own ids; templates ride above DYNAMIC_BASE.
+    for (rx, _name) in &unit.links.reactions {
+        assert!(
+            unit.links.links.iter().any(|l| l.ir_ordinal == *rx),
+            "reaction r{rx} missing from the recorded table"
+        );
+    }
+    for (tid, _name) in &unit.links.templates {
+        let ordinal = lig_codegen::DYNAMIC_BASE + *tid;
+        assert!(
+            unit.links.links.iter().any(|l| l.ir_ordinal == ordinal),
+            "template t{tid} missing from the recorded table"
+        );
+    }
+}
+
+/// M22: module-level generation aggregates the table across components —
+/// every component's markers are recorded in the one generated text.
+#[test]
+fn link_table_covers_every_component_marker_in_a_module() {
+    let src = include_str!("../../../fixtures/conformance/slots-component/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "slots-component.tsx").expect("lower");
+    let generated = lig_codegen::generate_module(&module).expect("module codegen");
+    assert_eq!(
+        generated.links.links.len(),
+        generated.links.reactions.len() + generated.links.templates.len(),
+        "one recorded link per reaction and template marker across the module"
+    );
+    for link in &generated.links.links {
+        let at = &generated.text[link.generated_offset as usize..];
+        assert!(
+            at.starts_with("const ") || at.starts_with("static "),
+            "module offset {} for ordinal {} does not anchor a marker: {at:.40}",
+            link.generated_offset,
+            link.ir_ordinal
+        );
+    }
+}
 #[test]
 fn spill_path_emits_exact_per_bit_masks_and_writes_hi() {
     // A synthetic 70-reaction component: one signal read by 70 effects. The
