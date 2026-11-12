@@ -1,6 +1,12 @@
 //! Pure builtin helpers for whitelisted view-expression calls (§6.5 Allow
 //! tier). `no_std + alloc`, no host access, no state — the compiler emits
 //! direct calls to these from generated code.
+//!
+//! Key hashing is NOT here: the canonical FNV-1a key hash lives in
+//! [`crate::reconcile::key_hash`] (pinned by its own FNV vectors) and that
+//! is what the codegen emits — this module once carried a duplicate
+//! (`key_str`/`key_int`) that nothing called, removed before the two
+//! implementations could drift.
 
 use alloc::format;
 use alloc::string::String;
@@ -19,32 +25,6 @@ pub fn concat<T: Clone>(a: &[T], b: &[T]) -> Vec<T> {
     out.extend_from_slice(a);
     out.extend_from_slice(b);
     out
-}
-
-/// Stable `u64` key for a string list item (keyed reconcile, §7.5).
-#[must_use]
-pub fn key_str(s: &str) -> u64 {
-    hash_fnv1a64(s.as_bytes())
-}
-
-/// Stable `u64` key for an integer list item.
-#[must_use]
-pub const fn key_int(v: i64) -> u64 {
-    v as u64
-}
-
-const FNV_OFFSET: u64 = 0xcbf2_9ce4_8422_2325;
-const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
-
-const fn hash_fnv1a64(bytes: &[u8]) -> u64 {
-    let mut hash = FNV_OFFSET;
-    let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u64;
-        hash = hash.wrapping_mul(FNV_PRIME);
-        i += 1;
-    }
-    hash
 }
 
 fn pow10(n: u32) -> f64 {
@@ -83,7 +63,7 @@ pub fn i64_to_string(v: i64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{f64_to_fixed, i64_to_string, join, key_int, key_str};
+    use super::{f64_to_fixed, i64_to_string, join};
     use alloc::{string::String, vec, vec::Vec};
 
     #[test]
@@ -91,14 +71,6 @@ mod tests {
         let items: Vec<String> = vec![String::from("a"), String::from("b")];
         assert_eq!(join(&items, ", "), "a, b");
         assert_eq!(join(&[], ", "), "");
-    }
-
-    #[test]
-    fn keys_are_stable() {
-        assert_eq!(key_str("alpha"), key_str("alpha"));
-        assert_ne!(key_str("alpha"), key_str("beta"));
-        assert_eq!(key_int(7), key_int(7));
-        assert_ne!(key_int(7), key_int(8));
     }
 
     #[test]
