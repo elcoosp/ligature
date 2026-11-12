@@ -1212,6 +1212,7 @@ dependencies = [
 name = "lig-sourcemap"
 version = "1.4.0"
 dependencies = [
+ "criterion",
  "lig-codegen",
  "lig-core",
  "lig-ir",
