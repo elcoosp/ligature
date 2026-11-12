@@ -310,7 +310,7 @@ fn median_us(iters: usize, mut f: impl FnMut()) -> f64 {
 /// slow part).
 fn samples_for(name: &str) -> usize {
     match name {
-        "lower_solid_counter" | "lower_vue_counter" => 120,
+        "lower_solid_counter" | "lower_vue_counter" | "session_watch_tick" => 120,
         "canonical_json_counter" => 200,
         "codegen_counter"
         | "session_compile_counter"
@@ -506,6 +506,35 @@ fn session_emit_to() -> f64 {
     })
 }
 
+/// One full watch tick (the watch-tick-seam workload: the `session/watch_tick`
+/// bench drives the same thing) — a prebuilt 8-source session takes one
+/// `Session::tick` over a fresh snapshot with one edit: the sync diff, the
+/// digest-gated recompile of exactly the edited unit, and the fail-closed
+/// in-memory emission, the whole `lig watch` loop body as one call.
+fn session_watch_tick() -> f64 {
+    use std::path::PathBuf;
+    let edited = COUNTER_TSX.replace("Add", "Add2");
+    median_us(samples_for("session_watch_tick"), || {
+        let mut s = lig_incremental::Session::new();
+        for i in 0..8 {
+            s.set_source(format!("unit{i}.tsx"), COUNTER_TSX);
+        }
+        s.compile(lig_admission::Profile::Layout);
+        let fresh: Vec<(PathBuf, &str)> = (0..8)
+            .map(|i| {
+                if i == 3 {
+                    (PathBuf::from(format!("unit{i}.tsx")), edited.as_str())
+                } else {
+                    (PathBuf::from(format!("unit{i}.tsx")), COUNTER_TSX)
+                }
+            })
+            .collect();
+        let mut sink = lig_incremental::emit::MemSink::new();
+        let r = s.tick(fresh, &[], &mut sink, lig_admission::Profile::Layout, true);
+        black_box(r.expect("the tick passes"));
+    })
+}
+
 /// One measurement by ledger name. Time rows return median µs; the bytes row
 /// returns a byte count. The workload of each row is the same one the
 /// matching criterion bench drives (§14.2 — the ledger rows are 1:1 with the
@@ -612,6 +641,7 @@ fn measure(name: &str, root: &Path) -> f64 {
         "session_compile_counter" => session_compile_counter(),
         "session_emit_mem" => session_emit_mem(),
         "session_sync" => session_sync(),
+        "session_watch_tick" => session_watch_tick(),
         "runtime_instantiate" => median_us(samples_for(name), || {
             let mut h = CountingHost { commits: 0 };
             let f = Fragment::new(&mut h, counter_tpl(), HOLE_ANCHORS, BRANCH_ANCHORS);
@@ -710,6 +740,7 @@ const REGISTRY: &[&str] = &[
     "session_emit_mem",
     "session_emit_to",
     "session_sync",
+    "session_watch_tick",
     "runtime_instantiate",
     "runtime_update_mask",
     "runtime_mount_lifecycle",
@@ -885,7 +916,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 26 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 27 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
         // codegen_for_event, M16 adds session_compile_counter, M17 adds
@@ -894,9 +925,9 @@ mod tests {
         // session_emit_mem, the sync seam adds session_sync, the observer
         // seam adds session_observe, the session emission seam adds
         // session_emit_to, the mount seam adds runtime_mount_lifecycle,
-        // the checked flush seam adds runtime_flush_checked_cycle), all
-        // named, no dupes.
-        assert_eq!(REGISTRY.len(), 26);
+        // the checked flush seam adds runtime_flush_checked_cycle, the
+        // watch-tick seam adds session_watch_tick), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 27);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
