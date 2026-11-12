@@ -19,6 +19,9 @@
 
 pub mod emit;
 pub mod observe;
+pub mod tick;
+
+pub use tick::TickReport;
 
 use lig_admission::{Profile, admit};
 use lig_codegen::{GenLinks, generate_module};
