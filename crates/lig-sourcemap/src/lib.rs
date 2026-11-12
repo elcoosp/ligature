@@ -56,6 +56,15 @@ pub enum SourceMapError {
         /// What failed, in words.
         detail: String,
     },
+    /// A generated position resolves to no token (M24): the position
+    /// precedes every token or falls in unmapped text. Carries the
+    /// 0-based position that missed, as data.
+    Unmapped {
+        /// The 0-based generated line that has no token.
+        line: u32,
+        /// The 0-based generated column that has no token.
+        col: u32,
+    },
 }
 
 impl SourceMapError {
@@ -85,6 +94,12 @@ impl core::fmt::Display for SourceMapError {
             Self::Resolve { node, detail } => {
                 write!(f, "{}: {}: {detail}", Self::CODE, node)
             }
+            Self::Unmapped { line, col } => write!(
+                f,
+                "{}: no mapping at generated {line}:{col} — the position carries no token; \
+                 the map holds exact positions only, nearest-hit lookup is a consumer policy",
+                Self::CODE
+            ),
         }
     }
 }
@@ -296,6 +311,63 @@ pub fn ir_to_rust(
         );
     }
     Ok(b.into_owned_sourcemap().into_inner())
+}
+
+/// One resolved generated position (M24): where a position in the
+/// generated Rust came from — the original source file, the 0-based line
+/// and column inside it, and the IR label the map carried through (`e7`
+/// for an expression, `r2` for a reaction, `t3` for a template static).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedPosition {
+    /// The source file the position maps to (the map's `sources[]` entry;
+    /// `"?"` when the token carries no source — a map without sources).
+    pub source: String,
+    /// The 0-based line in the source file (VLQ-native, as the map stores).
+    pub line: u32,
+    /// The 0-based column in the source file (VLQ-native).
+    pub col: u32,
+    /// The IR label the map carried through (`Some("e7")` / `Some("r2")` /
+    /// `Some("t3")`), `None` when the token has no name.
+    pub name: Option<String>,
+}
+
+/// Resolve one position in a map (M24): the library front of `lig resolve
+/// <map> <line> <col>` — a generated 0-based `(line, col)` resolves to the
+/// [`ResolvedPosition`] the map's token carries, through the exact
+/// `lookup_token` contract (no nearest-hit policy: a position with no token
+/// is the typed [`SourceMapError::Unmapped`], not a guess). Works on any
+/// map the crate produces or a consumer loads — the merged map (`chain`),
+/// one of the halves, or a map read back from JSON (see `round_trip`).
+/// Positions are 0-based (VLQ-native) both ways; the CLI converts its
+/// 1-based arguments at the boundary.
+///
+/// # Errors
+/// [`SourceMapError::Unmapped`] with the position as data when no token
+/// covers it.
+pub fn resolve(
+    map: &SourceMap<'_>,
+    line: u32,
+    col: u32,
+) -> Result<ResolvedPosition, SourceMapError> {
+    let table = map.generate_lookup_table();
+    let token = map
+        .lookup_token(&table, line, col)
+        .ok_or(SourceMapError::Unmapped { line, col })?;
+    let source = token
+        .get_source_id()
+        .and_then(|id| map.get_source(id))
+        .unwrap_or("?")
+        .to_string();
+    let name = token
+        .get_name_id()
+        .and_then(|nid| map.get_name(nid))
+        .map(ToString::to_string);
+    Ok(ResolvedPosition {
+        source,
+        line: token.get_src_line(),
+        col: token.get_src_col(),
+        name,
+    })
 }
 
 /// Chain `src→IR` with `IR→Rust` into the merged consumer map (D-11): a
@@ -726,6 +798,153 @@ mod tests {
             matches!(err, super::SourceMapError::Anchor { .. }),
             "the verifier failure names the drift: {err}"
         );
+    }
+
+    /// M24: the library-level resolver — a generated position resolves to
+    /// a token the map actually carries AT that position (the guarantee
+    /// `lig resolve <map> <line> <col>` sells). Positions where per-arm
+    /// attribution stacked several IR nodes share one token slot; there the
+    /// lookup deterministically selects one of them, so the honest contract
+    /// is set-membership: the resolution is one of the tokens at that dst.
+    #[test]
+    fn resolve_returns_a_token_the_map_carries_at_each_position() {
+        let (m, src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let src_map = src_to_ir(&m, &src);
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        let merged = chain(&src_map, &ir_map);
+        assert!(merged.get_tokens().len() > 10, "the merged map has tokens");
+        // The tokens of the merged map, grouped by their generated position.
+        let mut at: std::collections::BTreeMap<
+            (u32, u32),
+            Vec<(u32, u32, Option<String>, String)>,
+        > = std::collections::BTreeMap::new();
+        for token in merged.get_tokens() {
+            let entry = at
+                .entry((token.get_dst_line(), token.get_dst_col()))
+                .or_default();
+            entry.push((
+                token.get_src_line(),
+                token.get_src_col(),
+                token
+                    .get_name_id()
+                    .and_then(|nid| merged.get_name(nid))
+                    .map(ToString::to_string),
+                token
+                    .get_source_id()
+                    .and_then(|id| merged.get_source(id))
+                    .unwrap_or("?")
+                    .to_string(),
+            ));
+        }
+        for ((line, col), tokens) in at {
+            let got =
+                super::resolve(&merged, line, col).expect("a position the map carries resolves");
+            assert!(
+                tokens.iter().any(|(l, c, name, source)| got.line == *l
+                    && got.col == *c
+                    && got.name == *name
+                    && got.source == *source),
+                "resolve({line},{col}) = {got:?} must be one of the tokens at the position: {tokens:?}"
+            );
+        }
+    }
+
+    /// M24: a UNIQUE generated position resolves exactly — the reaction
+    /// marker's own line/col (one token there) round-trips to the exact
+    /// source position and reaction label the map recorded.
+    #[test]
+    fn resolve_is_exact_on_a_unique_position() {
+        let (m, src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let src_map = src_to_ir(&m, &src);
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        let merged = chain(&src_map, &ir_map);
+        // Positions carrying exactly one token: exact round-trip.
+        let mut counts: std::collections::BTreeMap<(u32, u32), u32> =
+            std::collections::BTreeMap::new();
+        for token in merged.get_tokens() {
+            *counts
+                .entry((token.get_dst_line(), token.get_dst_col()))
+                .or_default() += 1;
+        }
+        let unique = counts.iter().filter(|(_, n)| **n == 1).count();
+        assert!(unique > 0, "the counter map has unique positions");
+        for token in merged.get_tokens() {
+            let dst = (token.get_dst_line(), token.get_dst_col());
+            if counts[&dst] != 1 {
+                continue;
+            }
+            let got = super::resolve(&merged, dst.0, dst.1).expect("resolves");
+            assert_eq!(got.line, token.get_src_line(), "exact line at {dst:?}");
+            assert_eq!(got.col, token.get_src_col(), "exact col at {dst:?}");
+            let want = token
+                .get_name_id()
+                .and_then(|nid| merged.get_name(nid))
+                .map(ToString::to_string);
+            assert_eq!(got.name, want, "exact name at {dst:?}");
+        }
+    }
+
+    /// M24: a generated position off the map fails closed as the typed
+    /// [`SourceMapError::Unmapped`] — the same story the CLI prints, now as
+    /// data for embedded consumers.
+    #[test]
+    fn resolve_is_fail_closed_off_the_map() {
+        let (m, src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let src_map = src_to_ir(&m, &src);
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        let merged = chain(&src_map, &ir_map);
+        let err = super::resolve(&merged, 9_999, 0).expect_err("no token at 9999:0");
+        match &err {
+            super::SourceMapError::Unmapped { line, col } => {
+                assert_eq!(*line, 9_999);
+                assert_eq!(*col, 0);
+            }
+            other => panic!("want Unmapped, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("no mapping"),
+            "the Display names the miss: {err}"
+        );
+        assert!(
+            err.to_string()
+                .starts_with(&format!("{}:", super::SourceMapError::CODE)),
+            "the Display heads with the seam code: {err}"
+        );
+    }
+
+    /// M24: the resolver works on a map that crossed a JSON round-trip —
+    /// the CLI reads `.map.json` from disk, the embedded consumer may too.
+    #[test]
+    fn resolve_survives_a_json_round_trip() {
+        let (m, src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let src_map = src_to_ir(&m, &src);
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        let merged = chain(&src_map, &ir_map);
+        let token = merged
+            .get_tokens()
+            .next()
+            .expect("the merged map has tokens");
+        let rt = round_trip(&merged).expect("round-trips");
+        let got = super::resolve(&rt, token.get_dst_line(), token.get_dst_col())
+            .expect("the round-tripped map resolves");
+        assert_eq!(got.line, token.get_src_line());
+        assert_eq!(got.col, token.get_src_col());
+    }
+
+    /// M24 (typed failures): `Unmapped` carries the position as data and
+    /// implements `core::error::Error` (the CycleError pattern's object
+    /// safety check, same as the other variants).
+    #[test]
+    fn unmapped_is_a_typed_error_with_position_data() {
+        let err = super::SourceMapError::Unmapped { line: 7, col: 3 };
+        assert!(err.to_string().contains('7'), "{err}");
+        assert!(err.to_string().contains('3'), "{err}");
+        let err: Box<dyn std::error::Error> = Box::new(err);
+        assert!(err.to_string().contains("no mapping"));
     }
 
     /// M22 (typed failures): `ir_to_rust` reports a stale table as the typed
