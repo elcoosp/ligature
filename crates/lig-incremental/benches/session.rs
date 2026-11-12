@@ -10,7 +10,9 @@
 //! one edit — the call the `lig watch` loop runs per tick. The observer seam
 //! adds the observe workload: the same cold pass with the stage events
 //! delivered to a counting observer — what an embedding consumer pays for
-//! the programmatic event stream on top of the plain pass.
+//! the programmatic event stream on top of the plain pass. The watch-tick
+//! seam (M23) adds the full-tick workload: sync + compile + fail-closed
+//! emission over the same 8-source snapshot — the whole loop body, once.
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use lig_admission::Profile;
@@ -134,12 +136,58 @@ fn bench_session_emit_to(c: &mut Criterion) {
     });
 }
 
+/// Time one full watch tick (the watch-tick seam, M23): a prebuilt 8-source
+/// session takes one `Session::tick` over a fresh snapshot with one edit —
+/// the sync diff, the digest-gated recompile of exactly the edited unit, and
+/// the fail-closed in-memory emission, the whole `lig watch` loop body as
+/// one call. The session is rebuilt per iteration so every tick sees the
+/// same pre-tick state.
+fn bench_session_watch_tick(c: &mut Criterion) {
+    let edited = COUNTER_TSX.replace("Add", "Add2");
+    c.bench_function("session/watch_tick", |b| {
+        b.iter_batched(
+            || {
+                let mut s = Session::new();
+                for i in 0..8 {
+                    s.set_source(format!("unit{i}.tsx"), COUNTER_TSX);
+                }
+                s.compile(Profile::Layout);
+                s
+            },
+            |mut s| {
+                let fresh: Vec<(std::path::PathBuf, &str)> = (0..8)
+                    .map(|i| {
+                        if i == 3 {
+                            (
+                                std::path::PathBuf::from(format!("unit{i}.tsx")),
+                                edited.as_str(),
+                            )
+                        } else {
+                            (
+                                std::path::PathBuf::from(format!("unit{i}.tsx")),
+                                COUNTER_TSX,
+                            )
+                        }
+                    })
+                    .collect();
+                let mut sink = MemSink::new();
+                black_box(
+                    s.tick(fresh, &[], &mut sink, Profile::Layout, true)
+                        .expect("the tick passes"),
+                )
+            },
+            BatchSize::SmallInput,
+        );
+    });
+}
+
 criterion_group!(
     benches,
     bench_session_compile,
     bench_session_observe,
     bench_session_emit_mem,
     bench_session_emit_to,
-    bench_session_sync
+    bench_session_sync,
+    bench_session_watch_tick
 );
 criterion_main!(benches);
