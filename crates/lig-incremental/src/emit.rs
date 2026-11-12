@@ -475,6 +475,35 @@ fn hex(v: u64) -> String {
     format!("{v:#018x}")
 }
 
+/// The BR-1 gate both fail-closed fronts share ([`Session::emit_to`] and the
+/// watch-tick seam): a session holding a denied unit (a lowering failure, an
+/// admission denial) or a codegen-backstop failure refuses the WHOLE
+/// emission — nothing writes, the typed [`EmitError`] names the blocking
+/// stem with the fix.
+pub(crate) fn refuse_blocked_pass(units: &[&CompiledUnit]) -> Result<(), EmitError> {
+    if let Some(blocked) = units
+        .iter()
+        .find(|u| !u.admitted || u.codegen_error.is_some() || u.generated.is_none())
+    {
+        let reason = if blocked.codegen_error.is_some() {
+            "the codegen backstop failed this unit"
+        } else {
+            "a Deny-tier diagnostic blocks this unit"
+        };
+        return Err(EmitError::contract(
+            &blocked.stem,
+            format!(
+                "{}: the pass is not fully admitted — {reason}; nothing may write (BR-1)",
+                blocked.stem
+            ),
+            "a denied pass writes nothing — resolve the unit's diagnostics \
+             (`lig explain <code>` names the fix) and re-run the compile"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
+
 /// The session-level emission seam (M19): one call takes the last compile
 /// pass's units into any sink — the fail-closed BR-1 gate rides the seam
 /// itself, where a consumer cannot skip it.
@@ -514,26 +543,7 @@ impl Session {
             ));
         }
         let units = self.units();
-        if let Some(blocked) = units
-            .iter()
-            .find(|u| !u.admitted || u.codegen_error.is_some() || u.generated.is_none())
-        {
-            let reason = if blocked.codegen_error.is_some() {
-                "the codegen backstop failed this unit"
-            } else {
-                "a Deny-tier diagnostic blocks this unit"
-            };
-            return Err(EmitError::contract(
-                &blocked.stem,
-                format!(
-                    "{}: the pass is not fully admitted — {reason}; nothing may write (BR-1)",
-                    blocked.stem
-                ),
-                "a denied pass writes nothing — resolve the unit's diagnostics \
-                 (`lig explain <code>` names the fix) and re-run the compile"
-                    .to_string(),
-            ));
-        }
+        refuse_blocked_pass(&units)?;
         emit_units_to(sink, &units, profile.name(), prune)
     }
 }
