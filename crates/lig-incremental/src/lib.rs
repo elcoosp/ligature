@@ -177,6 +177,11 @@ impl CodegenFailure {
                  (§9.3): report it with the session revision"
                     .to_string()
             }
+            lig_codegen::CodegenError::LinkTable(_) => {
+                "the emitter failed to record its own §9.4 link table — an internal bug: report \
+                 it with the session revision from `lig doctor`"
+                    .to_string()
+            }
         };
         Self {
             subject: unit.display().to_string(),
