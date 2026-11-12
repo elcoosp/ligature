@@ -148,6 +148,14 @@ cargo run -p lig-incremental --example observed_pass      # M19: the session-obs
 cargo run -p lig-incremental --example custom_sink        # M19: a consumer-implemented content-addressed ArtifactSink + the fail-closed session emit
 ```
 
+The source-map half has its own walkthrough (M22) — the recorded link table,
+the chained maps, position resolution, and the typed failure, all in the
+library (no `dist/`, no scanning):
+
+```sh
+cargo run -p lig-sourcemap --example link_table
+```
+
 The runtime half has its own walkthrough — the committed counter unit mounted,
 driven, and disposed on the mock host through the component-mount seam (M20),
 with the checked-tick cycle error (M21) as the failure path:
@@ -198,7 +206,15 @@ path, a const `Schedule`, static template tables, and `build`/`fire_*` entry poi
 > `flush_checked` reports the LIG-E401 fail-safe as a typed `CycleError`
 > carrying the pass cap instead of panicking — the `no_std`
 > `panic = "abort"` surface gets the failure as data, and the mount front
-> fails like the compiler does), with the View IR
+> fails like the compiler does) — and the map half closes the same way:
+> M22 (the recorded link table: the emitter records the §9.4
+> `IrLink { ir_ordinal, generated_offset }` table post-unparse and fails
+> on its own missing markers (`CodegenError::LinkTable`), the consumer
+> builds the `IR→Rust` map from recorded offsets with no text scanning,
+> a drifted offset fails as the typed `SourceMapError` (`ligature::sourcemap`)
+> at both `ir_to_rust` and `verify` — the `IrRustLink` shape is populated
+> at last, and the chained-map story has its first consumer walkthrough
+> example), with the View IR
 > schema at v5 and the compiled subset deliberately small: constructs outside the contract
 > (events inside list-item branches and nested list bodies, callback calls, raw DOM access) deny with a precise code rather than mis-compile. CI runs on Linux and macOS;
 > the patch protocol is unix-only `dlopen` (`lig doctor` reports it unavailable on Windows).
@@ -207,9 +223,9 @@ path, a const `Schedule`, static template tables, and `build`/`fire_*` entry poi
 
 ## Learn more
 
-- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m21/REPORT.md`](docs/m21/REPORT.md) — what each milestone delivered and measured (M20, the component-mount seam, and M21, the checked flush seam, are delivered on this tree at [`docs/m20/REPORT.md`](docs/m20/REPORT.md) and [`docs/m21/REPORT.md`](docs/m21/REPORT.md))
+- Milestone reports: [`docs/m0/REPORT.md`](docs/m0/REPORT.md) through [`docs/m22/REPORT.md`](docs/m22/REPORT.md) — what each milestone delivered and measured (M21, the checked flush seam, and M22, the recorded link table, are delivered on this tree at [`docs/m21/REPORT.md`](docs/m21/REPORT.md) and [`docs/m22/REPORT.md`](docs/m22/REPORT.md))
 - [`docs/appendix-a.md`](docs/appendix-a.md) — the annotated generated unit every gate pins
-- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023), the else leg (0024), template refs on the Vue leg (0025), per-item instance identity (0026), per-item slot assembly (0027), per-item event dispatch (0028), the consumer surface (0029), composed-list events (0030), the composed-content owner-direct lift (0031), the session-observer and session-emission seams (0032), the component-mount seam (0033), the checked flush seam (0034)
+- Architecture decisions in [`docs/adr/`](docs/adr/): MSRV and dependency pins (0012), the Vue frontend (0014), incremental sessions (0015), the ThinLink patch engine (0016), budgets and no_std (0017), dynamic slot content (0020), structural slot content (0021), component-in-content and nested outlets (0022), per-mount identity and the branch-time assembly (0023), the else leg (0024), template refs on the Vue leg (0025), per-item instance identity (0026), per-item slot assembly (0027), per-item event dispatch (0028), the consumer surface (0029), composed-list events (0030), the composed-content owner-direct lift (0031), the session-observer and session-emission seams (0032), the component-mount seam (0033), the checked flush seam (0034), the recorded link table (0035)
 - [`docs/admission/rules.md`](docs/admission/rules.md) — the Deny/Lint/Allow rule table; the 15-doc diagnostic catalog under [`docs/errors/`](docs/errors/)
 - Benchmarks: [`docs/benchmarks/budgets.toml`](docs/benchmarks/budgets.toml) (enforced ceilings), [`docs/benchmarks/save-to-frame.md`](docs/benchmarks/save-to-frame.md) (patch protocol numbers), [`docs/benchmarks/oxc-vs-swc.md`](docs/benchmarks/oxc-vs-swc.md) (the parser re-benchmark)
 - [`fixtures/README.md`](fixtures/README.md) — the conformance contract both frontends must satisfy
