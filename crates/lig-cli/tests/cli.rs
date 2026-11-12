@@ -69,6 +69,44 @@ fn build_emits_rust_ir_maps_and_manifest_fail_closed() {
     let map = std::fs::read_to_string(dist.join("maps/counter.map.json")).expect("read map");
     assert!(map.contains("\"mappings\""), "VLQ mappings present");
     assert!(map.contains("\"names\""), "IR node names present");
+
+    // M24: `lig resolve` reads the emitted map through the library resolver
+    // — a mapped position prints source:line:col and the IR node label, an
+    // off-map position exits 1 with the no-mapping line.
+    let map_path = dist.join("maps/counter.map.json");
+    let out = lig()
+        .args(["resolve", &map_path.to_string_lossy(), "1", "1"])
+        .output()
+        .expect("spawn lig resolve");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if out.status.success() {
+        assert!(
+            stdout.contains("counter.tsx:") || stdout.contains("counter.vue:"),
+            "the source file leads the line: {stdout}"
+        );
+        assert!(
+            stdout.contains("(ir node:"),
+            "the IR label rides the line: {stdout}"
+        );
+    } else {
+        // Position (1,1) may be unmapped; the failure must still be the
+        // precise no-mapping line, not a crash.
+        assert!(
+            stderr.contains("no mapping at 1:1"),
+            "the typed miss renders: {stderr}"
+        );
+    }
+    let out = lig()
+        .args(["resolve", &map_path.to_string_lossy(), "99999", "1"])
+        .output()
+        .expect("spawn lig resolve off-map");
+    assert_eq!(out.status.code(), Some(1), "off-map exits 1: {out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no mapping at 99999:1"),
+        "the no-mapping line: {stderr}"
+    );
     let _ = std::fs::remove_dir_all(&dist);
 }
 
@@ -276,7 +314,7 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
     assert!(stdout.contains("7385"), "D-8-pinned byte count: {stdout}");
     assert!(
-        stdout.contains("all 26 row(s) within budget"),
+        stdout.contains("all 27 row(s) within budget"),
         "summary present: {stdout}"
     );
     assert!(
