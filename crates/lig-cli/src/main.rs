@@ -405,25 +405,7 @@ fn emit_and_report(
         let Some(unit) = session.unit(&path) else {
             continue;
         };
-        let name = file_label(&path);
-        if emission.kept.iter().any(|k| k == &unit.stem) {
-            println!("{name}: kept (digest unchanged — D-9)");
-            continue;
-        }
-        let Some(module) = unit.module.as_ref() else {
-            continue;
-        };
-        if let (Some(stats), true) = (
-            emission.stats.get(&unit.stem),
-            emission.written.iter().any(|w| w == &unit.stem),
-        ) {
-            println!(
-                "{name}: built {} component(s); sourcemap verified ({} spans, {} reactions)",
-                module.components.len(),
-                stats.expr_spans_resolved,
-                stats.reactions_linked
-            );
-        }
+        print_unit_line(&emission, unit);
     }
     println!(
         "lig {what}: {} unit(s) → {} ({} kept, {} re-emitted)",
@@ -433,6 +415,33 @@ fn emit_and_report(
         emission.written.len()
     );
     Ok(())
+}
+
+/// One unit's report line from an emission report — the `kept` line (D-9)
+/// or the `built` line with the verification stats.
+fn print_unit_line(
+    emission: &lig_incremental::emit::EmissionReport,
+    unit: &lig_incremental::CompiledUnit,
+) {
+    let name = file_label(&unit.path);
+    if emission.kept.iter().any(|k| k == &unit.stem) {
+        println!("{name}: kept (digest unchanged — D-9)");
+        return;
+    }
+    let Some(module) = unit.module.as_ref() else {
+        return;
+    };
+    if let (Some(stats), true) = (
+        emission.stats.get(&unit.stem),
+        emission.written.iter().any(|w| w == &unit.stem),
+    ) {
+        println!(
+            "{name}: built {} component(s); sourcemap verified ({} spans, {} reactions)",
+            module.components.len(),
+            stats.expr_spans_resolved,
+            stats.reactions_linked
+        );
+    }
 }
 
 fn run_watch(
@@ -459,12 +468,16 @@ fn run_watch(
         "lig watch: watching {} source(s) — Ctrl-C to stop",
         session.sources().len()
     );
+    // The sink the loop ticks into: the same atomic filesystem target the
+    // initial pass wrote (the emission-target seam, M16).
+    let mut sink = lig_incremental::emit::FsSink::new(out.to_path_buf());
     loop {
         std::thread::sleep(interval);
-        // The tick, as one sync call (the watch-sync seam): read the fresh
-        // snapshot and hand it to the session — additions, edits, and
-        // removals come back as one report. Explicit roots are kept even
-        // when missing from disk, and a present-but-unreadable scanned
+        // The tick, as one session call (the watch-tick seam, M23): read
+        // the fresh snapshot and hand the whole loop body to
+        // `Session::tick` — the sync diff, the digest-gated compile, and
+        // the fail-closed emission ride the call. Explicit roots are kept
+        // even when missing from disk, and a present-but-unreadable scanned
         // source keeps its last registered text (re-fed from the session).
         let seen = collect_sources(&roots);
         let mut fresh: Vec<(PathBuf, String)> = Vec::with_capacity(seen.len());
@@ -478,45 +491,65 @@ fn run_watch(
                 }
             }
         }
-        let sync_report = session.sync(fresh, &roots);
-        if sync_report.is_empty() {
-            continue;
-        }
-        pass += 1;
-        let report = session.compile(profile);
-        // BR-1 for watch: a denied pass never touches dist — the last good
-        // output stays live.
-        let denied: Vec<_> = session
-            .units()
-            .iter()
-            .filter(|u| !u.admitted)
-            .map(|u| u.path.clone())
-            .collect();
-        if !denied.is_empty() {
-            for path in &denied {
-                let Some(unit) = session.unit(path) else {
+        // BR-1 for watch (the seam enforces it): a denied pass refuses the
+        // WHOLE emission — dist keeps the last good output — and the typed
+        // `EmitError` carries the fix the way build prints it.
+        match session.tick(fresh, &roots, &mut sink, profile, true) {
+            Ok(tick) => {
+                if tick.sync.is_empty() {
                     continue;
-                };
-                let name = file_label(path);
-                eprintln!("{name}: DENIED (dist keeps the last good output)");
-                for d in &unit.diagnostics {
-                    eprintln!("{}", render(&name, &unit.source, d));
+                }
+                pass += 1;
+                report_emission(&session, &tick.emission, "watch");
+                println!(
+                    "lig watch pass {pass} (rev {}): {} recompiled, {} reused in {:.1} ms",
+                    tick.pass.revision,
+                    tick.pass.recompiled.len(),
+                    tick.pass.reused.len(),
+                    tick.pass.elapsed.as_secs_f64() * 1000.0
+                );
+            }
+            Err(e) => {
+                pass += 1;
+                eprintln!("lig watch: {e}");
+                eprintln!("  help: {}", e.help);
+                for path in session.sources() {
+                    let Some(unit) = session.unit(&path) else {
+                        continue;
+                    };
+                    if unit.admitted {
+                        continue;
+                    }
+                    let name = file_label(&path);
+                    eprintln!("{name}: DENIED (dist keeps the last good output)");
+                    for d in &unit.diagnostics {
+                        eprintln!("{}", render(&name, &unit.source, d));
+                    }
                 }
             }
-            if once {
-                return Err(CliError::Denied);
-            }
-            continue;
         }
-        emit_and_report(&session, out, profile, true, "watch")?;
-        println!(
-            "lig watch pass {pass} (rev {}): {} recompiled, {} reused in {:.1} ms",
-            report.revision,
-            report.recompiled.len(),
-            report.reused.len(),
-            report.elapsed.as_secs_f64() * 1000.0
-        );
     }
+}
+
+/// The per-unit emission lines the watch loop prints from a tick report —
+/// the same lines `emit_and_report` prints for the build-like passes.
+fn report_emission(
+    session: &Session,
+    emission: &lig_incremental::emit::EmissionReport,
+    what: &str,
+) {
+    for path in session.sources() {
+        let Some(unit) = session.unit(&path) else {
+            continue;
+        };
+        print_unit_line(emission, unit);
+    }
+    println!(
+        "lig {what}: {} unit(s) ({} kept, {} re-emitted)",
+        session.sources().len(),
+        emission.kept.len(),
+        emission.written.len()
+    );
 }
 
 fn run_explain(code: &str) {
@@ -572,25 +605,28 @@ fn run_resolve(map_path: &PathBuf, line: u32, col: u32) -> Result<(), CliError> 
         eprintln!("lig resolve: {}: {e}", map_path.display());
         CliError::Internal
     })?;
-    let table = map.generate_lookup_table();
-    // CLI positions are 1-based; VLQ maps are 0-based.
-    let token = map
-        .lookup_token(&table, line.saturating_sub(1), col.saturating_sub(1))
-        .ok_or_else(|| {
+    // The library resolver (M24): the same seam embedded consumers call.
+    // CLI positions are 1-based; the map is 0-based (VLQ-native).
+    match lig_sourcemap::resolve(&map, line.saturating_sub(1), col.saturating_sub(1)) {
+        Ok(r) => {
+            let name = r.name.as_deref().unwrap_or("-");
+            println!(
+                "{}:{}:{} (ir node: {name})",
+                r.source,
+                r.line + 1,
+                r.col + 1
+            );
+            Ok(())
+        }
+        Err(lig_sourcemap::SourceMapError::Unmapped { .. }) => {
             eprintln!("lig resolve: no mapping at {line}:{col}");
-            CliError::Denied
-        })?;
-    let file = token
-        .get_source_id()
-        .and_then(|id| map.get_source(id))
-        .unwrap_or("?");
-    let (sline, scol) = (token.get_src_line() + 1, token.get_src_col() + 1);
-    let name = token
-        .get_name_id()
-        .and_then(|nid| map.get_name(nid))
-        .unwrap_or("-");
-    println!("{file}:{sline}:{scol} (ir node: {name})");
-    Ok(())
+            Err(CliError::Denied)
+        }
+        Err(e) => {
+            eprintln!("lig resolve: {e}");
+            Err(CliError::Internal)
+        }
+    }
 }
 
 fn run_inspect(path: &PathBuf) -> Result<(), CliError> {
