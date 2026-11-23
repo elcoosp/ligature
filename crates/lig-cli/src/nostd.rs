@@ -112,7 +112,23 @@ fn generated_unit_proof(root: &Path, target: &str) -> Result<(), String> {
 
     let manifest = format!(
         "[package]\nname = \"lig-no-std-proof\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\
-         publish = false\n\n[workspace]\n\n[dependencies]\nlig-runtime = {{ path = '{}' }}\n",
+         publish = false\n\n[workspace]\n\n[lints.rust]\n\
+         # Generated units are emitted without doc comments; the readability \
+          budget (syn visitor, §9.2) owns generated-code clarity.\n\
+         missing_docs = \"allow\"\n\
+         # The generated arms bind schedule-widened parameters (`props`, \
+          `index`) that not every shape consumes.\n\
+         unused_variables = \"allow\"\n\
+         # prettyplease output keeps author-parenthesization in a few bind \
+          arms.\n\
+         unused_parens = \"allow\"\n\
+         # Reaction/static names compose `Component_NAME` (CamelCase prefix + \
+          UPPER suffix) by the §9.2 naming contract.\n\
+         non_upper_case_globals = \"allow\"\n\
+         # Schedule-wide constants (N_REACTIONS) are emitted even when a \
+          unit's dispatch set is empty.\n\
+         dead_code = \"allow\"\n\n\
+         [dependencies]\nlig-runtime = {{ path = '{}' }}\n",
         root.join("crates/lig-runtime").display()
     );
     std::fs::write(scratch.join("Cargo.toml"), manifest)
