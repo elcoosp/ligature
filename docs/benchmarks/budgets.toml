@@ -76,6 +76,12 @@ metric = "time"
 budget = 0.2
 note = "M21 reference median 37 ns (runtime/flush_checked_cycle bench, release, Linux x86_64 — the ping-pong cycle through flush_checked, exactly MAX_PASSES capped passes then the typed error); ≈5× headroom"
 
+[[budget]]
+name = "runtime_dispatch_checked"
+metric = "time"
+budget = 0.2
+note = "checked-dispatch reference median 9.9 ns (runtime/dispatch_checked bench, release, Linux x86_64 — one converging event dispatch through the generated fire_N glue shape: mark the handler reaction, then the checked flush); the gate's own release body measures ≈0.03 µs — ≈6.6× headroom"
+
 # Patch protocol (§11.3, ADR-013 — the runtime half of save→frame).
 [[budget]]
 name = "patch_apply_1"
