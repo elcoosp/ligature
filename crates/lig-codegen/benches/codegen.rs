@@ -155,6 +155,22 @@ fn bench_codegen_for_composed_content(c: &mut Criterion) {
     });
 }
 
+/// Lower the per-mount-fill-ref fixture once (M25: the ref-composed guard —
+/// the mount-time ref captures riding the mounting arm's leg walk and the
+/// build-body split ride the module pipeline), then time repeated codegen of
+/// the same IR.
+fn bench_codegen_per_mount_fill_ref(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/per-mount-fill-ref/input.solid.tsx");
+    let module =
+        lig_parse_solid::lower_module(src, "per-mount-fill-ref.tsx").expect("fixture lowers");
+    c.bench_function("codegen/per-mount-fill-ref", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("per-mount-fill-ref codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
@@ -166,6 +182,7 @@ criterion_group!(
     bench_codegen_list_slot,
     bench_codegen_for_event,
     bench_codegen_for_event_composed,
-    bench_codegen_for_composed_content
+    bench_codegen_for_composed_content,
+    bench_codegen_per_mount_fill_ref
 );
 criterion_main!(benches);
