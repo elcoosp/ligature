@@ -189,24 +189,26 @@ pub mod generated {
         }
         /// Per-item dispatch glue (M15): capture the event payload,
         /// substitute the live item/index into the handler body, and
-        /// flush — the per-item analogue of the top-level `fire_N`
-        /// (§10.1).
+        /// flush through the checked front — the per-item analogue of
+        /// the top-level `fire_N` (§10.1); a non-converging schedule
+        /// reports the typed `CycleError` (LIG-E401) instead of
+        /// panicking inside the event.
         pub fn fire_f4_d0(
             &mut self,
             h: &mut dyn Host,
             index: usize,
             ev: &::lig_runtime::EvData,
-        ) {
+        ) -> Result<(), ::lig_runtime::CycleError> {
             self.ev = ev.clone();
             let items: ::alloc::vec::Vec<::alloc::string::String> = ::core::clone::Clone::clone(
                 &(self.rows),
             );
             let Some(item) = items.get(index) else {
-                return;
+                return Ok(());
             };
             let index = index as i64;
             self.set_picked(item.clone());
-            ::lig_runtime::flush(self, h);
+            ::lig_runtime::flush_checked(self, h)
         }
         /// Run-once build (C4): executes top-to-bottom; reactivity lives
         /// exclusively in reactions. M7 phases: child attach (M10 — each
