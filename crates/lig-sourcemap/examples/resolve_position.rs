@@ -70,4 +70,26 @@ fn main() {
         got.line + 1,
         got.col + 1
     );
+
+    // The nearest-hit policy (the M24 follow-up promotion): positions the
+    // exact resolver calls unmapped — a column past a token, a line the map
+    // does not carry — resolve to the closest token BEFORE them, while a
+    // position before the map's first token still fails closed.
+    println!("\n== resolve_nearest (the promoted consumer policy) ==");
+    for token in merged.get_tokens().take(3) {
+        let (line, col) = (token.get_dst_line(), token.get_dst_col() + 3);
+        let got = lig_sourcemap::resolve_nearest(&merged, line, col)
+            .expect("a token maps before the probe");
+        let name = got.name.as_deref().unwrap_or("-");
+        println!(
+            "  nearest of {line}:{col} → {}:{}:{} (ir node: {name})",
+            got.source,
+            got.line + 1,
+            got.col + 1
+        );
+    }
+    let err = lig_sourcemap::resolve_nearest(&merged, 9_999, 0).expect("nearest past the end");
+    println!("past the end: {err:?}");
+    let err = lig_sourcemap::resolve_nearest(&merged, 0, 0).expect_err("before the first token");
+    println!("before the first token: {err}");
 }
