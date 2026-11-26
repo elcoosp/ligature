@@ -245,6 +245,7 @@ Runnable consumer examples (`crates/lig-incremental/examples`) — no `dist/` to
 | `render_denial`                                      | a LIG-E114 denial rendered with its fix and catalog URL                                       |
 | `composed_events`                                    | M17: a handler on a list body inside a branch — and the zone that still denies                |
 | `composed_content`                                   | M18: a handler + an outlet on a composed _content_ list body — and the zone that still denies |
+| `for_event_item_branch`                              | M27: branch-in-item legs mounting and dispatching per item                                    |
 | `mem_sink`                                           | the full artifact set emitted into memory                                                     |
 | `watch_sync`                                         | `Session::sync`: a watch tick's added/edited/removed diff                                     |
 | `observed_pass`                                      | M19: per-stage outcomes and wall clocks as events                                             |
@@ -294,9 +295,10 @@ cargo run -p lig-sourcemap --example resolve_position  # generated positions res
 > toolchain pinned at **1.99.1**. CI runs on Linux and macOS. The release workflow publishes
 > changelogs, not crates — build from source.
 
-The compiled subset is **deliberately small**: constructs outside the contract — events inside
-list-item branches, nested list bodies, callback calls, raw DOM access — deny with a precise
-code rather than mis-compile.
+The compiled subset is **deliberately small**: constructs outside the contract — events in the
+branch legs' subtrees, nested list bodies, callback calls, raw DOM access — deny with a precise
+code rather than mis-compile (events on the list body and its direct branch legs admit: M15
+through M27).
 
 | Milestone | Delivered                                                    | Report                       |
 | --------- | ------------------------------------------------------------ | ---------------------------- |
@@ -315,13 +317,14 @@ code rather than mis-compile.
 | M24       | The library position resolver                                | [report](docs/m24/REPORT.md) |
 | M25       | Per-mount fill refs (the ref-composed guard)                 | [report](docs/m25/REPORT.md) |
 | M26       | The mount walk's recursive capture walk (nested fill refs)   | [report](docs/m26/REPORT.md) |
+| M27       | Branch-in-item events (per-item × per-mount legs)            | [report](docs/m27/REPORT.md) |
 
 M0–M11 (the frontends, IR, admission, codegen, runtime, slots and branch assembly) are covered
 by the reports below and the [composition table](#what-composes).
 
 ## Learn more
 
-- [Milestone reports](docs/m0/REPORT.md) — `docs/m0/` through `docs/m26/`: what each milestone delivered and measured
+- [Milestone reports](docs/m0/REPORT.md) — `docs/m0/` through `docs/m27/`: what each milestone delivered and measured
 - [docs/appendix-a.md](docs/appendix-a.md) — the annotated generated unit every gate pins
 - [Admission rules](docs/admission/rules.md) — the Deny/Lint/Allow table · the [15-doc diagnostic catalog](docs/errors/)
 - [fixtures/README.md](fixtures/README.md) — the conformance contract both frontends must satisfy
