@@ -327,7 +327,8 @@ fn samples_for(name: &str) -> usize {
         | "codegen_for_event_composed"
         | "codegen_for_composed_content"
         | "codegen_per_mount_fill_ref"
-        | "codegen_per_mount_nested_fill_ref" => 40,
+        | "codegen_per_mount_nested_fill_ref"
+        | "codegen_for_event_item_branch" => 40,
         "runtime_instantiate"
         | "runtime_update_mask"
         | "runtime_mount_lifecycle"
@@ -398,6 +399,15 @@ fn per_mount_fill_ref_source(root: &Path) -> String {
 /// the committed fixture so the gate and the parity harness share one source.
 fn per_mount_nested_fill_ref_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/per-mount-nested-fill-ref/input.solid.tsx");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The branch-in-item fixture (the M27 codegen bench's workload: the
+/// per-item branch mount in the item replay, the leg tracker mirrored by
+/// the keyed plan ops, and the mount-time attach arms), read from the
+/// committed fixture so the gate and the parity harness share one source.
+fn for_event_item_branch_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/for-event-item-branch/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -667,6 +677,15 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(u);
             })
         }
+        "codegen_for_event_item_branch" => {
+            let src = for_event_item_branch_source(root);
+            let m =
+                lig_parse_solid::lower_module(&src, "for-event-item-branch.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
+                black_box(u);
+            })
+        }
         "codegen_for_composed_content" => {
             let src = for_composed_content_source(root);
             let m = lig_parse_solid::lower_module(&src, "for-composed-content.tsx").expect("lower");
@@ -815,6 +834,7 @@ const REGISTRY: &[&str] = &[
     "codegen_for_composed_content",
     "codegen_per_mount_fill_ref",
     "codegen_per_mount_nested_fill_ref",
+    "codegen_for_event_item_branch",
     "session_compile_counter",
     "session_observe",
     "session_emit_mem",
@@ -1012,9 +1032,9 @@ mod tests {
         // dispatch adds runtime_dispatch_checked, the component registry
         // adds runtime_registry_lifecycle, the per-mount fill refs add
         // codegen_per_mount_fill_ref, the mount walk's recursive capture
-        // walk adds codegen_per_mount_nested_fill_ref), all named, no
-        // dupes.
-        assert_eq!(REGISTRY.len(), 31);
+        // walk adds codegen_per_mount_nested_fill_ref, branch-in-item
+        // events add codegen_for_event_item_branch), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 32);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
