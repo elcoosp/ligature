@@ -5,8 +5,9 @@
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_composed_content,
     for_event, for_event_composed, for_keyed, for_list, list_component, list_slot,
-    per_mount_fill_ref, show_else, slots_branch_component, slots_branch_outlet, slots_component,
-    slots_dynamic, slots_named, slots_nested, slots_structural, template_ref, v_model,
+    per_mount_fill_ref, per_mount_nested_fill_ref, show_else, slots_branch_component,
+    slots_branch_outlet, slots_component, slots_dynamic, slots_named, slots_nested,
+    slots_structural, template_ref, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::{Commit, MockHost};
@@ -1224,5 +1225,84 @@ fn per_mount_fill_refs_capture_per_mount() {
     assert_eq!(
         app.ref_mark, fresh_root,
         "the mount-time capture re-ran on the fresh fill"
+    );
+}
+
+/// The M26 contract, end to end: a ref inside a NESTED outlet's fill of a
+/// branch-mounted use captures per mount through the mount walk's recursive
+/// capture walk — the nested fill itself mounts with the branch (pre-M26
+/// nothing mounted it: the binds addressed content that was never
+/// inserted), the PARENT's ref field names the freshly mounted nested fill
+/// element, the nested bind goes live, and a remount cycle re-captures into
+/// the fresh node, never the disposed one.
+#[test]
+fn per_mount_nested_fill_refs_walk_per_mount() {
+    let mut h = MockHost::new();
+    let mut app = per_mount_nested_fill_ref::App::build(
+        &mut h,
+        per_mount_nested_fill_ref::AppProps::default(),
+    );
+    // The branch mounted: the Panel instance exists, the header fill mounted
+    // into it, and the NESTED fill mounted into the header content's own
+    // outlet (pre-M26 nothing mounted it — the mount arms below the top
+    // level did not exist).
+    let (nested_root, nested_text) = app
+        .panel
+        .as_ref()
+        .expect("instance built at mount")
+        .frag
+        .slot_fill(1)
+        .and_then(|f| f.slot_fill(0))
+        .map(|c| (c.roots()[0], c.hole(1)))
+        .expect("the nested fill mounted into the fresh instance's header content");
+    assert_ne!(
+        app.ref_mark,
+        lig_runtime::NodeId(u32::MAX),
+        "the mount-time capture ran"
+    );
+    assert_eq!(
+        app.ref_mark, nested_root,
+        "the ref names the freshly mounted NESTED fill element"
+    );
+    // The nested bind is live against the mounted content (the pre-M26
+    // fail-open left the run arm addressing unmounted content).
+    assert_eq!(
+        h.text_of(nested_text),
+        Some("in"),
+        "the nested fill's bind initialized"
+    );
+    app.set_tag("next".into());
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(
+        h.text_of(nested_text),
+        Some("next"),
+        "the nested fill's bind updates through the composed chain"
+    );
+    // Flip off: the branch unmounts, the instance disposes with its nested
+    // content — the captured node is spent (the NodeId discipline keeps it
+    // inert).
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(app.panel.is_none(), "the unmount disposes the instance");
+    // Remount: a FRESH instance, fill and NESTED fill — the recursive walk
+    // re-mounts and re-captures per mount, never the disposed node.
+    app.set_on(true);
+    lig_runtime::flush(&mut app, &mut h);
+    let fresh_root = app
+        .panel
+        .as_ref()
+        .expect("fresh instance at remount")
+        .frag
+        .slot_fill(1)
+        .and_then(|f| f.slot_fill(0))
+        .map(|c| c.roots()[0])
+        .expect("the nested fill remounted into the fresh instance");
+    assert_ne!(
+        fresh_root, nested_root,
+        "the remount builds fresh nested nodes"
+    );
+    assert_eq!(
+        app.ref_mark, fresh_root,
+        "the recursive capture re-ran on the fresh nested fill"
     );
 }
