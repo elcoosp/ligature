@@ -134,7 +134,8 @@ fn slots_dynamic_binds_and_events_address_their_content() {
     // Dispatch the fill's click: the record lives on the parent's fragment
     // (attach_foreign across slabs); the flush rewrites the content text.
     let fill_text = fill.hole(1);
-    app.fire_1(&mut h, &EvData::new());
+    app.fire_1(&mut h, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.label, "next", "handler wrote the setter");
     assert_eq!(
         h.text_of(fill_text),
@@ -152,8 +153,10 @@ fn counter_renders_and_updates_through_the_schedule() {
     let _ = span;
     assert_eq!(c.count, 0, "initial signal value");
     // click the Add button twice: count 0 → 2
-    c.fire_1(&mut h, &EvData::new());
-    c.fire_1(&mut h, &EvData::new());
+    c.fire_1(&mut h, &EvData::new())
+        .expect("the dispatch converges");
+    c.fire_1(&mut h, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(c.count, 2, "setter path incremented twice");
     assert_eq!(c.doubled, 4, "memo tracks the signal");
 }
@@ -229,7 +232,7 @@ fn event_object_flows_through_the_payload_slot() {
     let mut s = event_object::Search::build(&mut h, event_object::SearchProps::default());
     assert_eq!(s.query, "", "initial query");
     let ev = EvData::new().current_target_value("ligature");
-    s.fire_1(&mut h, &ev);
+    s.fire_1(&mut h, &ev).expect("the dispatch converges");
     assert_eq!(s.query, "ligature", "handler read e.currentTarget.value");
 }
 
@@ -277,7 +280,7 @@ fn v_model_writes_through_the_event_payload() {
     let mut s = v_model::Signup::build(&mut h, v_model::SignupProps::default());
     assert_eq!(s.email, "", "initial email");
     let ev = EvData::new().current_target_value("me@ligature.dev");
-    s.fire_1(&mut h, &ev);
+    s.fire_1(&mut h, &ev).expect("the dispatch converges");
     assert_eq!(s.email, "me@ligature.dev", "v-model wrote the setter");
 }
 
@@ -843,9 +846,11 @@ fn list_events_dispatch_per_item() {
 
     // Dispatch: fire on the live index substitutes THAT item — item 0 is
     // alpha, item 1 is beta.
-    app.fire_f1_d0(&mut h, 0, &EvData::new());
+    app.fire_f1_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "alpha", "item 0's handler picked alpha");
-    app.fire_f1_d0(&mut h, 1, &EvData::new());
+    app.fire_f1_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "item 1's handler picked beta");
 
     // A keyed rotate moves the SAME items without rebuilding: no new Attach
@@ -873,7 +878,8 @@ fn list_events_dispatch_per_item() {
         .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
         .count();
     assert_eq!(before, after, "a keyed move re-attaches nothing");
-    app.fire_f1_d0(&mut h, 0, &EvData::new());
+    app.fire_f1_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "live index 0 is now beta");
 
     // A removal disposes the item's slab (its handler record with it); a
@@ -881,7 +887,8 @@ fn list_events_dispatch_per_item() {
     app.set_rows(vec!["beta".into()]);
     lig_runtime::flush(&mut app, &mut h);
     assert_eq!(app.frag.list_len(0), 1, "alpha removed");
-    app.fire_f1_d0(&mut h, 1, &EvData::new());
+    app.fire_f1_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "a stale index is a no-op, not a panic");
 
     // A fresh key mounts a fresh item and attaches ITS handler exactly once.
@@ -893,7 +900,8 @@ fn list_events_dispatch_per_item() {
         .filter(|c| matches!(c, mock_host::Commit::Attach { .. }))
         .count();
     assert_eq!(fresh, before + 1, "the fresh item attached once");
-    app.fire_f1_d0(&mut h, 1, &EvData::new());
+    app.fire_f1_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "gamma", "the fresh item's handler dispatches");
 }
 
@@ -935,9 +943,11 @@ fn composed_list_events_dispatch_per_item() {
 
     // Dispatch: index-addressed through the source, so the live item's value
     // substitutes exactly like the direct list (M15) does.
-    app.fire_f2_d0(&mut h, 0, &EvData::new());
+    app.fire_f2_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "alpha", "item 0's handler picked alpha");
-    app.fire_f2_d0(&mut h, 1, &EvData::new());
+    app.fire_f2_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "item 1's handler picked beta");
 
     // A keyed rotation inside the branch moves the SAME handler records:
@@ -955,7 +965,8 @@ fn composed_list_events_dispatch_per_item() {
         "the LIS-stable item kept its slab (and its handler record)"
     );
     assert_eq!(attaches(&h), before, "a keyed move re-attaches nothing");
-    app.fire_f2_d0(&mut h, 0, &EvData::new());
+    app.fire_f2_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "live index 0 is now beta");
 
     // The branch cycle: unmounting disposes the records with the branch,
@@ -977,13 +988,15 @@ fn composed_list_events_dispatch_per_item() {
         Some(alpha_node),
         "a remounted branch rebuilds fresh slabs"
     );
-    app.fire_f2_d0(&mut h, 0, &EvData::new());
+    app.fire_f2_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "the remounted item 0 dispatches");
 
     // A stale index stays a no-op (source-addressed, never a panic).
     app.set_rows(vec!["beta".into()]);
     lig_runtime::flush(&mut app, &mut h);
-    app.fire_f2_d0(&mut h, 1, &EvData::new());
+    app.fire_f2_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "a stale index is a no-op, not a panic");
 }
 
@@ -1037,9 +1050,11 @@ fn composed_content_lists_carry_events_and_slots_per_item() {
 
     // Dispatch: index-addressed through the source, exactly like the direct
     // and branch-owned composed lists (M15/M17).
-    app.fire_f4_d0(&mut h, 0, &EvData::new());
+    app.fire_f4_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "alpha", "item 0's handler picked alpha");
-    app.fire_f4_d0(&mut h, 1, &EvData::new());
+    app.fire_f4_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "item 1's handler picked beta");
 
     // A keyed rotation moves the SAME slabs (handler records + mounted
@@ -1057,7 +1072,8 @@ fn composed_content_lists_carry_events_and_slots_per_item() {
         "the LIS-stable item kept its slab and its mounted fallback"
     );
     assert_eq!(attaches(&h), before, "a keyed move re-attaches nothing");
-    app.fire_f4_d0(&mut h, 0, &EvData::new());
+    app.fire_f4_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "beta", "live index 0 is now beta");
 
     // The branch cycle: unmounting disposes the instance (the fill content,
@@ -1084,12 +1100,79 @@ fn composed_content_lists_carry_events_and_slots_per_item() {
         Some(alpha_node),
         "a remounted branch rebuilds fresh slabs"
     );
-    app.fire_f4_d0(&mut h, 1, &EvData::new());
+    app.fire_f4_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "alpha", "the remounted item dispatches");
 
     // A stale index stays a no-op (source-addressed, never a panic).
     app.set_rows(vec!["alpha".into()]);
     lig_runtime::flush(&mut app, &mut h);
-    app.fire_f4_d0(&mut h, 1, &EvData::new());
+    app.fire_f4_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
     assert_eq!(app.picked, "alpha", "a stale index is a no-op, not a panic");
+}
+
+/// The checked event-dispatch contract, end to end: the glue shape every
+/// generated `fire_N` now emits — mark the handler reaction, then the
+/// checked flush — reports a non-converging schedule as the typed
+/// `CycleError` (LIG-E401) instead of panicking inside the event. The
+/// ping-pong unit mirrors `host_mount`'s failure-path walkthrough, driven
+/// through the dispatch front.
+#[test]
+fn event_dispatch_reports_a_cycle_as_data() {
+    use lig_runtime::{DirtySet, Fragment, Reactions, Schedule, TplNode};
+
+    struct PingPong {
+        frag: Fragment,
+    }
+
+    static BROKEN_TPL: &[TplNode] = &[TplNode::Element {
+        tag: "div",
+        attrs: &[],
+        style: None,
+        children: &[],
+    }];
+
+    static BROKEN_SCHEDULE: Schedule = Schedule {
+        order: &[0, 1],
+        writes: &[1 << 1, 1 << 0],
+        writes_hi: &[],
+    };
+
+    impl PingPong {
+        /// The generated `fire_N` glue shape: capture, mark, checked flush.
+        fn fire_1(
+            &mut self,
+            h: &mut dyn lig_runtime::Host,
+            _ev: &EvData,
+        ) -> Result<(), lig_runtime::CycleError> {
+            self.frag.mark_mask(1);
+            lig_runtime::flush_checked(self, h)
+        }
+    }
+
+    impl Reactions for PingPong {
+        fn schedule(&self) -> &'static Schedule {
+            &BROKEN_SCHEDULE
+        }
+
+        fn dirty(&mut self) -> &mut DirtySet {
+            &mut self.frag.dirty
+        }
+
+        fn run(&mut self, _h: &mut dyn lig_runtime::Host, _r: u8) {}
+    }
+
+    let mut h = MockHost::new();
+    let mut broken = PingPong {
+        frag: Fragment::new(&mut h, BROKEN_TPL, &[], &[]),
+    };
+    let err = broken
+        .fire_1(&mut h, &EvData::new())
+        .expect_err("a ping-pong dispatch never converges");
+    assert_eq!(
+        err.passes,
+        lig_runtime::MAX_PASSES,
+        "the cap rides the error as data"
+    );
 }
