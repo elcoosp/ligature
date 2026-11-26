@@ -60,5 +60,39 @@ fn bench_resolve_merged(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_link_table_cycle, bench_resolve_merged);
+/// Time one nearest-hit resolution (the promoted M24 policy): the merged
+/// map is built once, then `resolve_nearest` runs per iteration — the same
+/// lookup-table build plus the backward-line walk the exact query skips.
+/// Isolation bench, unregistered by design (the M24 precedent: the gate's
+/// `session_emit_to`/`session_emit_mem` rows re-measure the map cycle
+/// end-to-end; a per-position query has no end-to-end row to guard).
+fn bench_resolve_nearest(c: &mut Criterion) {
+    let module = lig_parse_solid::lower_module(COUNTER_TSX, "counter.tsx").expect("counter lowers");
+    let src = COUNTER_TSX;
+    let unit = generate_component(&module, ComponentId::new(0)).expect("counter codegens");
+    let src_map = lig_sourcemap::src_to_ir(&module, src);
+    let ir_map = lig_sourcemap::ir_to_rust(&module, &unit.text, &unit.links)
+        .expect("the recorded table builds the map");
+    let merged = lig_sourcemap::chain(&src_map, &ir_map);
+    let token = merged
+        .get_tokens()
+        .next()
+        .expect("the merged map carries tokens");
+    // One past the exact position: the nearest walk's common shape.
+    let (line, col) = (token.get_dst_line(), token.get_dst_col() + 1);
+    c.bench_function("sourcemap/resolve_nearest", |b| {
+        b.iter(|| {
+            black_box(
+                lig_sourcemap::resolve_nearest(black_box(&merged), line, col).expect("resolves"),
+            )
+        });
+    });
+}
+
+criterion_group!(
+    benches,
+    bench_link_table_cycle,
+    bench_resolve_merged,
+    bench_resolve_nearest
+);
 criterion_main!(benches);
