@@ -314,7 +314,7 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
     assert!(stdout.contains("7666"), "D-8-pinned byte count: {stdout}");
     assert!(
-        stdout.contains("all 29 row(s) within budget"),
+        stdout.contains("all 30 row(s) within budget"),
         "summary present: {stdout}"
     );
     assert!(
@@ -328,6 +328,10 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(
         stdout.contains("codegen_branch"),
         "M10 branch row: {stdout}"
+    );
+    assert!(
+        stdout.contains("codegen_per_mount_fill_ref"),
+        "M25 per-mount-fill-ref row: {stdout}"
     );
     assert!(stdout.contains("codegen_ref"), "M12 ref row: {stdout}");
     assert!(stdout.contains("codegen_else"), "M11 else row: {stdout}");
