@@ -82,6 +82,12 @@ metric = "time"
 budget = 0.2
 note = "checked-dispatch reference median 9.9 ns (runtime/dispatch_checked bench, release, Linux x86_64 — one converging event dispatch through the generated fire_N glue shape: mark the handler reaction, then the checked flush); the gate's own release body measures ≈0.03 µs — ≈6.6× headroom"
 
+[[budget]]
+name = "runtime_registry_lifecycle"
+metric = "time"
+budget = 3.5
+note = "registry-lifecycle reference median 0.69 µs (runtime/registry_lifecycle bench, release, Linux x86_64 — two units mounted into the component registry, one save-tick through the trait object, the scene tick, the scene teardown; the container adds the id allocation, the boxed store, and the ordered teardown walk on top of the per-unit mount cost); ≈5× headroom"
+
 # Patch protocol (§11.3, ADR-013 — the runtime half of save→frame).
 [[budget]]
 name = "patch_apply_1"
