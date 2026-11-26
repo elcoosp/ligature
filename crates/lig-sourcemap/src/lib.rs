@@ -97,7 +97,8 @@ impl core::fmt::Display for SourceMapError {
             Self::Unmapped { line, col } => write!(
                 f,
                 "{}: no mapping at generated {line}:{col} — the position carries no token; \
-                 the map holds exact positions only, nearest-hit lookup is a consumer policy",
+                 the map holds exact positions (`resolve_nearest` opts into the \
+                 closest-token-before policy)",
                 Self::CODE
             ),
         }
@@ -353,6 +354,56 @@ pub fn resolve(
     let token = map
         .lookup_token(&table, line, col)
         .ok_or(SourceMapError::Unmapped { line, col })?;
+    Ok(position_of(map, token))
+}
+
+/// The nearest-hit policy, promoted into the library (the M24 follow-up the
+/// resolver report named): resolve the position, or the closest token
+/// BEFORE it in generation order — the exact hit first (the [`resolve`]
+/// contract unchanged), else the greatest token at-or-before `(line, col)`:
+/// within the line the last token whose column does not exceed the probe,
+/// across lines the last token of the nearest earlier mapped line. Several
+/// IR nodes may stack at one generated position (the M24 same-position
+/// contract): an exact hit selects the first token AT the position, a
+/// nearest miss the last — both are tokens at the at-or-before position,
+/// pinned by set membership. A position before the map's first token has
+/// no closest token and still fails closed as the typed
+/// [`SourceMapError::Unmapped`] — nearest never reaches past the map, and
+/// never returns a token after the queried position (a hot consumer that
+/// wants the per-line clamp instead hoists `generate_lookup_table` and
+/// calls `lookup_token` directly).
+///
+/// Works on any map the crate produces or a consumer loads — the merged map
+/// (`chain`), one of the halves, or a map read back from JSON (see
+/// `round_trip`). Positions are 0-based (VLQ-native) both ways.
+///
+/// # Errors
+/// [`SourceMapError::Unmapped`] with the position as data when no token
+/// at-or-before it exists (the map has no tokens before the position).
+pub fn resolve_nearest(
+    map: &SourceMap<'_>,
+    line: u32,
+    col: u32,
+) -> Result<ResolvedPosition, SourceMapError> {
+    let table = map.generate_lookup_table();
+    let token = map
+        .lookup_token(&table, line, col)
+        .or_else(|| {
+            (0..line).rev().find_map(|l| {
+                table
+                    .get(l as usize)
+                    .and_then(|line_tokens| line_tokens.last())
+                    .copied()
+            })
+        })
+        .ok_or(SourceMapError::Unmapped { line, col })?;
+    Ok(position_of(map, token))
+}
+
+/// The token → typed-position extraction both resolvers share: the source
+/// file (`"?"` when the token carries none), the 0-based source position,
+/// and the IR label riding in `names[]`.
+fn position_of(map: &SourceMap<'_>, token: oxc_sourcemap::Token) -> ResolvedPosition {
     let source = token
         .get_source_id()
         .and_then(|id| map.get_source(id))
@@ -362,12 +413,12 @@ pub fn resolve(
         .get_name_id()
         .and_then(|nid| map.get_name(nid))
         .map(ToString::to_string);
-    Ok(ResolvedPosition {
+    ResolvedPosition {
         source,
         line: token.get_src_line(),
         col: token.get_src_col(),
         name,
-    })
+    }
 }
 
 /// Chain `src→IR` with `IR→Rust` into the merged consumer map (D-11): a
@@ -1002,5 +1053,176 @@ mod tests {
         // The typed error implements `core::error::Error` (object-safe check).
         let err: Box<dyn std::error::Error> = Box::new(err);
         assert!(err.to_string().contains("boom"));
+    }
+
+    // --- nearest-hit resolve (the M24 follow-up promotion) ----------------------
+
+    /// The tokens stacked at one generated position, as comparable tuples —
+    /// the M24 same-position contract: per-arm attribution stacks several
+    /// IR nodes on one generated position, so a hit AT that position is
+    /// pinned by set membership.
+    fn tokens_at(
+        map: &super::SourceMap<'_>,
+        line: u32,
+        col: u32,
+    ) -> std::collections::BTreeSet<(u32, u32, Option<String>, String)> {
+        map.get_tokens()
+            .filter(|t| t.get_dst_line() == line && t.get_dst_col() == col)
+            .map(|t| {
+                (
+                    t.get_src_line(),
+                    t.get_src_col(),
+                    t.get_name_id()
+                        .and_then(|nid| map.get_name(nid))
+                        .map(ToString::to_string),
+                    t.get_source_id()
+                        .and_then(|id| map.get_source(id))
+                        .unwrap_or("?")
+                        .to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// The M24 remaining gap, promoted: `resolve_nearest` agrees with
+    /// `resolve` on every position the map carries — the exact contract is
+    /// the nearest policy's special case.
+    #[test]
+    fn resolve_nearest_matches_resolve_on_mapped_positions() {
+        let (m, src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let src_map = src_to_ir(&m, &src);
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        let merged = chain(&src_map, &ir_map);
+        let mut seen: std::collections::BTreeSet<(u32, u32)> = std::collections::BTreeSet::new();
+        for token in merged.get_tokens() {
+            seen.insert((token.get_dst_line(), token.get_dst_col()));
+        }
+        assert!(seen.len() > 4, "the counter map carries several positions");
+        for (line, col) in seen {
+            let exact = super::resolve(&merged, line, col).expect("mapped position");
+            let nearest = super::resolve_nearest(&merged, line, col).expect("mapped position");
+            assert_eq!(
+                nearest, exact,
+                "nearest({line},{col}) must equal resolve at a mapped position"
+            );
+        }
+    }
+
+    /// The promoted policy: a position OFF the map resolves to a token AT
+    /// the closest mapped position BEFORE it in generation order — never a
+    /// token after the position, never a guess beyond the map's first token.
+    #[test]
+    fn resolve_nearest_returns_the_closest_token_before_the_position() {
+        let (m, src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let src_map = src_to_ir(&m, &src);
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        let merged = chain(&src_map, &ir_map);
+        // The greatest mapped position: everything after it resolves to a
+        // token AT it (several IR nodes stack there — membership, not
+        // identity, per the M24 same-position contract).
+        let mut positions: Vec<(u32, u32)> = merged
+            .get_tokens()
+            .map(|t| (t.get_dst_line(), t.get_dst_col()))
+            .collect();
+        positions.sort_unstable();
+        positions.dedup();
+        let last = *positions.last().expect("the map carries positions");
+        let first = positions[0];
+        assert!(first.0 > 0, "the counter map starts past line 0");
+        let anchor = tokens_at(&merged, last.0, last.1);
+        assert!(anchor.len() > 1, "the counter's last position stacks arms");
+
+        // Past the end: a token at the map's greatest position.
+        let got = super::resolve_nearest(&merged, last.0, last.1 + 5).expect("nearest past end");
+        assert!(
+            anchor.contains(&(got.line, got.col, got.name.clone(), got.source.clone())),
+            "nearest({},{}) = {got:?} must be a token at {last:?}: {anchor:?}",
+            last.0,
+            last.1 + 5
+        );
+
+        // Far past the map's last mapped line: still that position.
+        let got = super::resolve_nearest(&merged, last.0 + 50, 0).expect("nearest far past");
+        assert!(
+            anchor.contains(&(got.line, got.col, got.name.clone(), got.source.clone())),
+            "the nearest hit does not drift past the map: {got:?}"
+        );
+
+        // On a mapped line, BEFORE that line's first token column: the
+        // closest mapped position BEFORE the probe — the previous line's
+        // last position, never the line's own first token (that one is
+        // after).
+        let line_first: std::collections::BTreeMap<u32, u32> =
+            positions
+                .iter()
+                .fold(std::collections::BTreeMap::new(), |mut acc, (l, c)| {
+                    acc.entry(*l)
+                        .and_modify(|first| *first = (*first).min(*c))
+                        .or_insert(*c);
+                    acc
+                });
+        let (line, first_col) = line_first
+            .iter()
+            .filter(|&(&l, _)| l > first.0)
+            .find(|&(_, c)| *c > 0)
+            .map(|(&l, &c)| (l, c))
+            .expect("a mapped line past the first whose first token is indented");
+        let prev_last = positions
+            .iter()
+            .rev()
+            .find(|(l, _)| *l < line)
+            .map(|(l, c)| (*l, *c))
+            .expect("an earlier mapped line");
+        let got = super::resolve_nearest(&merged, line, first_col - 1)
+            .expect("nearest before the line's first token");
+        let prev_tokens = tokens_at(&merged, prev_last.0, prev_last.1);
+        assert!(
+            prev_tokens.contains(&(got.line, got.col, got.name.clone(), got.source.clone())),
+            "nearest({line},{}) = {got:?} must be a token at the previous mapped position {prev_last:?}: {prev_tokens:?}",
+            first_col - 1
+        );
+        // And never the line's own first token — that one is AFTER the probe.
+        let own_tokens = tokens_at(&merged, line, first_col);
+        let own_names: std::collections::BTreeSet<Option<String>> = own_tokens
+            .iter()
+            .map(|(_, _, name, _)| name.clone())
+            .collect();
+        assert!(
+            !own_names.contains(&got.name),
+            "the probe precedes the line's first token; got its own {got:?}"
+        );
+    }
+
+    /// Fail-closed stays: before the map's first token there is no closest
+    /// token — the typed [`SourceMapError::Unmapped`] with the position as
+    /// data (the M24 miss, unchanged by the promotion).
+    #[test]
+    fn resolve_nearest_is_fail_closed_before_the_first_token() {
+        let (m, src) = counter();
+        let unit = generate_component(&m, ComponentId::new(0)).expect("codegen");
+        let src_map = src_to_ir(&m, &src);
+        let ir_map = super::ir_to_rust(&m, &unit.text, &unit.links).expect("ir map");
+        let merged = chain(&src_map, &ir_map);
+        let first = merged
+            .get_tokens()
+            .map(|t| (t.get_dst_line(), t.get_dst_col()))
+            .min()
+            .expect("the map carries positions");
+        let probe = (first.0 - 1, 0);
+        let err = super::resolve_nearest(&merged, probe.0, probe.1)
+            .expect_err("nothing maps before the first token");
+        match &err {
+            super::SourceMapError::Unmapped { line, col } => {
+                assert_eq!(*line, probe.0);
+                assert_eq!(*col, probe.1);
+            }
+            other => panic!("want Unmapped, got {other:?}"),
+        }
+        assert!(
+            err.to_string().contains("no mapping"),
+            "the Display names the miss: {err}"
+        );
     }
 }
