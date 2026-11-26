@@ -15,7 +15,7 @@
     <a href="docs/adr/0012-msrv-and-dependency-pins.md"><img src="https://img.shields.io/badge/MSRV-1.97%2B-informational?style=flat-square" alt="MSRV 1.97+"/></a>
     <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-informational?style=flat-square" alt="License: MIT OR Apache-2.0"/></a>
     <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.4.0-blue?style=flat-square" alt="Version 1.4.0"/></a>
-    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-36%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="36 conformance fixtures, both frontend legs"/></a>
+    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-37%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="37 conformance fixtures, both frontend legs"/></a>
   </p>
 </div>
 
@@ -29,7 +29,7 @@
 
 |                                    |                                                                                                                                                                                                      |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🧬 **Two frontends, one contract** | The same component in Solid TSX and Vue SFC lowers to byte-identical View IR — 36 fixtures × 2 legs, byte-compared against the committed contract on every push.                                     |
+| 🧬 **Two frontends, one contract** | The same component in Solid TSX and Vue SFC lowers to byte-identical View IR — 37 fixtures × 2 legs, byte-compared against the committed contract on every push.                                     |
 | 🚧 **Fail-closed admission**       | Every construct lands in exactly one Deny/Lint/Allow tier — 11 rules, each backed by an allow fixture _and_ a deny/lint fixture, synced 1:1 by CI. A Deny means zero output downstream.              |
 | 📦 **Byte-reproducible codegen**   | `quote!` → `syn::File` → `prettyplease`; the committed counter unit (7,666 B, digest `0x85d06a5c087b3589`) is byte-diffed against fresh generation, and a syn visitor enforces a readability budget. |
 | 🔩 **no_std runtime**              | `#![no_std]` + alloc, `forbid(unsafe_code)`, `Copy` node handles, LIS-stable keyed diffs, a const-scheduled flush — proven on bare-metal targets in CI.                                              |
@@ -41,7 +41,7 @@
 
 | Gate            | What it proves                                                                          | Command               |
 | --------------- | --------------------------------------------------------------------------------------- | --------------------- |
-| Frontend parity | Both legs of all 36 fixtures byte-match the committed IR; a fixture missing a leg fails | `lig fixtures verify` |
+| Frontend parity | Both legs of all 37 fixtures byte-match the committed IR; a fixture missing a leg fails | `lig fixtures verify` |
 | Reproducibility | Committed codegen byte-diffed against a fresh generation + the readability budget       | `lig reproducibility` |
 | Budgets         | Every bench workload under its pinned ceiling (`docs/benchmarks/budgets.toml`)          | `lig budgets`         |
 | no_std          | Bare-metal builds: `thumbv7em-none-eabihf`, `aarch64-unknown-none-softfloat`            | `lig no-std`          |
@@ -194,9 +194,11 @@ for `thumbv7em-none-eabihf` and `aarch64-unknown-none-softfloat`.
 | `Mounted::flush`         | The bare tick                                                                                                          |
 | `Mounted::flush_checked` | The checked tick: LIG-E401 as a typed `CycleError` carrying the pass cap — failure as data for `panic = "abort"` hosts |
 | `Mounted::dispose`       | Total recursive LIFO teardown — the host sees one `destroy` per node the build created                                 |
+| `ComponentRegistry`      | The `dyn` scene store (ADR-0038): mounted units boxed behind the trait, keyed by never-reused `CompId`s — `mount`/`update`/`flush`/`flush_all` (fail-closed in id order)/`dispose`/`dispose_all` drive the same checked lifecycle per unit and per scene |
 
 ```sh
-cargo run -p compile-clean --example host_mount   # mount → save-tick → checked dispatch → dispose, + the typed LIG-E401 failure paths (tick AND dispatch)
+cargo run -p compile-clean --example host_mount         # mount → save-tick → checked dispatch → dispose, + the typed LIG-E401 failure paths (tick AND dispatch)
+cargo run -p compile-clean --example component_registry # two units mounted into one registry — per-id ticks, the scene tick, the balanced scene teardown
 ```
 
 Generated units are plain Rust on `lig_runtime`'s prelude: a component struct with state fields,
@@ -276,7 +278,11 @@ cargo run -p lig-sourcemap --example resolve_position  # generated positions res
 - **ThinLink patch protocol.** One patch dylib, an atomically swapped jump table,
   never-`dlclose` semantics; `lig patch-spike` chains two generations through stub thunks and
   enforces save→frame < 1 s — measured **~125–140 ms** on Linux and macOS. Unix-only `dlopen`;
-  `lig doctor` reports it unavailable on Windows.
+  `lig doctor` reports it unavailable on Windows. The host bridge (ADR-0038) lands the protocol
+  on the mounted half: `hot_dispatch` is the safepoint at the generated `fire_N` glue's shape,
+  and `HotSurface<C>` mounts a component whose every dispatch rides the newest committed table —
+  no remount, no state loss (`cargo run -p lig-patch --example hot_surface` walks it with a
+  fully-spelled custom `Host`).
 - **Budgets.** [budgets.toml](docs/benchmarks/budgets.toml) pins one ceiling per workload, each
   with ≥ 5× headroom over the recorded reference median; `lig budgets` enforces them in release
   mode in CI.
@@ -307,13 +313,14 @@ code rather than mis-compile.
 | M22       | The recorded link table (no text scanning)                   | [report](docs/m22/REPORT.md) |
 | M23       | The watch-tick seam (`Session::tick`)                        | [report](docs/m23/REPORT.md) |
 | M24       | The library position resolver                                | [report](docs/m24/REPORT.md) |
+| M25       | Per-mount fill refs (the ref-composed guard)                 | [report](docs/m25/REPORT.md) |
 
 M0–M11 (the frontends, IR, admission, codegen, runtime, slots and branch assembly) are covered
 by the reports below and the [composition table](#what-composes).
 
 ## Learn more
 
-- [Milestone reports](docs/m0/REPORT.md) — `docs/m0/` through `docs/m24/`: what each milestone delivered and measured
+- [Milestone reports](docs/m0/REPORT.md) — `docs/m0/` through `docs/m25/`: what each milestone delivered and measured
 - [docs/appendix-a.md](docs/appendix-a.md) — the annotated generated unit every gate pins
 - [Admission rules](docs/admission/rules.md) — the Deny/Lint/Allow table · the [15-doc diagnostic catalog](docs/errors/)
 - [fixtures/README.md](fixtures/README.md) — the conformance contract both frontends must satisfy
@@ -347,6 +354,7 @@ by the reports below and the [composition table](#what-composes).
 | 0028 | Per-item event dispatch                     |
 | 0030 | Composed-list events                        |
 | 0031 | The composed-content owner-direct lift      |
+| 0039 | The per-mount fill refs                     |
 
 **Consumer & sessions**
 
