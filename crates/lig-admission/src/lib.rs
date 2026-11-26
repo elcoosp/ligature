@@ -170,36 +170,45 @@ fn admit_fragment(
                 }
             }
             DynamicKind::For(for_ir) => {
-                // LIG-E118, M15+M17: an event handler DIRECTLY on a For body
-                // admits — per-item dispatch rides the keyed instance
+                // LIG-E118, M15+M17+M27: an event handler DIRECTLY on a For
+                // body admits — per-item dispatch rides the keyed instance
                 // machinery (M13's per-item stores, the per-item replay,
                 // index-addressed fire fns), and since M17 the composed
                 // reconcile's insert arms attach through ANY receiver, so a
                 // branch- or slot-owned body admits its own handlers too.
-                // The body's SUBTREE keeps the fail-closed discipline:
-                // events inside list-item branches and nested lists deny
-                // with one precise reason at the event's own span (per-item
-                // × per-mount/per-item composition is the foundation
-                // follow-up). The v1 check was flat (the body's direct
-                // dynamics only), so nested events slipped through admission
-                // to the codegen backstop; the walk closes that hole.
+                // Since M27 the body's DIRECT If legs admit their own
+                // handlers as well (per-item × per-mount: the branch mounts
+                // per item inside the replay and the leg's handler attaches
+                // at the mount). The SUBTREE keeps the fail-closed
+                // discipline: events in the legs' own branches and subtrees,
+                // and inside nested lists, deny with one precise reason at
+                // the event's own span (per-item × per-item composition is
+                // the foundation follow-up). The v1 check was flat (the
+                // body's direct dynamics only), so nested events slipped
+                // through admission to the codegen backstop; the walk closes
+                // that hole.
                 let mut seen = std::collections::HashSet::new();
-                walk_item_body_events(module, for_ir.body, true, report, &mut seen);
+                walk_item_body_events(module, for_ir.body, true, false, report, &mut seen);
             }
             _ => {}
         }
     }
 }
 
-/// The M15/M17 item-body event walk: events on the For body fragment itself
-/// admit (`owner_direct` — direct or composed, the dispatch machinery
-/// addresses items through any receiver), events anywhere deeper in the item
-/// subtree deny with `LIG-E118` at their own span. `seen` dedups shared
-/// sub-fragments.
+/// The M15/M17/M27 item-body event walk: events on the For body fragment
+/// itself admit (`owner_direct` — direct or composed, the dispatch
+/// machinery addresses items through any receiver); since M27 the events on
+/// the body's DIRECT If legs admit too (`in_leg` marks the one-level leg
+/// surface — the branch mounts per item inside the per-item replay and the
+/// leg's handler attaches at the mount, so the mount arm's reach is exactly
+/// the admitted surface). Everything deeper in the item subtree — the legs'
+/// own branches, nested lists, slot fallbacks — denies with `LIG-E118` at
+/// its own span. `seen` dedups shared sub-fragments.
 fn walk_item_body_events(
     module: &ViewModule,
     frag_id: lig_core::id::FragmentId,
     owner_direct: bool,
+    in_leg: bool,
     report: &mut AdmissionReport,
     seen: &mut std::collections::HashSet<u32>,
 ) {
@@ -216,36 +225,43 @@ fn walk_item_body_events(
                     let (start, end) = d.span;
                     let mut diag = LigDiagnostic::error(
                         "LIG-E118",
-                        "event handlers beyond the direct list item body are not admitted in v1",
+                        "event handlers beyond the list item body and its branch legs are \
+                         not admitted",
                         lig_core::span::Span::new(start, end),
                     );
                     diag.help = Some(
-                        "hoist the handler to the list level, or extract a keyed component".into(),
+                        "per-item dispatch covers the body and its direct branch legs; deeper \
+                         shapes keep the denial — hoist the handler or extract a keyed component"
+                            .into(),
                     );
                     report.diagnostics.push(diag);
                 }
             }
             DynamicKind::If(i) => {
-                walk_item_body_events(module, i.then, false, report, seen);
+                // M27: the body's direct legs inherit the admitted surface
+                // (one level — the mount arm's reach); a leg's own branches
+                // and everything below stay denied.
+                let leg_direct = owner_direct && !in_leg;
+                walk_item_body_events(module, i.then, leg_direct, true, report, seen);
                 if let Some(el) = i.else_ {
-                    walk_item_body_events(module, el, false, report, seen);
+                    walk_item_body_events(module, el, leg_direct, true, report, seen);
                 }
             }
             DynamicKind::For(fo) => {
                 // A nested list: its owner is a For body (never a direct-ctx
                 // fragment), so the inner body's events stay denied.
-                walk_item_body_events(module, fo.body, false, report, seen);
+                walk_item_body_events(module, fo.body, false, in_leg, report, seen);
             }
             DynamicKind::Slot {
                 fallback: Some(fb), ..
             } => {
-                walk_item_body_events(module, *fb, false, report, seen);
+                walk_item_body_events(module, *fb, false, in_leg, report, seen);
             }
             _ => {}
         }
     }
     for &c in &frag.children {
-        walk_item_body_events(module, c, false, report, seen);
+        walk_item_body_events(module, c, false, in_leg, report, seen);
     }
 }
 
@@ -390,13 +406,27 @@ mod tests {
     }
 
     #[test]
-    fn for_handler_in_item_branch_is_e118() {
-        // M15 boundary: events nested deeper inside the item subtree — a
-        // branch-in-item here — keep the fail-closed denial (per-item ×
-        // per-mount composition is the follow-up). The walk must CATCH the
-        // nested event (the v1 flat check only looked at the body's direct
-        // dynamics and let this shape slip through to codegen).
+    fn for_handler_in_item_branch_admits() {
+        // M27 (per-item × per-mount): an event handler on a branch leg
+        // inside the item body admits — the branch mounts PER ITEM inside
+        // the replay (the item's own fragment carries the branch slot), the
+        // leg's handler attaches at the mount, and dispatch rides the
+        // index-addressed fire fns. The branch-in-item zone of the E118
+        // discipline lifts with per-item control flow.
         let src = "import { For, Show } from \"solid-js\";\nexport function A() {\n  const [items, setItems] = createSignal([1, 2]);\n  return (\n    <For each={items()}>\n      {(n) => (\n        <Show when={n > 0}>\n          <li onClick={() => setItems([n])}>{n}</li>\n        </Show>\n      )}\n    </For>\n  );\n}\n";
+        let m = lower(src);
+        let r = admit(&m, Profile::Layout);
+        assert!(r.is_admitted(), "{r:?}");
+        assert!(r.denies().next().is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn for_handler_in_item_branch_leg_subtree_is_e118() {
+        // M27 boundary: the leg surface is the mount arm's reach — the
+        // leg's OWN events admit, a branch nested INSIDE the leg (or any
+        // deeper fragment) keeps the fail-closed denial. The boundary
+        // moves, it does not disappear.
+        let src = "import { For, Show } from \"solid-js\";\nexport function A() {\n  const [items, setItems] = createSignal([1, 2]);\n  return (\n    <For each={items()}>\n      {(n) => (\n        <Show when={n > 0}>\n          <div>\n            <Show when={n > 1}>\n              <li onClick={() => setItems([n])}>{n}</li>\n            </Show>\n          </div>\n        </Show>\n      )}\n    </For>\n  );\n}\n";
         let m = lower(src);
         let r = admit(&m, Profile::Layout);
         assert!(!r.is_admitted(), "{r:?}");
@@ -432,13 +462,26 @@ mod tests {
     }
 
     #[test]
-    fn for_handler_in_composed_body_branch_is_e118() {
-        // M17 boundary: the composed lift covers the body's OWN events only.
-        // A handler deeper in the item subtree — a branch-in-item here, on a
-        // composed list — keeps the fail-closed denial (per-item × per-mount
-        // composition needs per-item control flow, the foundation
-        // follow-up).
+    fn for_handler_in_composed_body_branch_admits() {
+        // M27: the per-item × per-mount lift covers COMPOSED bodies too —
+        // a branch leg of a branch- or slot-owned For body admits its own
+        // handler (the composed reconcile replays the same per-item apply,
+        // so the leg mount and the attach ride one mechanism). The M17
+        // boundary (body's own events only) moves one level with the
+        // mechanism.
         let src = "import { For, Show } from \"solid-js\";\nexport function A() {\n  const [on, setOn] = createSignal(true);\n  const [items, setItems] = createSignal([1, 2]);\n  return (\n    <Show when={on()}>\n      <For each={items()}>\n        {(n) => (\n          <Show when={n > 0}>\n            <li onClick={() => setItems([n])}>{n}</li>\n          </Show>\n        )}\n      </For>\n    </Show>\n  );\n}\n";
+        let m = lower(src);
+        let r = admit(&m, Profile::Layout);
+        assert!(r.is_admitted(), "{r:?}");
+        assert!(r.denies().next().is_none(), "{r:?}");
+    }
+
+    #[test]
+    fn for_handler_in_composed_body_branch_subtree_is_e118() {
+        // M27 boundary on the composed leg: a branch nested INSIDE the
+        // composed body's branch leg keeps the denial (the leg surface is
+        // one level, own-tree and composed alike).
+        let src = "import { For, Show } from \"solid-js\";\nexport function A() {\n  const [on, setOn] = createSignal(true);\n  const [items, setItems] = createSignal([1, 2]);\n  return (\n    <Show when={on()}>\n      <For each={items()}>\n        {(n) => (\n          <Show when={n > 0}>\n            <div>\n              <Show when={n > 1}>\n                <li onClick={() => setItems([n])}>{n}</li>\n              </Show>\n            </div>\n          </Show>\n        )}\n      </For>\n    </Show>\n  );\n}\n";
         let m = lower(src);
         let r = admit(&m, Profile::Layout);
         assert!(!r.is_admitted(), "{r:?}");
