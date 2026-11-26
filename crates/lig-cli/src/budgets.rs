@@ -325,7 +325,8 @@ fn samples_for(name: &str) -> usize {
         | "codegen_list_slot"
         | "codegen_for_event"
         | "codegen_for_event_composed"
-        | "codegen_for_composed_content" => 40,
+        | "codegen_for_composed_content"
+        | "codegen_per_mount_fill_ref" => 40,
         "runtime_instantiate"
         | "runtime_update_mask"
         | "runtime_mount_lifecycle"
@@ -379,6 +380,14 @@ fn template_ref_source(root: &Path) -> String {
 /// committed fixture so the gate and the parity harness share one source.
 fn show_else_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/show-else/input.solid.tsx");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The per-mount-fill-ref fixture (the M25 codegen bench's workload: the
+/// mount-time ref captures riding the mounting arm's leg walk), read from
+/// the committed fixture so the gate and the parity harness share one source.
+fn per_mount_fill_ref_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/per-mount-fill-ref/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -631,6 +640,14 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(u);
             })
         }
+        "codegen_per_mount_fill_ref" => {
+            let src = per_mount_fill_ref_source(root);
+            let m = lig_parse_solid::lower_module(&src, "per-mount-fill-ref.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
+                black_box(u);
+            })
+        }
         "codegen_for_composed_content" => {
             let src = for_composed_content_source(root);
             let m = lig_parse_solid::lower_module(&src, "for-composed-content.tsx").expect("lower");
@@ -777,6 +794,7 @@ const REGISTRY: &[&str] = &[
     "codegen_for_event",
     "codegen_for_event_composed",
     "codegen_for_composed_content",
+    "codegen_per_mount_fill_ref",
     "session_compile_counter",
     "session_observe",
     "session_emit_mem",
@@ -960,7 +978,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 29 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 30 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
         // codegen_for_event, M16 adds session_compile_counter, M17 adds
@@ -972,8 +990,9 @@ mod tests {
         // the checked flush seam adds runtime_flush_checked_cycle,
         // the watch-tick seam adds session_watch_tick, the checked event
         // dispatch adds runtime_dispatch_checked, the component registry
-        // adds runtime_registry_lifecycle), all named, no dupes.
-        assert_eq!(REGISTRY.len(), 29);
+        // adds runtime_registry_lifecycle, the per-mount fill refs add
+        // codegen_per_mount_fill_ref), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 30);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
