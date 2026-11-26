@@ -336,15 +336,22 @@ impl ViewModule {
     }
 
     /// Canonical compact JSON (§5.6): the conformance artifact.
+    ///
+    /// # Panics
+    /// Serialization of the schema structs cannot fail (no maps with
+    /// non-string keys, no floats); a failure is a bug, surfaced loudly
+    /// instead of silently comparing an empty artifact against the golden
+    /// files (the old `unwrap_or_default` made a parity mismatch look like
+    /// a lowering change).
     #[must_use]
     pub fn canonical_json(&self) -> String {
-        serde_json::to_string(self).unwrap_or_default()
+        serde_json::to_string(self).expect("canonical JSON serialization cannot fail")
     }
 
     /// Canonical pretty JSON (`lig inspect` format).
     #[must_use]
     pub fn canonical_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(self).unwrap_or_default()
+        serde_json::to_string_pretty(self).expect("canonical JSON serialization cannot fail")
     }
 
     /// 64-bit fingerprint of a fragment subtree: template hash, dynamic
@@ -414,7 +421,8 @@ impl ViewModule {
             "states": subtree.iter().map(|f| self.states.iter().filter(|s| s.owner.get() as usize == *f).collect::<Vec<_>>()).collect::<Vec<_>>(),
             "rxs": rx_ids.iter().map(|r| self.reactions.get(*r as usize)).collect::<Vec<_>>(),
         });
-        let bytes = serde_json::to_vec(&payload).unwrap_or_default();
+        let bytes =
+            serde_json::to_vec(&payload).expect("fingerprint payload serialization cannot fail");
         fnv1a64(&bytes)
     }
 }
