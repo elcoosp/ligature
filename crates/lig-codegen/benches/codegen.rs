@@ -171,6 +171,23 @@ fn bench_codegen_per_mount_fill_ref(c: &mut Criterion) {
     });
 }
 
+/// Lower the per-mount-nested-fill-ref fixture once (M26: the mount walk's
+/// recursive capture walk — the nested outlet mounts, the nested events and
+/// the nested ref captures compose onto the per-mount leg walk), then time
+/// repeated codegen of the same IR.
+fn bench_codegen_per_mount_nested_fill_ref(c: &mut Criterion) {
+    let src =
+        include_str!("../../../fixtures/conformance/per-mount-nested-fill-ref/input.solid.tsx");
+    let module = lig_parse_solid::lower_module(src, "per-mount-nested-fill-ref.tsx")
+        .expect("fixture lowers");
+    c.bench_function("codegen/per-mount-nested-fill-ref", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("per-mount-nested-fill-ref codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
@@ -183,6 +200,7 @@ criterion_group!(
     bench_codegen_for_event,
     bench_codegen_for_event_composed,
     bench_codegen_for_composed_content,
-    bench_codegen_per_mount_fill_ref
+    bench_codegen_per_mount_fill_ref,
+    bench_codegen_per_mount_nested_fill_ref
 );
 criterion_main!(benches);
