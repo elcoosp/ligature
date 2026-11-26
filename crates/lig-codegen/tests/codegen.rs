@@ -1288,3 +1288,85 @@ export function Panel({ title }) {
         "the mount-time capture writes the parent's field: {text}"
     );
 }
+
+#[test]
+fn per_mount_nested_fill_refs_walk_at_mount_time() {
+    // The M25 report's named follow-up (docs/m25/REPORT.md, "Remaining gaps
+    // / risks"): "Refs inside nested slot content of a branch-mounted use
+    // keep the new fail-closed codegen denial until the mount walk grows a
+    // recursive capture walk (the same recursion the M9 nested-outlet
+    // mounts gained)." A ref inside a NESTED outlet's fill — the fill of an
+    // outlet the author spelled INSIDE the branch-mounted use's own fill —
+    // must capture at MOUNT time through the guarded per-mount chain and
+    // write the PARENT's field (the M7 fill-ref ownership, per mount), and
+    // the nested fill itself must mount with the branch (today the nested
+    // fill never mounts — the mount arms address content that was never
+    // inserted, the M6-era fail-open in a new location). The acceptance
+    // line this test pins: the denial lifts and the mount walk captures
+    // per mount, exactly like the M9 nested-outlet mounts recurse.
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  const [tag, setTag] = createSignal("in");
+  let mark;
+  return (
+    <Show when={on()}>
+      <Panel
+        title="x"
+        header={<div><Slot name="inner"><em class="none">{tag}</em></Slot></div>}
+        inner={<b ref={mark}>{tag}</b>}
+      />
+    </Show>
+  );
+}
+
+export function Panel({ title }) {
+  return (
+    <section>
+      <h2>{title}</h2>
+      <Slot name="header" />
+    </section>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "permount-nested-ref.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module)
+        .expect(
+            "codegen: nested slot content of a branch-mounted use compiles (the M25 \
+                 denial lifts once the mount walk grows the recursive capture walk)",
+        )
+        .text;
+    // The use is per-mount: an Option field built in the mounting arm.
+    assert!(
+        text.contains("pub panel: Option<Panel>"),
+        "the branch-mounted use is an Option field: {text}"
+    );
+    // The build body never reads the per-mount instance (it does not exist
+    // until the branch mounts).
+    assert!(
+        !text.contains("s.panel.frag.slot_fill("),
+        "the build body never reads a per-mount instance's fill directly: {text}"
+    );
+    // The nested fill mounts per mount, through the guarded chain: the
+    // fresh header content's nested outlet takes the use site's `inner`
+    // fill (the M9 nested-outlet mount, per-mount-guarded).
+    assert!(
+        text.matches("::lig_runtime::SlotOrigin::Fill").count() >= 2,
+        "both the top-level fill and the nested fill mount per mount: {text}"
+    );
+    // The nested ref captures at mount time through the composed read
+    // chain: the fresh header content's nested fill hole, into the
+    // PARENT's ref field. The chain unwraps the instance (`as_ref`), the
+    // fresh header fill (`slot_fill(1)` — the child's outlet), and the
+    // nested fill (`slot_fill(0)` — the outlet the author spelled inside
+    // the fill). The bind arms read the same chain with the `_mut`
+    // accessors, so the non-mut `slot_fill(0usize)` step is unique to the
+    // capture.
+    assert!(
+        text.contains(".slot_fill(0usize)"),
+        "the nested capture reads through the composed guarded chain: {text}"
+    );
+    assert!(
+        text.contains("self.ref_mark = c.hole(0usize)"),
+        "the nested capture writes the parent's field: {text}"
+    );
+}
