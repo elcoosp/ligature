@@ -177,17 +177,23 @@ the dirty mark:
 
 and the dispatch glue for the delegated click (§10.1 — events are data,
 no closures were allocated anywhere: the host's delegate table routes DOM
-events to `fire_1`):
+events to `fire_1`; the glue is the checked front — a non-converging
+schedule reports the typed `CycleError` instead of panicking inside the
+event):
 
 ```rust
-        pub fn fire_1(&mut self, h: &mut dyn Host, ev: &::lig_runtime::EvData) {
+        pub fn fire_1(
+            &mut self,
+            h: &mut dyn Host,
+            ev: &::lig_runtime::EvData,
+        ) -> Result<(), ::lig_runtime::CycleError> {
             self.ev = ev.clone();
             self.frag.dirty.set(1usize as usize);
-            ::lig_runtime::flush(self, h);
+            ::lig_runtime::flush_checked(self, h)
         }
 ```
 
-capture the payload, mark the handler reaction, flush.
+capture the payload, mark the handler reaction, checked flush.
 
 ## 7. Run-once build (C4)
 
