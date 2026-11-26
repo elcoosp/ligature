@@ -4,8 +4,8 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_composed_content,
-    for_event, for_event_composed, for_keyed, for_list, list_component, list_slot,
-    per_mount_fill_ref, per_mount_nested_fill_ref, show_else, slots_branch_component,
+    for_event, for_event_composed, for_event_item_branch, for_keyed, for_list, list_component,
+    list_slot, per_mount_fill_ref, per_mount_nested_fill_ref, show_else, slots_branch_component,
     slots_branch_outlet, slots_component, slots_dynamic, slots_named, slots_nested,
     slots_structural, template_ref, v_model,
 };
@@ -1304,5 +1304,102 @@ fn per_mount_nested_fill_refs_walk_per_mount() {
     assert_eq!(
         app.ref_mark, fresh_root,
         "the recursive capture re-ran on the fresh nested fill"
+    );
+}
+
+/// The M27 branch-in-item event contract, end to end: a `Show` inside a
+/// keyed For body mounts PER ITEM (the item's own fragment carries the
+/// branch slot — one item's then leg and one item's else leg mount side by
+/// side), each leg's handler attaches at the mount through the item's slab,
+/// dispatch rides the index-addressed leg fire fns with the live item
+/// substituted, a removal disposes the records with the item's slab, and a
+/// fresh item mounts a fresh leg with a fresh attach (the per-item ×
+/// per-mount discipline the E118 lift admitted).
+#[test]
+fn item_branch_events_mount_and_dispatch_per_item() {
+    let mut h = MockHost::new();
+    let mut app = for_event_item_branch::generated::Rows::build(
+        &mut h,
+        for_event_item_branch::generated::RowsProps::default(),
+    );
+    // alpha (5 chars > 4) mounts the then leg; beta (4 chars) mounts the
+    // else leg — the flip evaluated per item inside the replay.
+    let then_node = app
+        .frag
+        .list_item(0, 0)
+        .and_then(|f| f.branch(0))
+        .map(|b| b.hole(0))
+        .expect("item 0's then leg mounted");
+    let else_node = app
+        .frag
+        .list_item(0, 1)
+        .and_then(|f| f.branch(0))
+        .map(|b| b.hole(0))
+        .expect("item 1's else leg mounted");
+    let attaches: Vec<_> = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, Commit::Attach { .. }))
+        .collect();
+    assert_eq!(
+        attaches.len(),
+        2,
+        "one attach per item, at the branch mount: {h:?}"
+    );
+    // Dispatch: the leg fire fns address the LIVE item (alpha / short).
+    // Canonical fragment order is the children DFS (LIFO), so the then leg
+    // carries f3 and the else leg f2 — the mounts and the fire fns agree on
+    // the same ids.
+    app.fire_f3_d0(&mut h, 0, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(
+        app.picked, "alpha",
+        "item 0's then-leg handler picked alpha"
+    );
+    app.fire_f2_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(
+        app.picked, "short",
+        "item 1's else-leg handler picked short"
+    );
+    // A stale index dispatches as a no-op (the source no longer has it).
+    app.fire_f2_d0(&mut h, 5, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(app.picked, "short", "a stale index is a no-op, not a panic");
+    // Removal disposes the item's slab (its leg, its handler record with
+    // it); the tracker mirrors the keyed plan op.
+    app.set_items(vec!["alpha".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.frag.list_len(0), 1, "beta removed with its else leg");
+    // A fresh item mounts a fresh leg with a fresh attach — never the
+    // disposed node.
+    let before = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, Commit::Attach { .. }))
+        .count();
+    app.set_items(vec!["alpha".into(), "longest".into()]);
+    lig_runtime::flush(&mut app, &mut h);
+    let fresh_then = app
+        .frag
+        .list_item(0, 1)
+        .and_then(|f| f.branch(0))
+        .map(|b| b.hole(0))
+        .expect("the fresh item's then leg mounted");
+    let after = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, Commit::Attach { .. }))
+        .count();
+    assert_eq!(after, before + 1, "the fresh leg attached exactly once");
+    assert_ne!(
+        fresh_then, then_node,
+        "the fresh item's leg is a fresh mount, not the disposed slab"
+    );
+    app.fire_f3_d0(&mut h, 1, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(
+        app.picked, "longest",
+        "the fresh leg's handler dispatches the live item"
     );
 }
