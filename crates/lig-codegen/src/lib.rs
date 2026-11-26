@@ -524,6 +524,43 @@ fn generate_component_pieces(
     let mut item_fire_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut key_methods: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut ref_captures: Vec<(String, usize, Ctx, FragmentId)> = Vec::new();
+    // M25 (the M18 ref-composed guard): ref captures inside fills carried
+    // into branch-mounted instances (the per-mount identity) cannot ride the
+    // build body — the instance is an `Option` field built in the mounting
+    // arm, so the capture moves INTO the mounting arm's leg walk, guarded on
+    // the instance field. Pre-collected here because the If mounting arm is
+    // emitted inside the reaction loop below, before the ref reactions may
+    // have been visited: the map is keyed by the fill fragment the ref lives
+    // on (the leg walk meets that same fragment as the outlet's content).
+    let mut per_mount_fill_refs: HashMap<u32, Vec<(String, usize)>> = HashMap::new();
+    for rx in &rxs {
+        let ReactionKind::Bind { dynamic } = rx.decl.kind else {
+            continue;
+        };
+        let Some(frag) = module.fragments.get(rx.decl.owner.get() as usize) else {
+            continue;
+        };
+        let Some(d) = frag.dynamics.get(dynamic as usize) else {
+            continue;
+        };
+        let DynamicKind::Ref = &d.kind else {
+            continue;
+        };
+        let lig_ir::expr::Expr::Local(name) = module.exprs.get(rx.decl.body) else {
+            continue;
+        };
+        let ctx = ctx_of(module, &frags, &ctx_map, rx.decl.owner);
+        let Ctx::Fill {
+            per_mount: true, ..
+        } = &ctx
+        else {
+            continue;
+        };
+        per_mount_fill_refs
+            .entry(rx.decl.owner.get())
+            .or_default()
+            .push((sanitize(module.strings.get(*name)), dynamic as usize));
+    }
     // M15: For-body fragments — their event effects dispatch through the
     // per-item fire fns, not the run dispatch (no item addressing in the
     // flush scope, the M13 replay discipline).
@@ -870,6 +907,32 @@ fn generate_component_pieces(
                                                             #delegate,
                                                             h,
                                                         );
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                    // M25 (the M18 ref-composed guard): the
+                                    // fill's ref captures ride the mount walk —
+                                    // the instance exists here and the fresh
+                                    // content is mounted, so the parent's ref
+                                    // field takes the fill hole (the M7 fill-ref
+                                    // ownership, per mount). The build body has
+                                    // no instance to read (the pre-M18 spelling
+                                    // would not compile on the Option field).
+                                    if !is_fallback
+                                        && let Some(fill_refs) =
+                                            per_mount_fill_refs.get(&content_id.get())
+                                    {
+                                        for (rname, rhole) in fill_refs {
+                                            let rfield = syn::Ident::new(
+                                                &format!("ref_{rname}"),
+                                                Span::call_site(),
+                                            );
+                                            leg_rebuilds[li].push(quote! {
+                                                if let Some(inst) = self.#field.as_ref() {
+                                                    if let Some(c) = inst.frag.slot_fill(#odi) {
+                                                        self.#rfield = c.hole(#rhole);
                                                     }
                                                 }
                                             });
@@ -1992,7 +2055,27 @@ fn generate_component_pieces(
                     None => branch_ref_inits.push(capture),
                 }
             }
-            Ctx::Fill { field, slot, .. } => {
+            Ctx::Fill {
+                field,
+                slot,
+                per_mount,
+                base,
+                ..
+            } => {
+                if *per_mount {
+                    if !matches!(&**base, Ctx::Direct) {
+                        return Err(CodegenError::Unsupported(
+                            "a ref inside nested slot content of a branch-mounted use has no \
+                             mount-time capture walk yet (the top-level fill's refs capture per \
+                             mount, M25; deeper nesting stays fail-closed)",
+                        ));
+                    }
+                    // M25 (the M18 ref-composed guard): routed to the
+                    // mounting arm's leg walk — the instance is an `Option`
+                    // at build time, so the build body never reads it (the
+                    // pre-M18 spelling would not compile).
+                    continue;
+                }
                 let field = syn::Ident::new(field, Span::call_site());
                 content_ref_inits.push(quote! {
                     if let Some(c) = s.#field.frag.slot_fill(#slot) {
