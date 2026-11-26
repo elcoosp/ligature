@@ -31,7 +31,7 @@
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | 🧬 **Two frontends, one contract** | The same component in Solid TSX and Vue SFC lowers to byte-identical View IR — 36 fixtures × 2 legs, byte-compared against the committed contract on every push.                                     |
 | 🚧 **Fail-closed admission**       | Every construct lands in exactly one Deny/Lint/Allow tier — 11 rules, each backed by an allow fixture _and_ a deny/lint fixture, synced 1:1 by CI. A Deny means zero output downstream.              |
-| 📦 **Byte-reproducible codegen**   | `quote!` → `syn::File` → `prettyplease`; the committed counter unit (7,385 B, digest `0x85d06a5c087b3589`) is byte-diffed against fresh generation, and a syn visitor enforces a readability budget. |
+| 📦 **Byte-reproducible codegen**   | `quote!` → `syn::File` → `prettyplease`; the committed counter unit (7,666 B, digest `0x85d06a5c087b3589`) is byte-diffed against fresh generation, and a syn visitor enforces a readability budget. |
 | 🔩 **no_std runtime**              | `#![no_std]` + alloc, `forbid(unsafe_code)`, `Copy` node handles, LIS-stable keyed diffs, a const-scheduled flush — proven on bare-metal targets in CI.                                              |
 | ♻️ **Incremental by construction** | FNV-1a digest-gated memos; snapshot diff, compile, emit and the whole watch tick as one-call session seams — the CLI drives the same API embedders get.                                              |
 | 🔥 **Hot patches with a budget**   | One patch dylib, an atomically swapped jump table, never-`dlclose`; save→frame under 1 s enforced (measured ~125–140 ms on Linux and macOS).                                                         |
@@ -196,7 +196,7 @@ for `thumbv7em-none-eabihf` and `aarch64-unknown-none-softfloat`.
 | `Mounted::dispose`       | Total recursive LIFO teardown — the host sees one `destroy` per node the build created                                 |
 
 ```sh
-cargo run -p compile-clean --example host_mount   # mount → save-tick → dispatch → dispose, + the typed LIG-E401 tick
+cargo run -p compile-clean --example host_mount   # mount → save-tick → checked dispatch → dispose, + the typed LIG-E401 failure paths (tick AND dispatch)
 ```
 
 Generated units are plain Rust on `lig_runtime`'s prelude: a component struct with state fields,
@@ -260,7 +260,9 @@ Runnable consumer examples (`crates/lig-incremental/examples`) — no `dist/` to
   with IR node names in `names[]`.
 - **The resolver is a library (M24).** `lig_sourcemap::resolve` turns a generated 0-based
   position into a typed `ResolvedPosition` — source, line, col, IR label — with the miss as
-  `SourceMapError::Unmapped`. `lig resolve` delegates to it.
+  `SourceMapError::Unmapped`. `lig resolve` delegates to it. The consumer policy the M24 report
+  named is promoted: `resolve_nearest` resolves the position or the closest token before it
+  (generation order, fail-closed before the map's first token).
 - **The catalog is embedded.** 15 diagnostic docs under [docs/errors/](docs/errors/);
   `lig explain <code>` serves the long-form help with the fix.
 
