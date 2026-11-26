@@ -19,11 +19,15 @@
 pub mod manifest;
 #[cfg(unix)]
 pub mod session;
+pub mod surface;
 pub mod table;
 
 pub use manifest::PatchManifest;
 #[cfg(unix)]
 pub use session::{AppliedPatch, PatchSession, SymbolKind, call_captured, captured_address};
+pub use surface::{
+    DispatchFn, HotSurface, call_captured_dispatch, captured_dispatch_address, hot_dispatch,
+};
 pub use table::{
     FRAME_COUNT, FRAME_LABEL, JumpTable, PatchError, PatchReceipt, apply_patch, commit_table,
     current_table, hot_call,
