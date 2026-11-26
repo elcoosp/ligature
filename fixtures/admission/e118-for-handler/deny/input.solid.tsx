@@ -7,7 +7,11 @@ export function Rows() {
       <For each={items()}>
         {(n) => (
           <Show when={n.length > 0}>
-            <li onClick={() => setItems([n])}>{n}</li>
+            <div>
+              <Show when={n.length > 1}>
+                <li onClick={() => setItems([n])}>{n}</li>
+              </Show>
+            </div>
           </Show>
         )}
       </For>
