@@ -267,3 +267,12 @@ name = "codegen_per_mount_nested_fill_ref"
 metric = "time"
 budget = 6000.0
 note = "M26 reference median 1111 µs (codegen/per-mount-nested-fill-ref bench, release, Linux x86_64); ≈5.4× headroom"
+
+# Codegen over the branch-in-item surface (M27): the per-item branch mount —
+# the item replay's flip arm, the per-item leg tracker mirrored by the keyed
+# plan ops, and the mount-time attach arms ride generate_module.
+[[budget]]
+name = "codegen_for_event_item_branch"
+metric = "time"
+budget = 11000.0
+note = "M27 reference median 2198 µs (codegen/for-event-item-branch bench, release, Linux x86_64; the per-item branch arm, the tracker mirrors, and the two leg fire fns ride generate_module); ≈5.0× headroom"
