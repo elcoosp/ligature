@@ -300,9 +300,12 @@ pub fn parity() -> i32 {
                     leg_failed = true;
                 }
             }
-            Err(code) => {
+            Err(exit) => {
+                // lower_solid_fixture already reported its diagnostics and
+                // returns the exit code it would have exited with; the
+                // parity gate counts the leg failure instead of exiting.
                 failed += 1;
-                let _ = code;
+                let _ = exit;
                 leg_failed = true;
             }
         }
