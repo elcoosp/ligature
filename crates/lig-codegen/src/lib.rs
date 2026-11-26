@@ -939,6 +939,46 @@ fn generate_component_pieces(
                                         }
                                     }
                                     if is_fallback {
+                                        // M26: the fallback content's refs
+                                        // capture at mount time (the M7
+                                        // fallback-ref discipline, per mount)
+                                        // — the fallback fragment belongs to
+                                        // the CHILD's tree, so the CHILD's ref
+                                        // fields take the holes; the parent
+                                        // writes them through the guarded
+                                        // instance (the build-path shape,
+                                        // per-mount-guarded). Pre-M26 the
+                                        // field stayed at its sentinel forever
+                                        // (a silent fail-open).
+                                        for (edi, ed) in content_frag.dynamics.iter().enumerate() {
+                                            let DynamicKind::Ref = &ed.kind else {
+                                                continue;
+                                            };
+                                            let Some(lig_ir::expr::Expr::Local(name)) =
+                                                Some(module.exprs.get(ed.expr).clone())
+                                            else {
+                                                continue;
+                                            };
+                                            let rfield = syn::Ident::new(
+                                                &format!(
+                                                    "ref_{}",
+                                                    sanitize(module.strings.get(name))
+                                                ),
+                                                Span::call_site(),
+                                            );
+                                            leg_rebuilds[li].push(quote! {
+                                                if let Some(inst) = self.#field.as_ref() {
+                                                    if let Some(c) = inst
+                                                        .frag
+                                                        .slot_fallback(#odi)
+                                                    {
+                                                        inst.#rfield = c.hole(#edi);
+                                                    }
+                                                }
+                                            });
+                                        }
+                                    }
+                                    if is_fallback {
                                         // The fallback's binds initialize here:
                                         // the child's build flushed BEFORE this
                                         // content mounted (the M6/M7 fallback
@@ -965,6 +1005,65 @@ fn generate_component_pieces(
                                         // flush pass.
                                         leg_assembly_masks[li] |=
                                             subtree_init_mask(module, content_id);
+                                    }
+                                    // M26 (the M25 recursion): the freshly
+                                    // mounted content's own nested outlets
+                                    // mount their fills/own fallbacks per
+                                    // mount — the M9 recursive content walk,
+                                    // per-mount-guarded (the instance is an
+                                    // `Option` until the branch mounts).
+                                    // Nested events attach and nested refs
+                                    // capture through the same walk
+                                    // (top-level events the caller emitted
+                                    // above; top-level fill refs the M25
+                                    // captures; top-level fallback refs the
+                                    // capture block above). The walk reports
+                                    // every fill-origin content it mounts so
+                                    // the parent-owned reactions of the NESTED
+                                    // fills join the mount mask too (they are
+                                    // children of the use site's owner
+                                    // fragment, not of the content they mount
+                                    // into — the content_id mask misses them).
+                                    let (root_read, root_mut) = if is_fallback {
+                                        (
+                                            quote! {
+                                                self.#field.as_ref().and_then(|inst| inst.frag.slot_fallback(#odi))
+                                            },
+                                            quote! {
+                                                self.#field.as_mut().and_then(|inst| inst.frag.slot_fallback_mut(#odi))
+                                            },
+                                        )
+                                    } else {
+                                        (
+                                            quote! {
+                                                self.#field.as_ref().and_then(|inst| inst.frag.slot_fill(#odi))
+                                            },
+                                            quote! {
+                                                self.#field.as_mut().and_then(|inst| inst.frag.slot_fill_mut(#odi))
+                                            },
+                                        )
+                                    };
+                                    let mut nested_fills: Vec<FragmentId> = Vec::new();
+                                    walk_content_mounts(
+                                        module,
+                                        &frags,
+                                        &prefix,
+                                        &component_field_map,
+                                        content_id,
+                                        &root_read,
+                                        &root_mut,
+                                        &c.slots,
+                                        &format!("{child_name}_"),
+                                        &field_name,
+                                        false,
+                                        Some(&field_name),
+                                        true,
+                                        0,
+                                        &mut leg_rebuilds[li],
+                                        &mut nested_fills,
+                                    )?;
+                                    for &mf in &nested_fills {
+                                        leg_assembly_masks[li] |= subtree_init_mask(module, mf);
                                     }
                                 }
                                 leg_disposes[li].push(quote! {
@@ -1067,29 +1166,58 @@ fn generate_component_pieces(
                                     // (the outlet's owner fragment); the
                                     // content step addresses the freshly
                                     // mounted content for the recursion.
-                                    let steps = vec![MutStep::Content {
-                                        fill: !is_fallback,
-                                        slot: di,
-                                    }];
                                     // Recurse into the freshly mounted content
                                     // (nested outlets, grandchild holes,
-                                    // events, refs) inside the same guards.
+                                    // events, refs) inside the same guards:
+                                    // the walked content is the freshly
+                                    // mounted fill/fallback, reached off the
+                                    // mounted branch `b` through the
+                                    // origin-matched accessor.
+                                    let acc_read = if is_fallback {
+                                        quote! { slot_fallback }
+                                    } else {
+                                        quote! { slot_fill }
+                                    };
+                                    let acc_mut = if is_fallback {
+                                        quote! { slot_fallback_mut }
+                                    } else {
+                                        quote! { slot_fill_mut }
+                                    };
+                                    let content_read = quote! { b.#acc_read(#di) };
+                                    let content_mut = quote! { b.#acc_mut(#di) };
                                     let mut rec: Vec<proc_macro2::TokenStream> = Vec::new();
+                                    let mut nested_fills: Vec<FragmentId> = Vec::new();
                                     walk_content_mounts(
                                         module,
                                         &frags,
                                         &prefix,
                                         &component_field_map,
                                         content_id,
-                                        &quote!(b),
-                                        &steps,
+                                        &content_read,
+                                        &content_mut,
                                         use_site.map_or(&[], |u| &u.ir.slots),
                                         &owner_prefix,
                                         use_site.map_or("", |u| u.field.as_str()),
                                         false,
+                                        None,
+                                        false,
                                         0,
                                         &mut rec,
+                                        &mut nested_fills,
                                     )?;
+                                    // Per-mount ctx (M26): the nested fills'
+                                    // parent-owned reactions join the mount
+                                    // mask (the fresh content's binds run on
+                                    // the next flush pass). Direct uses' build
+                                    // initial flush already covers them, and
+                                    // skipping the widening there keeps every
+                                    // unit without per-mount fills
+                                    // byte-identical (D-8).
+                                    if ctx_per_mounted(&ctx) {
+                                        for &mf in &nested_fills {
+                                            leg_assembly_masks[li] |= subtree_init_mask(module, mf);
+                                        }
+                                    }
                                     let body = quote! {
                                         b.mount_slot(h, #di, #origin, #c_tpl, #c_holes, #c_branches);
                                         #(#rec)*
@@ -1097,8 +1225,7 @@ fn generate_component_pieces(
                                     leg_assembly[li].push(emit_assembly_walk(
                                         &ctx_frag_mut(&ctx),
                                         slot,
-                                        &[],
-                                        body,
+                                        &body,
                                     ));
                                     // Author-side fills are NOT under the
                                     // branch subtree: their reactions join the
@@ -1919,26 +2046,40 @@ fn generate_component_pieces(
             // the fallback init-flush below (its binds address the freshly
             // mounted nested content).
             {
-                let root_recv = quote! { s.#fname.frag };
-                let steps: Vec<MutStep> = vec![MutStep::Content {
-                    fill: !is_fallback,
-                    slot: di,
-                }];
+                let acc_read = if is_fallback {
+                    quote! { slot_fallback }
+                } else {
+                    quote! { slot_fill }
+                };
+                let acc_mut = if is_fallback {
+                    quote! { slot_fallback_mut }
+                } else {
+                    quote! { slot_fill_mut }
+                };
+                let content_read = quote! { s.#fname.frag.#acc_read(#di) };
+                let content_mut = quote! { s.#fname.frag.#acc_mut(#di) };
+                let mut nested_fills: Vec<FragmentId> = Vec::new();
                 walk_content_mounts(
                     module,
                     &frags,
                     &prefix,
                     &component_field_map,
                     content_id,
-                    &root_recv,
-                    &steps,
+                    &content_read,
+                    &content_mut,
                     &use_site.ir.slots,
                     &owner_prefix,
                     &use_site.field,
                     true,
+                    None,
+                    true,
                     0,
                     &mut slot_fills,
+                    &mut nested_fills,
                 )?;
+                // Direct uses: the build's initial flush covers every
+                // reaction of the component (the M7 exact-per-member mask),
+                // so the nested fills' binds need no extra marking here.
             }
             if is_fallback {
                 // The init-flush story (M7, subtree-wide in M8): mark the
@@ -2063,17 +2204,21 @@ fn generate_component_pieces(
                 ..
             } => {
                 if *per_mount {
-                    if !matches!(&**base, Ctx::Direct) {
+                    if !matches!(&**base, Ctx::Direct) && !per_mount_capture_covered(base) {
                         return Err(CodegenError::Unsupported(
                             "a ref inside nested slot content of a branch-mounted use has no \
-                             mount-time capture walk yet (the top-level fill's refs capture per \
-                             mount, M25; deeper nesting stays fail-closed)",
+                             mount-time capture walk for its composed context chain (the \
+                             top-level fill's refs capture per mount, M25; nested slot content \
+                             rides the mount walk's recursive capture walk, M26; chains the \
+                             walk cannot reach stay fail-closed)",
                         ));
                     }
-                    // M25 (the M18 ref-composed guard): routed to the
-                    // mounting arm's leg walk — the instance is an `Option`
-                    // at build time, so the build body never reads it (the
-                    // pre-M18 spelling would not compile).
+                    // M25 (the M18 ref-composed guard) + M26 (the recursive
+                    // capture walk): routed to the mounting arm's leg walk —
+                    // the instance is an `Option` at build time, so the build
+                    // body never reads it (the pre-M18 spelling would not
+                    // compile). The top-level fill's refs ride the M25
+                    // captures; nested slot content's refs ride the M26 walk.
                     continue;
                 }
                 let field = syn::Ident::new(field, Span::call_site());
@@ -2680,6 +2825,41 @@ fn owner_on_branch(module: &ViewModule, owner: FragmentId) -> bool {
     })
 }
 
+/// Whether a per-mount fill ref's base chain routes to a mount walk the
+/// mounting arms emit (M26): every base link is a per-mount fill, a branch,
+/// or a fallback composed over such a chain, bottoming at the per-mount
+/// top-level fill (`Fill { per_mount: true, base: Direct }`) — the leg
+/// walk's recursive content walk covers outlets on every content reachable
+/// from it, and the branch-time assembly covers the branches inside. Any
+/// other chain (a non-per-mount fill base, a branch hanging straight on
+/// `self.frag` under a per-mount fill — a shape the ctx walk cannot
+/// produce) stays fail-closed.
+fn per_mount_capture_covered(base: &Ctx) -> bool {
+    match base {
+        Ctx::Fill {
+            per_mount: true,
+            base,
+            ..
+        } => matches!(**base, Ctx::Direct) || per_mount_capture_covered(base),
+        Ctx::Branch { base, .. } | Ctx::Fallback { base, .. } => per_mount_capture_covered(base),
+        _ => false,
+    }
+}
+
+/// Whether the ctx chain carries a per-mount fill base (M18/M26): the
+/// instance field is an `Option` there, so the mount-time mask widening for
+/// nested fills must ride the guarded story — direct uses' build initial
+/// flush already covers every reaction.
+fn ctx_per_mounted(ctx: &Ctx) -> bool {
+    match ctx {
+        Ctx::Direct => false,
+        Ctx::Branch { base, .. } | Ctx::Fallback { base, .. } => ctx_per_mounted(base),
+        Ctx::Fill {
+            per_mount, base, ..
+        } => *per_mount || ctx_per_mounted(base),
+    }
+}
+
 /// Walk one of the use site's OWN fill contents for nested outlets (M9)
 /// and for outlets inside its If BRANCHES (M10): a fill of such an outlet
 /// composes over the fill's own context (nested) or over the branch context
@@ -2889,87 +3069,17 @@ fn map_own_fallbacks(
     }
 }
 
-/// One mutable content-walk step: unwrap the receiver's content accessor
-/// (`fill` selects `slot_fill_mut` vs `slot_fallback_mut`) at outlet `slot`.
-/// The branch-time assembly (M10) unwraps the branch itself in
-/// [`emit_assembly_walk`]; the recursion composes content steps only.
-#[derive(Debug, Clone)]
-enum MutStep {
-    /// Unwrap a mounted slot content at outlet `slot`.
-    Content { fill: bool, slot: usize },
-}
-
-/// Emit the mutable walk: each step wraps the body in an accessor guard
-/// binding `c` (shadowing — the innermost `c` is the addressed fragment;
-/// branch steps bind `b`); the OUTERMOST step's receiver is `root`, inner
-/// steps' receiver is the binding one level out.
-fn emit_mut_walk(
-    root: &proc_macro2::TokenStream,
-    steps: &[MutStep],
-    body: proc_macro2::TokenStream,
-) -> proc_macro2::TokenStream {
-    let mut out = body;
-    for (i, step) in steps.iter().enumerate().rev() {
-        let MutStep::Content { fill, slot } = step;
-        let acc = if *fill {
-            quote! { slot_fill_mut }
-        } else {
-            quote! { slot_fallback_mut }
-        };
-        let recv = if i == 0 { root.clone() } else { quote!(c) };
-        out = quote! { if let Some(c) = #recv.#acc(#slot) { #out } };
-    }
-    out
-}
-
-/// Emit the read-only walk to the same fragment (`Option<&Fragment>`): the
-/// first step reads the root receiver, later steps chain `and_then`.
-fn emit_read_walk(root: &proc_macro2::TokenStream, steps: &[MutStep]) -> proc_macro2::TokenStream {
-    let mut read: Option<proc_macro2::TokenStream> = None;
-    for (i, step) in steps.iter().enumerate() {
-        let MutStep::Content { fill, slot } = step;
-        let acc = if *fill {
-            quote! { slot_fill }
-        } else {
-            quote! { slot_fallback }
-        };
-        read = Some(if i == 0 {
-            quote! { #root.#acc(#slot) }
-        } else {
-            let prev = read.expect("first step set the read");
-            quote! { #prev.and_then(|f| f.#acc(#slot)) }
-        });
-    }
-    read.expect("content walks carry at least one step")
-}
-
-/// The M10 branch-assembly walk: `steps` start at the freshly mounted
-/// BRANCH (the first step addresses an outlet on the branch); `owner_read`
-/// is the `Option<&Fragment>` expression for the fragment the If hangs on.
-/// Emits the branch unwrap (binding `b`) plus the content steps (binding
-/// `c`, shadowing), so the body and any recursion into the freshly mounted
+/// The M10 branch-assembly walk: `owner_read` is the `Option<&Fragment>`
+/// expression for the fragment the If hangs on. Emits the branch unwrap
+/// (binding `b`), so the body and any recursion into the freshly mounted
 /// content share one guard chain.
 fn emit_assembly_walk(
     owner_read: &proc_macro2::TokenStream,
     branch_slot: usize,
-    steps: &[MutStep],
-    body: proc_macro2::TokenStream,
+    body: &proc_macro2::TokenStream,
 ) -> proc_macro2::TokenStream {
-    let mut out = body;
-    let mut first = true;
-    for step in steps.iter().rev() {
-        let MutStep::Content { fill, slot } = step;
-        let acc = if *fill {
-            quote! { slot_fill_mut }
-        } else {
-            quote! { slot_fallback_mut }
-        };
-        let recv = if first { quote!(b) } else { quote!(c) };
-        first = false;
-        out = quote! { if let Some(c) = #recv.#acc(#slot) { #out } };
-    }
     let slot = branch_slot;
-    quote! { if let Some(b) = (#owner_read).and_then(|f| f.branch_mut(#slot)) { #out } }
+    quote! { if let Some(b) = (#owner_read).and_then(|f| f.branch_mut(#slot)) { #body } }
 }
 
 /// The M9 recursive content walk (the mounting component's slot assembly):
@@ -2978,22 +3088,40 @@ fn emit_assembly_walk(
 /// accessor chain, grandchild roots insert into component holes, nested
 /// events attach across slabs (the record lands on the AUTHOR's fragment —
 /// tree membership decides `s.frag` vs the child instance's), and nested
-/// fallback refs capture into the author's field. `top` marks the
-/// top-level content (its events/refs the caller already emitted).
+/// refs capture into the author's field. `top` marks the top-level content
+/// (its events/refs the caller already emitted). `content_read` is the
+/// `Option<&Fragment>` expression evaluating to the WALKED content and
+/// `content_mut` its `Option<&mut Fragment>` twin — the caller composes the
+/// accessors (the build phase reads them off the child instance's root, the
+/// branch assembly off the mounted branch, the per-mount leg walk through
+/// the guarded `Option<Child>` chain, M26), and the recursion chains one
+/// more `and_then` per mounted level. `author_build` picks the author
+/// spelling: the build body binds `s` (the struct under construction), a
+/// mounting arm addresses `self`. `per_mount_field` marks a per-mount walk
+/// (M26): a child-authored statement guards on the `Option<Child>` field
+/// first and writes the CHILD instance's field through `inst`.
+/// `mounted_fills` collects every fill-origin content the walk mounts —
+/// their parent-owned reactions join the caller's mount mask (nested fill
+/// contents are children of the use site's owner fragment, not of the
+/// content they mount into, so the caller's `subtree_init_mask(content_id)`
+/// misses them).
 fn walk_content_mounts(
     module: &ViewModule,
     frags: &[FragInfo],
     parent_prefix: &str,
     component_field_map: &HashMap<(u32, u32), String>,
     content_id: FragmentId,
-    root: &proc_macro2::TokenStream,
-    steps: &[MutStep],
+    content_read: &proc_macro2::TokenStream,
+    content_mut: &proc_macro2::TokenStream,
     use_slots: &[lig_ir::fragment::SlotIr],
     child_prefix: &str,
     child_field: &str,
+    author_build: bool,
+    per_mount_field: Option<&str>,
     top: bool,
     depth: usize,
     out: &mut Vec<proc_macro2::TokenStream>,
+    mounted_fills: &mut Vec<FragmentId>,
 ) -> Result<(), CodegenError> {
     if depth > 16 {
         return Err(CodegenError::Unsupported(
@@ -3004,13 +3132,30 @@ fn walk_content_mounts(
         return Ok(());
     };
     let in_parent_tree = frags.iter().any(|f| f.id == content_id);
+    // The author spelling for this content's events/refs: parent-authored
+    // content addresses the generating component (`s` in the build body,
+    // `self` in a mounting arm); child-authored content addresses the child
+    // instance — `s.<field>` in the build path. Per-mount child-authored
+    // statements build their own guarded spelling per arm (the `inst`
+    // binding must wrap the whole statement, M26), so `author_acc` is not
+    // used for them.
     let author_acc = if in_parent_tree {
-        quote!(s)
+        if author_build {
+            quote!(s)
+        } else {
+            quote!(self)
+        }
+    } else if per_mount_field.is_some() {
+        quote!(inst)
     } else {
         let field = syn::Ident::new(child_field, Span::call_site());
         quote!(s.#field)
     };
-    let read = emit_read_walk(root, steps);
+    let read = content_read;
+    // The per-mount guard front (M26): the `Option<Child>` field ident the
+    // child-authored statements guard on. `None` outside the per-mount leg
+    // walk.
+    let per_mount_guard = per_mount_field.map(|f| syn::Ident::new(f, Span::call_site()));
     for (di, d) in frag.dynamics.iter().enumerate() {
         match &d.kind {
             DynamicKind::Slot {
@@ -3041,24 +3186,30 @@ fn walk_content_mounts(
                 let tpl = tpl_ident(prefix, content2_frag.template.get() as usize);
                 let holes = hole_ident(prefix, content2.get() as usize);
                 let branches = branch_ident(prefix, content2.get() as usize);
-                // The accessor reaching the freshly mounted content matches
-                // its ORIGIN (slot_fill vs slot_fallback accessors are
-                // origin-gated in the runtime).
-                let mut_steps: Vec<MutStep> = {
-                    let mut s = steps.to_vec();
-                    s.push(MutStep::Content {
-                        fill: !is_fallback,
-                        slot: di,
-                    });
-                    s
-                };
-                out.push(emit_mut_walk(
-                    root,
-                    steps,
-                    quote! {
+                out.push(quote! {
+                    if let Some(c) = #content_mut {
                         c.mount_slot(h, #di, #origin, #tpl, #holes, #branches);
-                    },
-                ));
+                    }
+                });
+                if !is_fallback {
+                    mounted_fills.push(content2);
+                }
+                // The accessors reaching the freshly mounted content match
+                // its ORIGIN (slot_fill vs slot_fallback accessors are
+                // origin-gated in the runtime); the recursion composes one
+                // more `and_then` level onto both receivers.
+                let acc_read = if is_fallback {
+                    quote! { slot_fallback }
+                } else {
+                    quote! { slot_fill }
+                };
+                let acc_mut = if is_fallback {
+                    quote! { slot_fallback_mut }
+                } else {
+                    quote! { slot_fill_mut }
+                };
+                let nested_read = quote! { #content_read.and_then(|f| f.#acc_read(#di)) };
+                let nested_mut = quote! { #content_mut.and_then(|f| f.#acc_mut(#di)) };
                 // Recurse into the freshly mounted content.
                 walk_content_mounts(
                     module,
@@ -3066,17 +3217,20 @@ fn walk_content_mounts(
                     parent_prefix,
                     component_field_map,
                     content2,
-                    root,
-                    &mut_steps,
+                    &nested_read,
+                    &nested_mut,
                     use_slots,
                     child_prefix,
                     child_field,
+                    author_build,
+                    per_mount_field,
                     false,
                     depth + 1,
                     out,
+                    mounted_fills,
                 )?;
             }
-            DynamicKind::Component(c) => {
+            DynamicKind::Component(..) => {
                 // Grandchild prop-pass (M9): the instance is the content
                 // author's struct field; the mount-time story inserts its
                 // DOM root into the content's component hole.
@@ -3086,12 +3240,23 @@ fn walk_content_mounts(
                     ));
                 };
                 let field = syn::Ident::new(field, Span::call_site());
-                out.push(quote! {
-                    if let Some(c) = #read {
-                        h.insert(c.hole(#di), #author_acc.#field.frag.roots()[0], 0);
-                    }
-                });
-                let _ = c;
+                if let (Some(pf), false) = (&per_mount_guard, in_parent_tree) {
+                    // Per-mount child-authored content: guard on the
+                    // instance (M26) — the grandchild field is the child's.
+                    out.push(quote! {
+                        if let Some(inst) = self.#pf.as_ref() {
+                            if let Some(c) = #read {
+                                h.insert(c.hole(#di), inst.#field.frag.roots()[0], 0);
+                            }
+                        }
+                    });
+                } else {
+                    out.push(quote! {
+                        if let Some(c) = #read {
+                            h.insert(c.hole(#di), #author_acc.#field.frag.roots()[0], 0);
+                        }
+                    });
+                }
             }
             DynamicKind::Event { event, delegate } => {
                 if top {
@@ -3102,17 +3267,35 @@ fn walk_content_mounts(
                 let Some(rx_id) = d.reaction else { continue };
                 let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
                 let h = rx_id.get();
-                out.push(quote! {
-                    if let Some(n) = #read.map(|c| c.hole(#di)) {
-                        #author_acc.frag.attach_foreign(
-                            n,
-                            ::lig_runtime::EventKind::#ev,
-                            ::lig_runtime::HandlerId(#h),
-                            #delegate,
-                            h,
-                        );
-                    }
-                });
+                if let (Some(pf), false) = (&per_mount_guard, in_parent_tree) {
+                    // Per-mount child-authored content: the record lands on
+                    // the child's slab, guarded on the instance (M26).
+                    out.push(quote! {
+                        if let Some(inst) = self.#pf.as_ref() {
+                            if let Some(n) = #read.map(|c| c.hole(#di)) {
+                                inst.frag.attach_foreign(
+                                    n,
+                                    ::lig_runtime::EventKind::#ev,
+                                    ::lig_runtime::HandlerId(#h),
+                                    #delegate,
+                                    h,
+                                );
+                            }
+                        }
+                    });
+                } else {
+                    out.push(quote! {
+                        if let Some(n) = #read.map(|c| c.hole(#di)) {
+                            #author_acc.frag.attach_foreign(
+                                n,
+                                ::lig_runtime::EventKind::#ev,
+                                ::lig_runtime::HandlerId(#h),
+                                #delegate,
+                                h,
+                            );
+                        }
+                    });
+                }
             }
             DynamicKind::Ref => {
                 if top {
@@ -3126,11 +3309,24 @@ fn walk_content_mounts(
                     &format!("ref_{}", sanitize(module.strings.get(name))),
                     Span::call_site(),
                 );
-                out.push(quote! {
-                    if let Some(c) = #read {
-                        #author_acc.#rfield = c.hole(#di);
-                    }
-                });
+                if let (Some(pf), false) = (&per_mount_guard, in_parent_tree) {
+                    // Per-mount child-authored content: the ref field is the
+                    // CHILD's — the parent writes it per mount, guarded on
+                    // the instance (M26, the M7 fallback-ref discipline).
+                    out.push(quote! {
+                        if let Some(inst) = self.#pf.as_ref() {
+                            if let Some(c) = #read {
+                                inst.#rfield = c.hole(#di);
+                            }
+                        }
+                    });
+                } else {
+                    out.push(quote! {
+                        if let Some(c) = #read {
+                            #author_acc.#rfield = c.hole(#di);
+                        }
+                    });
+                }
             }
             _ => {}
         }
