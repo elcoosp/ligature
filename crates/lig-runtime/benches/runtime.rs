@@ -1,6 +1,6 @@
 //! Runtime benchmarks (§14.2): `runtime::instantiate`, `runtime::update_mask`,
 //! `runtime::list_diff_keyed`, `runtime::mount_lifecycle`,
-//! `runtime::flush_checked_cycle`.
+//! `runtime::flush_checked_cycle`, `runtime::registry_lifecycle`.
 
 extern crate alloc;
 
@@ -272,6 +272,35 @@ fn bench_runtime(c: &mut Criterion) {
             core::hint::black_box(checked.is_ok())
         });
         m.dispose(&mut host);
+    });
+
+    // The registry's full scene lifecycle: two units mounted into the
+    // container, one save-tick through the trait object, the scene tick
+    // (`flush_all`), and the scene teardown (`dispose_all`) — the four
+    // calls an embedding host loop repeats per registry, on top of the
+    // per-unit `runtime/mount_lifecycle` cost (the container adds the
+    // id allocation, the boxed store, and the ordered teardown walk).
+    c.bench_function("runtime/registry_lifecycle", |b| {
+        b.iter_batched(
+            || CountingHost { commits: 0 },
+            |mut h| {
+                let mut reg = lig_runtime::ComponentRegistry::new();
+                reg.mount(&mut h, BenchUnit::build);
+                reg.mount(&mut h, BenchUnit::build);
+                let tick = reg.update(
+                    lig_runtime::CompId(0),
+                    &mut h,
+                    |s: &mut dyn lig_runtime::ComponentUnit| {
+                        s.fragment().mark_mask(1 << BENCH_BIND);
+                    },
+                );
+                std::hint::black_box(tick.is_some());
+                let scene = reg.flush_all(&mut h);
+                std::hint::black_box(scene.is_ok());
+                reg.dispose_all(&mut h);
+            },
+            criterion::BatchSize::SmallInput,
+        );
     });
 }
 
