@@ -4,9 +4,9 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_composed_content,
-    for_event, for_event_composed, for_keyed, for_list, list_component, list_slot, show_else,
-    slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic, slots_named,
-    slots_nested, slots_structural, template_ref, v_model,
+    for_event, for_event_composed, for_keyed, for_list, list_component, list_slot,
+    per_mount_fill_ref, show_else, slots_branch_component, slots_branch_outlet, slots_component,
+    slots_dynamic, slots_named, slots_nested, slots_structural, template_ref, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::{Commit, MockHost};
@@ -1174,5 +1174,55 @@ fn event_dispatch_reports_a_cycle_as_data() {
         err.passes,
         lig_runtime::MAX_PASSES,
         "the cap rides the error as data"
+    );
+}
+
+/// The M25 per-mount fill-ref contract, end to end (the M18 gap list's
+/// ref-composed guard): a ref inside the fill of a BRANCH-mounted use
+/// captures at mount time — the build body has no instance to read (the
+/// pre-M18 spelling would not compile on the `Option` field) — the fresh
+/// capture takes the freshly mounted fill hole, and a remount cycle
+/// re-captures into a fresh node, never the disposed one.
+#[test]
+fn per_mount_fill_refs_capture_per_mount() {
+    let mut h = MockHost::new();
+    let mut app = per_mount_fill_ref::App::build(&mut h, per_mount_fill_ref::AppProps::default());
+    // The Panel instance built at mount; the fill content mounted into its
+    // header outlet; the ref captured through the mounting arm's guarded
+    // walk (the build body never read the Option field).
+    let panel = app.panel.as_ref().expect("instance built at mount");
+    let fill_root = panel
+        .frag
+        .slot_fill(1)
+        .map(|c| c.roots()[0])
+        .expect("the fill content mounted into the fresh instance");
+    assert_ne!(
+        app.ref_mark,
+        lig_runtime::NodeId(u32::MAX),
+        "the mount-time capture ran"
+    );
+    assert_eq!(
+        app.ref_mark, fill_root,
+        "the ref names the freshly mounted fill element"
+    );
+    // Flip off: the branch unmounts, the instance disposes with its fills —
+    // the captured node is spent (the NodeId discipline keeps it inert).
+    app.set_on(false);
+    lig_runtime::flush(&mut app, &mut h);
+    assert!(app.panel.is_none(), "the unmount disposes the instance");
+    // Remount: a FRESH instance and fill — the mount-time capture re-runs
+    // and takes the fresh node, never the disposed one.
+    app.set_on(true);
+    lig_runtime::flush(&mut app, &mut h);
+    let panel = app.panel.as_ref().expect("fresh instance at remount");
+    let fresh_root = panel
+        .frag
+        .slot_fill(1)
+        .map(|c| c.roots()[0])
+        .expect("the fill remounted into the fresh instance");
+    assert_ne!(fresh_root, fill_root, "the remount builds fresh nodes");
+    assert_eq!(
+        app.ref_mark, fresh_root,
+        "the mount-time capture re-ran on the fresh fill"
     );
 }
