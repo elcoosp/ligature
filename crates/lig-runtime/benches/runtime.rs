@@ -256,6 +256,23 @@ fn bench_runtime(c: &mut Criterion) {
             core::hint::black_box(checked.is_err())
         });
     });
+
+    // The checked event dispatch (the generated `fire_N` glue): one
+    // converging dispatch through the mount seam's handle — mark the
+    // handler reaction, then the checked flush. The common case the
+    // generated dispatch glue drives; `runtime/flush_checked_cycle` above
+    // bounds the worst case (the capped ping-pong).
+    c.bench_function("runtime/dispatch_checked", |b| {
+        let mut host = CountingHost { commits: 0 };
+        let mut m = Mounted::mount(&mut host, BenchUnit::build);
+        b.iter(|| {
+            let s = m.state();
+            s.frag.mark_mask(1 << BENCH_BIND);
+            let checked = lig_runtime::flush_checked(s, &mut host);
+            core::hint::black_box(checked.is_ok())
+        });
+        m.dispose(&mut host);
+    });
 }
 
 criterion_group!(benches, bench_runtime);
