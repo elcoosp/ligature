@@ -188,6 +188,21 @@ fn bench_codegen_per_mount_nested_fill_ref(c: &mut Criterion) {
     });
 }
 
+/// Lower the branch-in-item fixture once (M27: the per-item branch mount —
+/// the item replay's flip arm, the per-item leg tracker mirrored by the
+/// keyed plan ops, and the mount-time attach arms ride generate_module).
+fn bench_codegen_for_event_item_branch(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/for-event-item-branch/input.solid.tsx");
+    let module =
+        lig_parse_solid::lower_module(src, "for-event-item-branch.tsx").expect("fixture lowers");
+    c.bench_function("codegen/for-event-item-branch", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("for-event-item-branch codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
@@ -201,6 +216,7 @@ criterion_group!(
     bench_codegen_for_event_composed,
     bench_codegen_for_composed_content,
     bench_codegen_per_mount_fill_ref,
-    bench_codegen_per_mount_nested_fill_ref
+    bench_codegen_per_mount_nested_fill_ref,
+    bench_codegen_for_event_item_branch
 );
 criterion_main!(benches);
