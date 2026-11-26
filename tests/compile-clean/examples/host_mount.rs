@@ -53,11 +53,15 @@ fn main() {
     println!("count = {} (doubled = {})", s.count, s.doubled);
 
     // 4. Event dispatch: the generated `fire_1` captures the payload, marks
-    //    the handler reaction, and flushes — the counter's effect increments
-    //    `count`, and the tick the fire drives re-renders.
+    //    the handler reaction, and flushes through the checked front — the
+    //    counter's effect increments `count`, and the tick the fire drives
+    //    re-renders. The dispatch is the checked front now: a non-converging
+    //    schedule comes back as the typed `CycleError` (LIG-E401), never a
+    //    panic inside the event.
     mounted
         .state()
-        .fire_1(&mut host, &EvData::new().current_target_value("3"));
+        .fire_1(&mut host, &EvData::new().current_target_value("3"))
+        .expect("the counter's dispatch converges");
     let s = mounted.state();
     println!(
         "after the click: count = {} (doubled = {})",
@@ -87,25 +91,29 @@ fn main() {
         "the static style commit resolved through the bound table"
     );
 
-    // 6. The checked front's failure path (M21): a hand-written unit whose
-    //    reactions ping-pong forever (r0 writes r1, r1 writes r0) — the
-    //    shape the compile-time cycle check denies, had it slipped through.
-    //    The mount tick surfaces it as the typed `CycleError`, bounded by
-    //    `MAX_PASSES`, and the teardown still totals afterwards.
+    // 6. The checked front's failure path (M21 + the checked event glue):
+    //    a hand-written unit whose reactions ping-pong forever (r0 writes
+    //    r1, r1 writes r0) — the shape the compile-time cycle check denies,
+    //    had it slipped through. Its `fire` is the exact glue shape every
+    //    generated `fire_N` now emits: mark the handler reaction, then the
+    //    checked flush. The dispatch surfaces the cycle as the typed
+    //    `CycleError`, bounded by `MAX_PASSES`, and the teardown still
+    //    totals afterwards.
     let mut probe = MockHost::new();
     let mut broken = Mounted::mount(&mut probe, Broken::build);
-    broken.state().frag.mark_mask(1); // the ping-pong starts dirty
     let err: CycleError = broken
-        .flush(&mut probe)
+        .state()
+        .fire(&mut probe)
         .expect_err("a ping-pong never converges");
-    println!("checked tick: {err}");
+    println!("checked dispatch: {err}");
     let _state = broken.dispose(&mut probe);
     assert_eq!(err.passes, lig_runtime::MAX_PASSES);
 }
 
 /// The deliberately broken unit the failure path drives: two reactions that
 /// re-dirty each other every pass — the schedule never converges, and the
-/// checked mount front reports it instead of panicking (LIG-E401).
+/// checked dispatch reports it instead of panicking (LIG-E401). Its `fire`
+/// is the glue shape the generator emits for every event handler.
 struct Broken {
     frag: Fragment,
 }
@@ -130,6 +138,14 @@ impl Broken {
         Self {
             frag: Fragment::new(h, BROKEN_TPL, BROKEN_HOLES, &[]),
         }
+    }
+
+    /// The event-glue shape the generator emits (`fire_N`): mark the
+    /// handler reaction, then the checked flush — the cycle reports as
+    /// data.
+    fn fire(&mut self, host: &mut dyn lig_runtime::Host) -> Result<(), CycleError> {
+        self.frag.mark_mask(1); // the ping-pong starts dirty
+        lig_runtime::flush_checked(self, host)
     }
 }
 
