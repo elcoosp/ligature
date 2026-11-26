@@ -330,6 +330,7 @@ fn samples_for(name: &str) -> usize {
         | "runtime_update_mask"
         | "runtime_mount_lifecycle"
         | "runtime_flush_checked_cycle"
+        | "runtime_dispatch_checked"
         | "patch_apply_1"
         | "patch_dispatch_hit" => 800,
         "runtime_list_diff_keyed" | "session_sync" => 400,
@@ -698,6 +699,23 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(checked.is_err());
             })
         }
+        "runtime_dispatch_checked" => {
+            // The checked event dispatch (the generated `fire_N` glue): one
+            // converging dispatch through the mount seam's handle — mark
+            // the handler reaction, then the checked flush (the bench
+            // drives the same body). `runtime_flush_checked_cycle` bounds
+            // the worst case.
+            let mut h = CountingHost { commits: 0 };
+            let mut m = Mounted::mount(&mut h, MountUnit::build);
+            let us = median_us(samples_for(name), || {
+                let s = m.state();
+                s.frag.mark_mask(1 << MOUNT_BIND);
+                let checked = lig_runtime::flush_checked(s, &mut h);
+                black_box(checked.is_ok());
+            });
+            let _ = m.dispose(&mut h);
+            us
+        }
         "patch_apply_1" => median_us(samples_for(name), || {
             black_box(lig_patch::commit_table(synthetic_table(APPLY_ENTRIES)));
         }),
@@ -745,6 +763,7 @@ const REGISTRY: &[&str] = &[
     "runtime_update_mask",
     "runtime_mount_lifecycle",
     "runtime_flush_checked_cycle",
+    "runtime_dispatch_checked",
     "runtime_list_diff_keyed",
     "patch_apply_1",
     "patch_dispatch_hit",
@@ -916,7 +935,7 @@ mod tests {
 
     #[test]
     fn registry_covers_every_row_shape() {
-        // The registry is the sync contract: 27 rows (M12 adds codegen_ref,
+        // The registry is the sync contract: 28 rows (M12 adds codegen_ref,
         // M11's else leg adds codegen_else, M13 adds
         // codegen_list_component, M14 adds codegen_list_slot, M15 adds
         // codegen_for_event, M16 adds session_compile_counter, M17 adds
@@ -926,8 +945,9 @@ mod tests {
         // seam adds session_observe, the session emission seam adds
         // session_emit_to, the mount seam adds runtime_mount_lifecycle,
         // the checked flush seam adds runtime_flush_checked_cycle, the
-        // watch-tick seam adds session_watch_tick), all named, no dupes.
-        assert_eq!(REGISTRY.len(), 27);
+        // watch-tick seam adds session_watch_tick, the checked event
+        // dispatch adds runtime_dispatch_checked), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 28);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
