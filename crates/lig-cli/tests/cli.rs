@@ -314,7 +314,7 @@ fn budgets_gate_reports_the_ledger_table() {
     assert!(stdout.contains("gen_counter_bytes"), "bytes row: {stdout}");
     assert!(stdout.contains("7666"), "D-8-pinned byte count: {stdout}");
     assert!(
-        stdout.contains("all 31 row(s) within budget"),
+        stdout.contains("all 32 row(s) within budget"),
         "summary present: {stdout}"
     );
     assert!(
