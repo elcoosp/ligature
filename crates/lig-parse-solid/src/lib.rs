@@ -482,6 +482,20 @@ fn scan_declarator_scope(
     }
 }
 
+/// The content-contract walk state — one context per fragment, not a pile
+/// of independent toggles: `Outside` (no list context), `Body` (the
+/// composed list body itself — the M18 owner-direct surface), `Leg` (a
+/// DIRECT branch leg of the body — the M27 per-item × per-mount surface,
+/// capped at one level), and `Deep` (deeper in the item subtree — nested
+/// branches and lists keep the fail-closed discipline).
+#[derive(Clone, Copy)]
+enum ItemSurface {
+    Outside,
+    Body,
+    Leg,
+    Deep,
+}
+
 impl ComponentLowering<'_, '_> {
     fn frame(&mut self) -> &mut Frame {
         self.frames.last_mut().expect("open frame")
@@ -1643,7 +1657,7 @@ impl ComponentLowering<'_, '_> {
     /// per-mount/per-item composition is the foundation follow-up).
     /// Children/prop-pass/whole-style dynamics stay denied (M2).
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: oxc_span::Span) {
-        self.content_contract(frag, false, false, false, span);
+        self.content_contract(frag, ItemSurface::Outside, span);
     }
 
     /// The recursive content walk: `in_list_item` marks fragments mounted as
@@ -1654,14 +1668,13 @@ impl ComponentLowering<'_, '_> {
     /// pre-M18 shape; admission's E118 walk and the own-tree contract catch
     /// those deeper shapes) but keep the subtree bit so a nested list body
     /// never gains the owner-direct surface.
-    fn content_contract(
-        &mut self,
-        frag: FragmentId,
-        in_list_item: bool,
-        owner_direct: bool,
-        in_item_subtree: bool,
-        span: oxc_span::Span,
-    ) {
+    fn content_contract(&mut self, frag: FragmentId, surface: ItemSurface, span: oxc_span::Span) {
+        // The M18 owner-direct surface admits the body's own events and
+        // outlets; M27 extends it to the direct legs. Everything else in
+        // the item subtree stays fail-closed; outside a list there is no
+        // per-item context to deny against.
+        let in_list_item = !matches!(surface, ItemSurface::Outside);
+        let owner_direct = matches!(surface, ItemSurface::Body | ItemSurface::Leg);
         let (dynamics, children) = {
             let f = &self.module.fragments[frag.get() as usize];
             (f.dynamics.clone(), f.children.clone())
@@ -1684,10 +1697,11 @@ impl ComponentLowering<'_, '_> {
                 | DynamicKind::For(_)
                 | DynamicKind::Component(_) => None,
                 DynamicKind::Event { .. } => (in_list_item && !owner_direct).then(|| {
-                    "event handlers beyond the composed list item body are not admitted — \
-                         per-item dispatch covers the body's own handler (direct and composed); \
-                         branch-in-item and nested-list dispatch are the foundation follow-up \
-                         (the LIG-E118 discipline)"
+                    "event handlers beyond the composed list item body and its direct \
+                         branch legs are not admitted — per-item dispatch covers the body's \
+                         own handler and the legs' own handlers (the M27 per-item × \
+                         per-mount lift); the legs' subtrees and nested lists keep the \
+                         denial (the LIG-E118 discipline)"
                         .to_string()
                 }),
                 DynamicKind::Slot { .. } => (in_list_item && !owner_direct).then(|| {
@@ -1717,32 +1731,53 @@ impl ComponentLowering<'_, '_> {
         // whose owner is NOT already inside an item subtree is the composed
         // list body itself — `owner_direct` marks it so the M18 owner-direct
         // surface admits exactly one level deep; a NESTED list body (inside
-        // an item subtree) stays fail-closed.
-        let mut structural: Vec<(FragmentId, bool, bool, bool)> = Vec::new();
+        // an item subtree) stays fail-closed. Since M27 the body's DIRECT
+        // branch legs join the owner-direct surface (per-item × per-mount —
+        // the leg mounts per item inside the replay and its handler attaches
+        // at the mount); a leg's own branches stay denied (`in_item_leg`
+        // caps the surface at one level).
+        let mut structural: Vec<(FragmentId, ItemSurface)> = Vec::new();
         {
             let f = &self.module.fragments[frag.get() as usize];
             for d in &f.dynamics {
                 match &d.kind {
                     DynamicKind::If(i) => {
-                        structural.push((i.then, false, false, in_item_subtree));
+                        // M27: the body's direct legs carry the surface (one
+                        // level — a leg's own legs land in `Deep`).
+                        let leg_surface = match surface {
+                            ItemSurface::Body => ItemSurface::Leg,
+                            ItemSurface::Outside => ItemSurface::Outside,
+                            ItemSurface::Leg | ItemSurface::Deep => ItemSurface::Deep,
+                        };
+                        structural.push((i.then, leg_surface));
                         if let Some(el) = i.else_ {
-                            structural.push((el, false, false, in_item_subtree));
+                            structural.push((el, leg_surface));
                         }
                     }
                     DynamicKind::For(fo) => {
-                        structural.push((fo.body, true, !in_item_subtree, true));
+                        // A nested list body (inside an item subtree) never
+                        // gains the owner-direct surface.
+                        let body_surface = match surface {
+                            ItemSurface::Outside => ItemSurface::Body,
+                            _ => ItemSurface::Deep,
+                        };
+                        structural.push((fo.body, body_surface));
                     }
                     _ => {}
                 }
             }
         }
         for child in children {
-            if let Some(&(_, child_in_list, child_direct, child_subtree)) =
-                structural.iter().find(|(id, _, _, _)| id == &child)
-            {
-                self.content_contract(child, child_in_list, child_direct, child_subtree, span);
+            if let Some(&(_, child_surface)) = structural.iter().find(|(s, _)| s == &child) {
+                self.content_contract(child, child_surface, span);
             } else {
-                self.content_contract(child, in_list_item, false, in_item_subtree, span);
+                // A plain child of the body or a leg has no direct surface
+                // of its own; outside a list the context stays outside.
+                let child_surface = match surface {
+                    ItemSurface::Outside => ItemSurface::Outside,
+                    _ => ItemSurface::Deep,
+                };
+                self.content_contract(child, child_surface, span);
             }
         }
     }
