@@ -199,6 +199,16 @@ metric = "time"
 budget = 6500.0
 note = "M18 reference median 1251 µs (codegen/for-composed-content bench, release, Linux x86_64, re-measured 1152-1251 across three runs); ≈5.2× headroom"
 
+# Codegen over the per-mount-fill-ref surface (M25): the ref-composed
+# guard — the build-body split and the mount-time ref captures riding the
+# mounting arm's leg walk — plus the per-mount fill mounts ride
+# generate_module.
+[[budget]]
+name = "codegen_per_mount_fill_ref"
+metric = "time"
+budget = 4000.0
+note = "M25 reference median 787 µs (codegen/per-mount-fill-ref bench, release, Linux x86_64); ≈5.1× headroom"
+
 # The emission-target seam (sink seam): one cold session pass plus
 # emit_units_to into a fresh in-memory MemSink — sourcemap verify, the IR
 # JSON, the merged map, the manifest, and the state file ride the pass, no
