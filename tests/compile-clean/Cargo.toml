@@ -37,6 +37,12 @@ dead_code = "allow"
 [lints.clippy]
 # Pedantic holds here too (the workspace ladder applies to generated code).
 pedantic = { level = "warn", priority = -1 }
+# The generated dispatch glue returns the checked front's `Result` (the
+# checked event dispatch): the error contract is documented at the runtime
+# seam (`flush_checked` / `CycleError`, LIG-E401) and in the glue's own doc
+# comment — per-fn `# Errors` sections would be table noise on a generated
+# artifact.
+missing_errors_doc = "allow"
 # Setters take state by value (the §7.6 write path) even when a fixture's
 # arm only reads through the field.
 needless_pass_by_value = "allow"
