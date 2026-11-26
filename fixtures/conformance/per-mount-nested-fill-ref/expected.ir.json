@@ -1,0 +1,544 @@
+{
+  "version": 5,
+  "frontend": "solid",
+  "source_files": [
+    {
+      "id": 0,
+      "path": "per-mount-nested-fill-ref.tsx",
+      "hash": 2067246367403485891
+    }
+  ],
+  "strings": {
+    "entries": [
+      "App",
+      "Panel",
+      "b",
+      "branch_0",
+      "class",
+      "div",
+      "em",
+      "h2",
+      "header",
+      "in",
+      "inner",
+      "mark",
+      "none",
+      "on",
+      "section",
+      "slotfallback_2",
+      "slotfill_1",
+      "slotfill_3",
+      "tag",
+      "title",
+      "x"
+    ]
+  },
+  "components": [
+    {
+      "name": 0,
+      "root": 0,
+      "props": []
+    },
+    {
+      "name": 1,
+      "root": 5,
+      "props": [
+        {
+          "name": 19,
+          "ty": "Str",
+          "optional": false
+        }
+      ]
+    }
+  ],
+  "templates": [
+    {
+      "root": {
+        "Element": {
+          "tag": 2,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 1299281230627453210
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 14,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            {
+              "Element": {
+                "tag": 7,
+                "static_attrs": [],
+                "style": null,
+                "children": [
+                  "Marker"
+                ]
+              }
+            },
+            "Marker"
+          ]
+        }
+      },
+      "hash": 3329884579038735655
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 6,
+          "static_attrs": [
+            {
+              "key": 4,
+              "value": {
+                "Str": 12
+              }
+            }
+          ],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 8318078748157532736
+    },
+    {
+      "root": "Marker",
+      "hash": 12638226782974257592
+    },
+    {
+      "root": {
+        "Element": {
+          "tag": 5,
+          "static_attrs": [],
+          "style": null,
+          "children": [
+            "Marker"
+          ]
+        }
+      },
+      "hash": 16514551371627406331
+    }
+  ],
+  "fragments": [
+    {
+      "name": 0,
+      "template": 3,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "If": {
+              "cond": 0,
+              "then": 1,
+              "else_": null
+            }
+          },
+          "expr": 0,
+          "reaction": 0,
+          "span": [
+            272,
+            464
+          ]
+        }
+      ],
+      "children": [
+        1
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 3,
+      "template": 3,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": {
+            "Component": {
+              "component": 1,
+              "props": [
+                {
+                  "prop": 19,
+                  "value": 1
+                }
+              ],
+              "slots": [
+                {
+                  "name": 8,
+                  "fallback": 3
+                },
+                {
+                  "name": 10,
+                  "fallback": 2
+                }
+              ]
+            }
+          },
+          "expr": 1,
+          "reaction": 1,
+          "span": [
+            297,
+            452
+          ]
+        }
+      ],
+      "children": [
+        3,
+        2
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 17,
+      "template": 0,
+      "dynamics": [
+        {
+          "anchor": [],
+          "kind": "Ref",
+          "expr": 2,
+          "reaction": 2,
+          "span": [
+            427,
+            431
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 3,
+          "reaction": 3,
+          "span": [
+            434,
+            437
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 16,
+      "template": 4,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": {
+            "Slot": {
+              "name": 10,
+              "fallback": 4
+            }
+          },
+          "expr": 4,
+          "reaction": 4,
+          "span": [
+            343,
+            396
+          ]
+        }
+      ],
+      "children": [
+        4
+      ],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 15,
+      "template": 2,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 5,
+          "reaction": 5,
+          "span": [
+            380,
+            383
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    },
+    {
+      "name": 1,
+      "template": 1,
+      "dynamics": [
+        {
+          "anchor": [
+            {
+              "Down": 0
+            },
+            {
+              "Down": 0
+            }
+          ],
+          "kind": "Text",
+          "expr": 6,
+          "reaction": 6,
+          "span": [
+            71,
+            76
+          ]
+        },
+        {
+          "anchor": [
+            {
+              "Down": 1
+            }
+          ],
+          "kind": {
+            "Slot": {
+              "name": 8,
+              "fallback": null
+            }
+          },
+          "expr": 7,
+          "reaction": 7,
+          "span": [
+            89,
+            111
+          ]
+        }
+      ],
+      "children": [],
+      "props": [],
+      "returns": []
+    }
+  ],
+  "exprs": {
+    "exprs": [
+      {
+        "State": 13
+      },
+      {
+        "Lit": {
+          "Str": 20
+        }
+      },
+      {
+        "Local": 11
+      },
+      {
+        "State": 18
+      },
+      {
+        "Lit": "Null"
+      },
+      {
+        "State": 18
+      },
+      {
+        "State": 19
+      },
+      {
+        "Lit": "Null"
+      },
+      {
+        "Lit": {
+          "Bool": true
+        }
+      },
+      {
+        "Lit": {
+          "Str": 9
+        }
+      }
+    ],
+    "spans": [
+      {
+        "start": 284,
+        "end": 288
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 427,
+        "end": 431
+      },
+      {
+        "start": 434,
+        "end": 437
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 380,
+        "end": 383
+      },
+      {
+        "start": 71,
+        "end": 76
+      },
+      {
+        "start": 0,
+        "end": 0
+      },
+      {
+        "start": 194,
+        "end": 198
+      },
+      {
+        "start": 238,
+        "end": 242
+      }
+    ]
+  },
+  "states": [
+    {
+      "name": 13,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Bool",
+      "init": 8
+    },
+    {
+      "name": 18,
+      "owner": 0,
+      "kind": "signal",
+      "ty": "Str",
+      "init": 9
+    },
+    {
+      "name": 19,
+      "owner": 5,
+      "kind": "prop",
+      "ty": "Str",
+      "init": null
+    }
+  ],
+  "reactions": [
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        13
+      ],
+      "writes": [],
+      "body": 0,
+      "owner": 0
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 1,
+      "owner": 1
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 2,
+      "owner": 2
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 1
+        }
+      },
+      "reads": [
+        18
+      ],
+      "writes": [],
+      "body": 3,
+      "owner": 2
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 4,
+      "owner": 3
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        18
+      ],
+      "writes": [],
+      "body": 5,
+      "owner": 4
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 0
+        }
+      },
+      "reads": [
+        19
+      ],
+      "writes": [],
+      "body": 6,
+      "owner": 5
+    },
+    {
+      "kind": {
+        "bind": {
+          "dynamic": 1
+        }
+      },
+      "reads": [],
+      "writes": [],
+      "body": 7,
+      "owner": 5
+    }
+  ],
+  "styles": [],
+  "shapes": {
+    "shapes": []
+  },
+  "pure_fns": [],
+  "imports": [],
+  "lints": [],
+  "spans": {
+    "entries": []
+  }
+}
