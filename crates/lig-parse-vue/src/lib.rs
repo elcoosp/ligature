@@ -972,6 +972,20 @@ fn fn_event_param(f: &oxc_ast::ast::Function<'_>) -> Option<String> {
 // Template walking (the dom-expressions pass structure over Vue syntax)
 // ---------------------------------------------------------------------------
 
+/// The content-contract walk state — one context per fragment, not a pile
+/// of independent toggles: `Outside` (no list context), `Body` (the
+/// composed list body itself — the M18 owner-direct surface), `Leg` (a
+/// DIRECT branch leg of the body — the M27 per-item × per-mount surface,
+/// capped at one level), and `Deep` (deeper in the item subtree — nested
+/// branches and lists keep the fail-closed discipline).
+#[derive(Clone, Copy)]
+enum ItemSurface {
+    Outside,
+    Body,
+    Leg,
+    Deep,
+}
+
 impl ComponentLowering<'_> {
     fn frame(&mut self) -> &mut Frame {
         self.frames.last_mut().expect("open frame")
@@ -1200,6 +1214,23 @@ impl ComponentLowering<'_> {
                         el.attrs.iter().find(|a| matches!(a, TplAttr::For { .. }))
                     {
                         let (item, index, list) = (item.clone(), index.as_deref(), *list);
+                        // M27: v-for + v-if on one element — the If wraps
+                        // the item body (Vue 3 semantics); the chain
+                        // consumes trailing v-else siblings.
+                        if el.attrs.iter().any(|a| matches!(a, TplAttr::If { .. })) {
+                            let consumed = self.lower_for_item_chain(
+                                el,
+                                &item,
+                                index,
+                                list,
+                                &[],
+                                nodes,
+                                i,
+                                &mut out,
+                            );
+                            i += consumed;
+                            continue;
+                        }
                         out.push(self.lower_for(el, &item, index, list, &[]));
                         i += 1;
                         continue;
@@ -1260,6 +1291,17 @@ impl ComponentLowering<'_> {
                         el.attrs.iter().find(|a| matches!(a, TplAttr::For { .. }))
                     {
                         let (item, index, list) = (item.clone(), index.as_deref(), *list);
+                        // M27: v-for + v-if on one element — the If wraps
+                        // the item body (Vue 3 semantics); the chain
+                        // consumes trailing v-else siblings.
+                        if el.attrs.iter().any(|a| matches!(a, TplAttr::If { .. })) {
+                            path.push(out.len() as u32);
+                            let consumed = self
+                                .lower_for_item_chain(el, &item, index, list, path, nodes, i, out);
+                            path.pop();
+                            i += consumed;
+                            continue;
+                        }
                         path.push(out.len() as u32);
                         let node = self.lower_for(el, &item, index, list, path);
                         path.pop();
@@ -1376,6 +1418,117 @@ impl ComponentLowering<'_> {
             TplTextPart::Str((s, e)) => self.source[*s..*e].trim().is_empty(),
             TplTextPart::Hole(_) => false,
         })
+    }
+
+    /// `v-for` + `v-if` on one element (M27, the Vue-3 semantics): `v-if`
+    /// takes precedence and binds PER ITEM — the If wraps the item body. The
+    /// For lowers on the outer frame; the item fragment carries the If
+    /// dynamic with the chain's legs as its children — the same shape the
+    /// Solid leg's `<Show>`-rooted item body produces, so both legs meet the
+    /// parity contract (the branch-in-item spelling the E118 lift admits).
+    /// Trailing `v-else`/`v-else-if` siblings join the chain and are
+    /// consumed. Returns the number of sibling nodes consumed.
+    fn lower_for_item_chain(
+        &mut self,
+        el: &TplElement,
+        item: &str,
+        index: Option<&str>,
+        list: (usize, usize),
+        path: &[u32],
+        nodes: &[TplNode],
+        start: usize,
+        out: &mut Vec<NodeIr>,
+    ) -> usize {
+        let Some(TplAttr::If { expr: if_expr }) =
+            el.attrs.iter().find(|a| matches!(a, TplAttr::If { .. }))
+        else {
+            // Dispatchers only route here with both directives present.
+            out.push(NodeIr::Marker);
+            return 1;
+        };
+        let Ok(source) = self.lower_expr_at((list.0 as u32, list.1 as u32), None) else {
+            out.push(NodeIr::Marker);
+            return 1;
+        };
+        let item_id = self.intern(item.to_string());
+        self.local.insert(item.to_string());
+        let index_id = index.map(|i| {
+            self.local.insert(i.to_string());
+            self.index_accessors.insert(i.to_string());
+            self.intern(i.to_string())
+        });
+        let key = match self.for_key_attr(el) {
+            Ok(k) => k,
+            Err(d) => {
+                self.diags.push(d);
+                out.push(NodeIr::Marker);
+                return 1;
+            }
+        };
+        // The item fragment: a fresh frame whose root lowers through the
+        // if-chain (the element stripped of the key and the v-for — the
+        // chain root keeps the v-if; `fragment_from_elem` strips the
+        // structural directives from each leg). The chain's If dynamic lands
+        // on the item frame; the legs become its children.
+        let mut body_el = el.clone();
+        body_el
+            .attrs
+            .retain(|a| !matches!(a, TplAttr::Bind { name, .. } if name == "key"));
+        body_el.attrs.retain(|a| !matches!(a, TplAttr::For { .. }));
+        let name = format!("items_{}", self.branch_counter);
+        self.branch_counter += 1;
+        let name_id = self.intern(name);
+        let body_frag = self.module.push_fragment(FragmentIr {
+            name: name_id,
+            template: TemplateId::new(0),
+            dynamics: vec![],
+            children: vec![],
+            props: vec![],
+            returns: vec![],
+        });
+        self.frames.push(Frame {
+            fragment: body_frag,
+            dynamics: vec![],
+            anchors: vec![],
+            children: vec![],
+        });
+        let mut chain_out = Vec::new();
+        let consumed = self.lower_if_chain(&body_el, *if_expr, nodes, start, &[], &mut chain_out);
+        let root = chain_out.into_iter().next().unwrap_or(NodeIr::Marker);
+        let tpl = self.module.intern_template(TemplateIr::new(root));
+        let fi = body_frag.get() as usize;
+        self.module.fragments[fi].template = tpl;
+        let frame = self.frames.last().expect("open frame");
+        self.module.fragments[fi]
+            .dynamics
+            .clone_from(&frame.dynamics);
+        self.module.fragments[fi]
+            .children
+            .clone_from(&frame.children);
+        assign_anchor_paths(self.module, body_frag, &frame.anchors);
+        self.frames.pop();
+        // Register under the parent frame (the canonical fragment DFS walks
+        // `children`; a fragment reachable only through a dynamic body would
+        // be pruned as unreachable).
+        self.frame().children.push(body_frag);
+        let reads = lig_ir::expr::collect_reads(self.module, source);
+        self.push_dynamic(
+            DynamicKind::For(ForIr {
+                source,
+                item: item_id,
+                index: index_id,
+                key,
+                body: body_frag,
+            }),
+            source,
+            reads,
+            path,
+            vec![],
+            ReactionKind::Bind { dynamic: 0 },
+            (list.0 as u32, list.1 as u32),
+        );
+        out.push(NodeIr::Marker);
+        consumed
     }
 
     fn is_ws_node(&self, n: &TplNode) -> bool {
@@ -2478,7 +2631,7 @@ impl ComponentLowering<'_> {
     /// fail-closed discipline (the walk's `owner_direct` flag).
     /// Children/prop-pass/whole-style dynamics stay denied (M2).
     fn ensure_static_slot_content(&mut self, frag: FragmentId, span: (u32, u32)) {
-        self.content_contract(frag, false, false, false, span);
+        self.content_contract(frag, ItemSurface::Outside, span);
     }
 
     /// The M10/M13/M18 recursive content walk: `in_list_item` marks fragments
@@ -2490,14 +2643,13 @@ impl ComponentLowering<'_> {
     /// pre-M18 shape; admission's E118 walk and the own-tree contract catch
     /// those deeper shapes) but keep the subtree bit so a nested list body
     /// never gains the owner-direct surface.
-    fn content_contract(
-        &mut self,
-        frag: FragmentId,
-        in_list_item: bool,
-        owner_direct: bool,
-        in_item_subtree: bool,
-        span: (u32, u32),
-    ) {
+    fn content_contract(&mut self, frag: FragmentId, surface: ItemSurface, span: (u32, u32)) {
+        // The M18 owner-direct surface admits the body's own events and
+        // outlets; M27 extends it to the direct legs. Everything else in
+        // the item subtree stays fail-closed; outside a list there is no
+        // per-item context to deny against.
+        let in_list_item = !matches!(surface, ItemSurface::Outside);
+        let owner_direct = matches!(surface, ItemSurface::Body | ItemSurface::Leg);
         let (dynamics, children) = {
             let f = &self.module.fragments[frag.get() as usize];
             (f.dynamics.clone(), f.children.clone())
@@ -2520,10 +2672,11 @@ impl ComponentLowering<'_> {
                 | DynamicKind::For(_)
                 | DynamicKind::Component(_) => None,
                 DynamicKind::Event { .. } => (in_list_item && !owner_direct).then(|| {
-                    "event handlers beyond the composed list item body are not admitted — \
-                         per-item dispatch covers the body's own handler (direct and composed); \
-                         branch-in-item and nested-list dispatch are the foundation follow-up \
-                         (the LIG-E118 discipline)"
+                    "event handlers beyond the composed list item body and its direct \
+                         branch legs are not admitted — per-item dispatch covers the body's \
+                         own handler and the legs' own handlers (the M27 per-item × \
+                         per-mount lift); the legs' subtrees and nested lists keep the \
+                         denial (the LIG-E118 discipline)"
                         .to_string()
                 }),
                 DynamicKind::Slot { .. } => (in_list_item && !owner_direct).then(|| {
@@ -2553,32 +2706,53 @@ impl ComponentLowering<'_> {
         // whose owner is NOT already inside an item subtree is the composed
         // list body itself — `owner_direct` marks it so the M18 owner-direct
         // surface admits exactly one level deep; a NESTED list body (inside
-        // an item subtree) stays fail-closed.
-        let mut structural: Vec<(FragmentId, bool, bool, bool)> = Vec::new();
+        // an item subtree) stays fail-closed. Since M27 the body's DIRECT
+        // branch legs join the owner-direct surface (per-item × per-mount —
+        // the leg mounts per item inside the replay and its handler attaches
+        // at the mount); a leg's own branches stay denied (`in_item_leg`
+        // caps the surface at one level).
+        let mut structural: Vec<(FragmentId, ItemSurface)> = Vec::new();
         {
             let f = &self.module.fragments[frag.get() as usize];
             for d in &f.dynamics {
                 match &d.kind {
                     DynamicKind::If(i) => {
-                        structural.push((i.then, false, false, in_item_subtree));
+                        // M27: the body's direct legs carry the surface (one
+                        // level — a leg's own legs land in `Deep`).
+                        let leg_surface = match surface {
+                            ItemSurface::Body => ItemSurface::Leg,
+                            ItemSurface::Outside => ItemSurface::Outside,
+                            ItemSurface::Leg | ItemSurface::Deep => ItemSurface::Deep,
+                        };
+                        structural.push((i.then, leg_surface));
                         if let Some(el) = i.else_ {
-                            structural.push((el, false, false, in_item_subtree));
+                            structural.push((el, leg_surface));
                         }
                     }
                     DynamicKind::For(fo) => {
-                        structural.push((fo.body, true, !in_item_subtree, true));
+                        // A nested list body (inside an item subtree) never
+                        // gains the owner-direct surface.
+                        let body_surface = match surface {
+                            ItemSurface::Outside => ItemSurface::Body,
+                            _ => ItemSurface::Deep,
+                        };
+                        structural.push((fo.body, body_surface));
                     }
                     _ => {}
                 }
             }
         }
         for child in children {
-            if let Some(&(_, child_in_list, child_direct, child_subtree)) =
-                structural.iter().find(|(id, _, _, _)| id == &child)
-            {
-                self.content_contract(child, child_in_list, child_direct, child_subtree, span);
+            if let Some(&(_, child_surface)) = structural.iter().find(|(s, _)| s == &child) {
+                self.content_contract(child, child_surface, span);
             } else {
-                self.content_contract(child, in_list_item, false, in_item_subtree, span);
+                // A plain child of the body or a leg has no direct surface
+                // of its own; outside a list the context stays outside.
+                let child_surface = match surface {
+                    ItemSurface::Outside => ItemSurface::Outside,
+                    _ => ItemSurface::Deep,
+                };
+                self.content_contract(child, child_surface, span);
             }
         }
     }
