@@ -1370,3 +1370,92 @@ export function Panel({ title }) {
         "the nested capture writes the parent's field: {text}"
     );
 }
+
+#[test]
+fn for_event_item_branch_attaches_per_mount() {
+    // The E118 foundation follow-up, zone one (docs/errors/LIG-E118.md,
+    // "explanation"): "What stays denied is everything BEYOND the body
+    // fragment itself — events inside list-item branches (branch-in-item
+    // composition) and events inside nested list bodies (per-item ×
+    // per-item). Each needs per-item control flow." M27 grows the per-item
+    // control flow for the branch-in-item zone: the branch mounts PER ITEM
+    // inside the per-item replay (the replay loop re-runs the item apply
+    // over every live item, so the flip evaluation fans out with the
+    // reconcile), the leg's handler attaches at the branch mount (per
+    // fresh mount, the M15 attach discipline in a new location), and
+    // dispatch rides the item-index-addressed fire fn unchanged. The
+    // acceptance line this test pins: the branch-in-item denial lifts and
+    // the leg's events attach per mount through the item replay.
+    let src = r#"import { For, Show } from "solid-js";
+
+export function Rows() {
+  const [items, setItems] = createSignal(["alpha", "beta"]);
+  const [picked, setPicked] = createSignal("");
+  return (
+    <ul>
+      <For each={items()} key={(n) => n}>
+        {(n) => (
+          <Show when={n.length > 1}>
+            <li onClick={() => setPicked(n)}>{n}</li>
+          </Show>
+        )}
+      </For>
+    </ul>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "for-event-item-branch.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module)
+        .expect(
+            "codegen: an event inside a list-item branch compiles — the branch-in-item \
+                 zone of the E118 discipline lifts with per-item control flow",
+        )
+        .text;
+    // The leg mounts per item, inside the per-item replay (the apply fn),
+    // guarded on the item fragment's own branch slot so a replay never
+    // re-mounts a mounted leg.
+    let apply = text
+        .split("fn apply_item_f")
+        .nth(1)
+        .and_then(|rest| rest.split("fn ").next())
+        .expect("the per-item apply fn is emitted")
+        .to_string();
+    assert!(
+        apply.contains(".mount_branch("),
+        "the item branch mounts inside the per-item replay: {apply}"
+    );
+    assert!(
+        apply.contains(".branch_is("),
+        "the mount is guarded on the item's own branch slot: {apply}"
+    );
+    // The leg's handler attaches at the mount, per fresh mount (the M15
+    // attach discipline, per mount): one attach_foreign at the leg's hole.
+    assert!(
+        apply.contains("attach_foreign"),
+        "the leg event attaches at the branch mount: {apply}"
+    );
+    // The leg's bind re-applies with the item substituted on every replay
+    // pass (the M14 per-item slot-bind discipline — mount once, bind per
+    // replay).
+    assert!(
+        apply.contains(".set_text("),
+        "the leg's item-bound text re-applies per replay: {apply}"
+    );
+    // Dispatch rides the item-index-addressed fire fn (the M15 addressing,
+    // one fire fn per leg event dynamic).
+    assert!(
+        text.contains("pub fn fire_f"),
+        "a fire fn is emitted for the leg's handler: {text}"
+    );
+    assert!(
+        text.contains("index: usize,") && text.contains("ev: &::lig_runtime::EvData,"),
+        "the leg fire fn stays index-addressed (the M15 dispatch contract): {text}"
+    );
+    // The leg's own reactions never join the component schedule (one
+    // reaction, N live items — the M14 flush-scope discipline): no run arm
+    // addresses the leg fragment.
+    assert!(
+        !text.contains("LEG_FRAGS"),
+        "no leg addressing leaks into the component scope: {text}"
+    );
+}
