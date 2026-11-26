@@ -24,6 +24,7 @@ pub mod host;
 pub mod mount;
 pub mod pure;
 pub mod reconcile;
+pub mod registry;
 pub mod schedule;
 pub mod template;
 
@@ -39,6 +40,7 @@ pub use host::{
 };
 pub use mount::{ComponentUnit, Mounted};
 pub use reconcile::{ListOp, SeqOp, key_hash, keyed_diff, lis_sequence, plan_keyed, unkeyed_diff};
+pub use registry::{CompId, ComponentRegistry};
 pub use schedule::{CycleError, MAX_PASSES, Reactions, Schedule, flush, flush_checked};
 pub use template::{AnchorStep, Template, TplAttr, TplNode};
 
