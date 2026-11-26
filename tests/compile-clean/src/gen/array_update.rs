@@ -63,11 +63,18 @@ pub mod generated {
             self.frag.mark_mask(2u64);
         }
         /// Dispatch glue: capture the event payload, mark the handler
-        /// reaction, and flush (§10.1).
-        pub fn fire_0(&mut self, h: &mut dyn Host, ev: &::lig_runtime::EvData) {
+        /// reaction, and flush through the checked front (§10.1) —
+        /// a non-converging schedule reports the typed
+        /// `CycleError` (LIG-E401) to the caller instead of
+        /// panicking inside the event.
+        pub fn fire_0(
+            &mut self,
+            h: &mut dyn Host,
+            ev: &::lig_runtime::EvData,
+        ) -> Result<(), ::lig_runtime::CycleError> {
             self.ev = ev.clone();
             self.frag.dirty.set(0usize as usize);
-            ::lig_runtime::flush(self, h);
+            ::lig_runtime::flush_checked(self, h)
         }
         fn reconcile_f1(&mut self, h: &mut dyn Host, slot: usize) {
             let items: ::alloc::vec::Vec<::alloc::string::String> = ::core::clone::Clone::clone(
