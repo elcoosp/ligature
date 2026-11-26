@@ -1226,3 +1226,65 @@ fn own_else_branch_outlets_mount_their_fallback() {
         "both legs mount their own fallback: {text}"
     );
 }
+
+#[test]
+fn per_mount_fill_refs_capture_at_mount_time() {
+    // M18's named follow-up (docs/m18/REPORT.md, Known gaps): "Ref captures
+    // inside fills carried into branch-mounted instances: the
+    // `content_ref_inits` build-body emission assumes a plain instance field
+    // — the same M10-family shape the fill assembly fixed, fail-loud (the
+    // generated unit refuses to compile); the ref-composed guard is the
+    // named follow-up." A ref inside the fill of a BRANCH-mounted use (the
+    // per-mount identity) must capture at MOUNT time, guarded on the
+    // `Option<Child>` field — the build body runs before any branch mounts,
+    // and the pre-M18 spelling would not even compile (`Option<Panel>` has
+    // no `frag`). M18 fixed the binds and events for per-mount fills; this
+    // pins the ref front riding the same guard.
+    let src = r#"export function App() {
+  const [on, setOn] = createSignal(true);
+  let mark;
+  return (
+    <Show when={on()}>
+      <Panel title="x" header={<b ref={mark}>in</b>} />
+    </Show>
+  );
+}
+
+export function Panel({ title }) {
+  return (
+    <section>
+      <h2>{title}</h2>
+      <Slot name="header" />
+    </section>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "permount-ref.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module).expect("codegen").text;
+    // The use is per-mount: an Option field built in the mounting arm.
+    assert!(
+        text.contains("pub panel: Option<Panel>"),
+        "the branch-mounted use is an Option field: {text}"
+    );
+    // The build body must NOT carry the pre-M18 spelling: the instance does
+    // not exist at build time and `Option<Panel>` has no `frag`.
+    assert!(
+        !text.contains("s.panel.frag.slot_fill("),
+        "the build body never reads a per-mount instance's fill directly: {text}"
+    );
+    // The mounting arm captures through the guarded per-mount spelling
+    // (M18's fill-mount guard), reading the freshly mounted fill content
+    // and writing the PARENT's ref field — the fill ref ownership rule.
+    assert!(
+        text.contains("if let Some(inst) = self.panel.as_ref()"),
+        "the mount-time capture guards on the instance: {text}"
+    );
+    assert!(
+        text.contains("if let Some(c) = inst.frag.slot_fill(1usize)"),
+        "the mount-time capture reads the fresh instance's fill: {text}"
+    );
+    assert!(
+        text.contains("self.ref_mark = c.hole("),
+        "the mount-time capture writes the parent's field: {text}"
+    );
+}
