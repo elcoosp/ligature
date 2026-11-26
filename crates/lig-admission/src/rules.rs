@@ -96,12 +96,10 @@ pub fn check_fixture_sync(repo_root: &Path, rules: &[Rule]) -> Result<(), String
                 .join(&r.code)
                 .parent()
                 .map_or_else(|| base.join(dir), |_| base.join(dir));
-            let _ = kind;
             if !p.join("input.solid.tsx").exists() {
                 return Err(format!(
-                    "{}: fixture {} missing input.solid.tsx at {}",
+                    "{}: the {kind} fixture {dir} is missing input.solid.tsx at {}",
                     r.code,
-                    dir,
                     p.display()
                 ));
             }
