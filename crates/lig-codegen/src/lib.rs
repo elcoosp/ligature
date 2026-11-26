@@ -1645,11 +1645,14 @@ fn generate_component_pieces(
             let rid = rx.id;
             event_fns.push(quote! {
                 /// Dispatch glue: capture the event payload, mark the handler
-                /// reaction, and flush (§10.1).
-                pub fn #fname(&mut self, h: &mut dyn Host, ev: &::lig_runtime::EvData) {
+                /// reaction, and flush through the checked front (§10.1) —
+                /// a non-converging schedule reports the typed
+                /// `CycleError` (LIG-E401) to the caller instead of
+                /// panicking inside the event.
+                pub fn #fname(&mut self, h: &mut dyn Host, ev: &::lig_runtime::EvData) -> Result<(), ::lig_runtime::CycleError> {
                     self.ev = ev.clone();
                     self.frag.dirty.set(#rid as usize);
-                    ::lig_runtime::flush(self, h);
+                    ::lig_runtime::flush_checked(self, h)
                 }
             });
         }
@@ -4429,18 +4432,20 @@ fn emit_item_method(
             fire_fns.push(quote! {
                 /// Per-item dispatch glue (M15): capture the event payload,
                 /// substitute the live item/index into the handler body, and
-                /// flush — the per-item analogue of the top-level `fire_N`
-                /// (§10.1).
-                pub fn #fire(&mut self, h: &mut dyn Host, index: usize, ev: &::lig_runtime::EvData) {
+                /// flush through the checked front — the per-item analogue of
+                /// the top-level `fire_N` (§10.1); a non-converging schedule
+                /// reports the typed `CycleError` (LIG-E401) instead of
+                /// panicking inside the event.
+                pub fn #fire(&mut self, h: &mut dyn Host, index: usize, ev: &::lig_runtime::EvData) -> Result<(), ::lig_runtime::CycleError> {
                     self.ev = ev.clone();
                     let items: ::alloc::vec::Vec<#item_ty_lit> =
                         ::core::clone::Clone::clone(&(#src));
                     let Some(item) = items.get(index) else {
-                        return;
+                        return Ok(());
                     };
                     let index = index as i64;
                     #body;
-                    ::lig_runtime::flush(self, h);
+                    ::lig_runtime::flush_checked(self, h)
                 }
             });
         }
