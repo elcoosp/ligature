@@ -35,7 +35,7 @@ leg's `setX` destructures because template assignments synthesize
 match the Solid leg's bindings (the names ride the canonical `strings`
 table).
 
-## Behavior fixtures (36)
+## Behavior fixtures (37)
 
 | Fixture | Behavior pinned |
 | --- | --- |
@@ -75,6 +75,7 @@ table).
 | `style-object` | static style object → const style profile |
 | `template-ref` | template refs on the Vue leg (M12): `ref="box"` / `:ref="box"` binding an element to a placeholder local (`let box;` in `<script setup>`) — the same `Ref` dynamic the Solid leg's `ref={box}` lowers to, no state for the name, the capture into the generated `ref_box: NodeId` field |
 | `ternary-child` | conditional child with element branches (`branch_N` naming, both frontends) |
+| `per-mount-fill-ref` | per-mount fill refs (M25): a `ref={mark}` / `ref="mark"` inside the fill of a BRANCH-mounted `Panel` use — the fill content mounts with the branch (M18), and the ref captures at mount time through the guarded leg walk (the build body never reads the `Option` field); a remount cycle re-captures into the fresh node |
 
 ## Rules
 
