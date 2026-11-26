@@ -364,6 +364,7 @@ by the reports below and the [composition table](#what-composes).
 | 0034 | The checked flush seam        |
 | 0035 | The recorded link table       |
 | 0037 | The library position resolver |
+| 0038 | The component registry and the patch host bridge |
 
 </details>
 
