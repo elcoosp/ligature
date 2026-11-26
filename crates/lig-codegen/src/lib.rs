@@ -280,6 +280,27 @@ fn generate_component_pieces(
             _ => None,
         })
         .collect();
+    // M27: the direct If legs of For bodies (then + else) run PER ITEM —
+    // their binds ride the item replay's branch arm and their events attach
+    // at the per-item branch mount. Like the bodies and the per-item slot
+    // fallbacks, their reactions get no general run arms (one reaction,
+    // N live items — the flush scope has no item addressing).
+    let for_body_item_legs: Vec<FragmentId> = for_bodies
+        .iter()
+        .filter_map(|b| module.fragments.get(b.get() as usize))
+        .flat_map(|body| body.dynamics.iter())
+        .filter_map(|d| match &d.kind {
+            DynamicKind::If(i) => {
+                let mut legs = vec![i.then];
+                if let Some(el) = i.else_ {
+                    legs.push(el);
+                }
+                Some(legs)
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
     let rxs: Vec<RxInfo<'_>> = module
         .reactions
         .iter()
@@ -288,6 +309,7 @@ fn generate_component_pieces(
             fragment_in_tree(&frags, r.owner)
                 && !for_bodies.contains(&r.owner)
                 && !for_body_slot_fallbacks.contains(&r.owner)
+                && !for_body_item_legs.contains(&r.owner)
         })
         .map(|(id, r)| RxInfo {
             id,
@@ -297,7 +319,6 @@ fn generate_component_pieces(
         .collect();
     let n_reactions = rxs.len();
     let max_rx_id = rxs.iter().map(|r| r.id).max().map_or(0, |m| m + 1);
-    let _ = max_rx_id;
 
     // --- SCHEDULE + WRITES -----------------------------------------------------
     let schedule_items = {
@@ -374,6 +395,15 @@ fn generate_component_pieces(
             _ => default_value(&st.ty),
         };
         init_fields.push(quote! { #fname: #init });
+    }
+    // M27: the per-item branch-leg trackers (one `Vec<u8>` per
+    // else-carrying If dynamic on a For body) — the replay's branch arm
+    // guards and writes them per live index, and the list reconcile mirrors
+    // the keyed plan ops onto them like the M13 instance stores.
+    for field in for_body_else_leg_fields(module) {
+        let fname = syn::Ident::new(&field, Span::call_site());
+        struct_fields.push(quote! { #fname: ::alloc::vec::Vec<u8> });
+        init_fields.push(quote! { #fname: ::alloc::vec::Vec::new() });
     }
     struct_fields.push(quote! { pub ev: ::lig_runtime::EvData });
     init_fields.push(quote! { ev: ::lig_runtime::EvData::new() });
@@ -495,8 +525,23 @@ fn generate_component_pieces(
     // --- branch leg trackers (M11): one u8 per If dynamic that carries an
     // else leg — the mounting arm records which leg is mounted (0 = none,
     // 1 = then, 2 = else) so the arm can swap legs; the then-only shape
-    // stays tracker-free and byte-stable.
+    // stays tracker-free and byte-stable. M27: If dynamics on For BODIES
+    // are excluded — item branches track per item (`legs_f{body}_d{di}`
+    // Vec fields, mirrored by the reconcile) — the component-scope u8 has
+    // no item addressing.
+    let for_body_ids: HashSet<u32> = module
+        .fragments
+        .iter()
+        .flat_map(|f| f.dynamics.iter())
+        .filter_map(|d| match &d.kind {
+            DynamicKind::For(fo) => Some(fo.body.get()),
+            _ => None,
+        })
+        .collect();
     for f in &frags {
+        if for_body_ids.contains(&f.id.get()) {
+            continue;
+        }
         let frag_ir = &module.fragments[f.id.get() as usize];
         for (di, d) in frag_ir.dynamics.iter().enumerate() {
             let DynamicKind::If(i) = &d.kind else {
@@ -510,10 +555,6 @@ fn generate_component_pieces(
             init_fields.push(quote! { #fname: 0u8 });
         }
     }
-
-    // --- apply functions (grouped by (fragment, anchor) — C5) ---------------------
-    let apply_fns = emit_apply_fns(module, &frags);
-    let group_state_fields: Vec<proc_macro2::TokenStream> = Vec::new();
 
     // --- run arms -------------------------------------------------------------
     let mut run_arms: Vec<proc_macro2::TokenStream> = Vec::new();
@@ -1550,8 +1591,34 @@ fn generate_component_pieces(
                                     quote! { &mut self.#field }
                                 })
                                 .collect();
+                            // M27: the per-item leg trackers ride the call
+                            // with the instance stores.
+                            let legs_call_args: Vec<proc_macro2::TokenStream> = module
+                                .fragments
+                                .get(for_ir.body.get() as usize)
+                                .map(|body| {
+                                    body.dynamics
+                                        .iter()
+                                        .enumerate()
+                                        .filter_map(|(bdi, bd)| match &bd.kind {
+                                            DynamicKind::If(i) if i.else_.is_some() => {
+                                                let field = syn::Ident::new(
+                                                    &format!(
+                                                        "legs_f{}_d{}",
+                                                        for_ir.body.get(),
+                                                        bdi
+                                                    ),
+                                                    Span::call_site(),
+                                                );
+                                                Some(quote! { &mut self.#field })
+                                            }
+                                            _ => None,
+                                        })
+                                        .collect::<Vec<_>>()
+                                })
+                                .unwrap_or_default();
                             let call = quote! {
-                                Self::#method(h, #recv, #slot, items, #(#read_args,)* #(#inst_args,)*);
+                                Self::#method(h, #recv, #slot, items, #(#read_args,)* #(#inst_args,)* #(#legs_call_args,)*);
                             };
                             let scoped = ctx_scope(&ctx, call);
                             run_arms.push(quote! {
@@ -1722,6 +1789,37 @@ fn generate_component_pieces(
     let mut branch_attaches: Vec<proc_macro2::TokenStream> = Vec::new();
     let mut dispatch_lo: u64 = 0;
     let mut dispatch_hi: u64 = 0;
+    // M27: the direct If legs of For bodies (then + else) — their events
+    // ride the per-item branch mount, never the build attach walk.
+    let for_body_leg_ids: HashSet<u32> = module
+        .fragments
+        .iter()
+        .flat_map(|f| f.dynamics.iter())
+        .filter_map(|d| match &d.kind {
+            DynamicKind::For(fo) => {
+                let legs = module
+                    .fragments
+                    .get(fo.body.get() as usize)?
+                    .dynamics
+                    .iter()
+                    .filter_map(|bd| match &bd.kind {
+                        DynamicKind::If(i) => {
+                            let mut legs = vec![i.then.get()];
+                            if let Some(el) = i.else_ {
+                                legs.push(el.get());
+                            }
+                            Some(legs)
+                        }
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect::<Vec<u32>>();
+                Some(legs)
+            }
+            _ => None,
+        })
+        .flatten()
+        .collect();
     for f in &frags {
         let frag = &module.fragments[f.id.get() as usize];
         for (di, d) in frag.dynamics.iter().enumerate() {
@@ -1738,6 +1836,13 @@ fn generate_component_pieces(
                 // fns — no build-time attach record (the items do not exist
                 // yet, and a branch-table lookup would be the wrong table).
                 if for_bodies.contains(&f.id.get()) {
+                    continue;
+                }
+                // M27: branch-in-item leg events attach at the per-item
+                // branch mount (the item replay's branch arm) and dispatch
+                // through their own fire fns — no build-time attach record
+                // (the leg does not exist until an item mounts its branch).
+                if for_body_leg_ids.contains(&f.id.get()) {
                     continue;
                 }
                 let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
@@ -2274,7 +2379,6 @@ fn generate_component_pieces(
     pieces.push(quote! {
         pub struct #struct_name {
             #(#struct_fields,)*
-            #(#group_state_fields,)*
         }
         #[derive(Default)]
         pub struct #props_ty {
@@ -2350,7 +2454,6 @@ fn generate_component_pieces(
             }
         }
     });
-    pieces.extend(apply_fns);
     pieces.extend(item_methods);
     pieces.extend(key_methods);
     pieces.push(template_gen::gen_style_table(module, &prefix));
@@ -3634,11 +3737,6 @@ fn branch_slot_of_dynamic(frag: &FragmentIr, dynamic: u32) -> Option<usize> {
 /// functions land with M1's grouped-dynamic emission (C5) — the counter
 /// fixture has exactly one bind per hole, so inlining IS the elision
 /// (INLINE_REUSE, §9.3). Grouped emission returns no extra items yet.
-fn emit_apply_fns(module: &ViewModule, frags: &[FragInfo]) -> Vec<proc_macro2::TokenStream> {
-    let _ = (module, frags);
-    Vec::new()
-}
-
 /// One component use on a For-body fragment (M13): the per-item instance
 /// store the reconcile mirrors the keyed plan onto.
 struct BodyUse {
@@ -4034,6 +4132,50 @@ fn emit_list_method(
         item_event_attaches(module, for_ir, &quote!(self.frag), &quote!(index));
     let unkeyed_event_attaches =
         item_event_attaches(module, for_ir, &quote!(self.frag), &quote!(i));
+    // M27: the per-item leg trackers mirror the keyed plan ops (0 none /
+    // 1 then / 2 else, per live index — the M13 instance-store discipline,
+    // one `u8` per item).
+    let legs_fields: Vec<syn::Ident> = module
+        .fragments
+        .get(for_ir.body.get() as usize)
+        .map(|body| {
+            body.dynamics
+                .iter()
+                .enumerate()
+                .filter_map(|(bdi, bd)| match &bd.kind {
+                    DynamicKind::If(i) if i.else_.is_some() => Some(syn::Ident::new(
+                        &format!("legs_f{}_d{}", for_ir.body.get(), bdi),
+                        Span::call_site(),
+                    )),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let legs_args: Vec<proc_macro2::TokenStream> = legs_fields
+        .iter()
+        .map(|f| quote! { &mut self.#f })
+        .collect();
+    let legs_remove: Vec<proc_macro2::TokenStream> = legs_fields
+        .iter()
+        .map(|f| quote! { self.#f.remove(index); })
+        .collect();
+    let legs_move: Vec<proc_macro2::TokenStream> = legs_fields
+        .iter()
+        .map(|f| quote! { let l = self.#f.remove(from); self.#f.insert(to, l); })
+        .collect();
+    let legs_insert: Vec<proc_macro2::TokenStream> = legs_fields
+        .iter()
+        .map(|f| quote! { self.#f.insert(index, 0u8); })
+        .collect();
+    let legs_unkeyed_insert: Vec<proc_macro2::TokenStream> = legs_fields
+        .iter()
+        .map(|f| quote! { self.#f.insert(i, 0u8); })
+        .collect();
+    let legs_unkeyed_remove: Vec<proc_macro2::TokenStream> = legs_fields
+        .iter()
+        .map(|f| quote! { self.#f.remove(i); })
+        .collect();
     let mut children_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     for u in uses {
         if let Some(ts) = emit_item_children_fn(module, for_ir, item_ty, u)? {
@@ -4059,11 +4201,13 @@ fn emit_list_method(
                     match step {
                         ::lig_runtime::SeqOp::Remove { index } => {
                             #(#remove_mirrors)*
+                            #(#legs_remove)*
                             self.frag.list_remove(h, slot, index);
                         }
                         ::lig_runtime::SeqOp::Move { from, to } => {
                             self.frag.list_move(h, slot, from, to);
                             #(#move_mirrors)*
+                            #(#legs_move)*
                         }
                         ::lig_runtime::SeqOp::Insert { key, index } => {
                             self.frag.list_insert(
@@ -4076,6 +4220,7 @@ fn emit_list_method(
                                 #body_branches,
                             );
                             #(#insert_mirrors)*
+                            #(#legs_insert)*
                             #keyed_event_attaches
                         }
                     }
@@ -4083,7 +4228,7 @@ fn emit_list_method(
                 #(#read_declares)*
                 for (i, it) in items.iter().enumerate() {
                     if let Some(f) = self.frag.list_item_mut(slot, i) {
-                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                        #apply(f, h, it.clone(), i as i64, #(#read_args,)* #(#legs_args,)*);
                     }
                     #(#replay_arms)*
                 }
@@ -4098,16 +4243,18 @@ fn emit_list_method(
                 for i in common..items.len() {
                     self.frag.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
                     #(#unkeyed_insert_mirrors)*
+                    #(#legs_unkeyed_insert)*
                     #unkeyed_event_attaches
                 }
                 for i in (common..old).rev() {
+                    #(#legs_unkeyed_remove)*
                     #(#unkeyed_remove_mirrors)*
                     self.frag.list_remove(h, slot, i);
                 }
                 #(#read_declares)*
                 for (i, it) in items.iter().enumerate() {
                     if let Some(f) = self.frag.list_item_mut(slot, i) {
-                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                        #apply(f, h, it.clone(), i as i64, #(#read_args,)* #(#legs_args,)*);
                     }
                     #(#replay_arms)*
                 }
@@ -4282,6 +4429,74 @@ fn emit_list_method_composed(
         .collect();
     let keyed_event_attaches = item_event_attaches(module, for_ir, &quote!(recv), &quote!(index));
     let unkeyed_event_attaches = item_event_attaches(module, for_ir, &quote!(recv), &quote!(i));
+    // M27: the per-item leg trackers ride the call as `&mut Vec<u8>` params
+    // (the associated fn takes no `self`, so the owner's trackers thread
+    // through like the M13 instance stores).
+    let legs_param_names: Vec<String> = module
+        .fragments
+        .get(for_ir.body.get() as usize)
+        .map(|body| {
+            body.dynamics
+                .iter()
+                .enumerate()
+                .filter_map(|(bdi, bd)| match &bd.kind {
+                    DynamicKind::If(i) if i.else_.is_some() => {
+                        Some(format!("legs_f{}_d{}", for_ir.body.get(), bdi))
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let legs_params: Vec<proc_macro2::TokenStream> = legs_param_names
+        .iter()
+        .map(|n| {
+            let id = syn::Ident::new(n, Span::call_site());
+            quote! { #id: &mut ::alloc::vec::Vec<u8> }
+        })
+        .collect();
+    let legs_args: Vec<proc_macro2::TokenStream> = legs_param_names
+        .iter()
+        .map(|n| {
+            let id = syn::Ident::new(n, Span::call_site());
+            quote! { #id }
+        })
+        .collect();
+    let legs_remove: Vec<proc_macro2::TokenStream> = legs_param_names
+        .iter()
+        .map(|n| {
+            let id = syn::Ident::new(n, Span::call_site());
+            quote! { #id.remove(index); }
+        })
+        .collect();
+    let legs_move: Vec<proc_macro2::TokenStream> = legs_param_names
+        .iter()
+        .map(|n| {
+            let id = syn::Ident::new(n, Span::call_site());
+            quote! { let l = #id.remove(from); #id.insert(to, l); }
+        })
+        .collect();
+    let legs_insert: Vec<proc_macro2::TokenStream> = legs_param_names
+        .iter()
+        .map(|n| {
+            let id = syn::Ident::new(n, Span::call_site());
+            quote! { #id.insert(index, 0u8); }
+        })
+        .collect();
+    let legs_unkeyed_insert: Vec<proc_macro2::TokenStream> = legs_param_names
+        .iter()
+        .map(|n| {
+            let id = syn::Ident::new(n, Span::call_site());
+            quote! { #id.insert(i, 0u8); }
+        })
+        .collect();
+    let legs_unkeyed_remove: Vec<proc_macro2::TokenStream> = legs_param_names
+        .iter()
+        .map(|n| {
+            let id = syn::Ident::new(n, Span::call_site());
+            quote! { #id.remove(i); }
+        })
+        .collect();
     let mut children_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     for u in uses {
         if let Some(ts) = emit_item_children_fn(module, for_ir, item_ty, u)? {
@@ -4298,6 +4513,7 @@ fn emit_list_method_composed(
                 items: ::alloc::vec::Vec<#item_ty_lit>,
                 #(#read_params,)*
                 #(#inst_params,)*
+                #(#legs_params,)*
             ) {
                 let old_len = recv.list_len(slot);
                 let mut old_keys: ::alloc::vec::Vec<u64> = ::alloc::vec::Vec::with_capacity(old_len);
@@ -4313,11 +4529,13 @@ fn emit_list_method_composed(
                     match step {
                         ::lig_runtime::SeqOp::Remove { index } => {
                             #(#remove_mirrors)*
+                            #(#legs_remove)*
                             recv.list_remove(h, slot, index);
                         }
                         ::lig_runtime::SeqOp::Move { from, to } => {
                             recv.list_move(h, slot, from, to);
                             #(#move_mirrors)*
+                            #(#legs_move)*
                         }
                         ::lig_runtime::SeqOp::Insert { key, index } => {
                             recv.list_insert(
@@ -4330,13 +4548,14 @@ fn emit_list_method_composed(
                                 #body_branches,
                             );
                             #(#insert_mirrors)*
+                            #(#legs_insert)*
                             #keyed_event_attaches
                         }
                     }
                 }
                 for (i, it) in items.iter().enumerate() {
                     if let Some(f) = recv.list_item_mut(slot, i) {
-                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                        #apply(f, h, it.clone(), i as i64, #(#read_args,)* #(#legs_args,)*);
                     }
                     #(#replay_arms)*
                 }
@@ -4351,21 +4570,24 @@ fn emit_list_method_composed(
                 items: ::alloc::vec::Vec<#item_ty_lit>,
                 #(#read_params,)*
                 #(#inst_params,)*
+                #(#legs_params,)*
             ) {
                 let old = recv.list_len(slot);
                 let common = old.min(items.len());
                 for i in common..items.len() {
                     recv.list_insert(h, slot, i, i as u64, #body_tpl, #body_holes, #body_branches);
                     #(#unkeyed_insert_mirrors)*
+                    #(#legs_unkeyed_insert)*
                     #unkeyed_event_attaches
                 }
                 for i in (common..old).rev() {
+                    #(#legs_unkeyed_remove)*
                     #(#unkeyed_remove_mirrors)*
                     recv.list_remove(h, slot, i);
                 }
                 for (i, it) in items.iter().enumerate() {
                     if let Some(f) = recv.list_item_mut(slot, i) {
-                        #apply(f, h, it.clone(), i as i64, #(#read_args),*);
+                        #apply(f, h, it.clone(), i as i64, #(#read_args,)* #(#legs_args,)*);
                     }
                     #(#replay_arms)*
                 }
@@ -4587,6 +4809,9 @@ fn emit_item_method(
         })
         .collect();
     let mut commits: Vec<proc_macro2::TokenStream> = Vec::new();
+    // M27: the branch arms' leg fire fns (collected during the walk below,
+    // merged into the returned set once the body fire fns are built).
+    let mut leg_fire_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     for (di, d) in body_frag.dynamics.iter().enumerate() {
         match &d.kind {
             DynamicKind::Text => {
@@ -4674,19 +4899,59 @@ fn emit_item_method(
                     &mut commits,
                 )?;
             }
-            DynamicKind::If(_)
-            | DynamicKind::For(_)
+            DynamicKind::If(if_ir) => {
+                // M27 (per-item × per-mount): the branch mounts PER ITEM
+                // inside the replay — the flip evaluates with the item
+                // substituted (the replay loop re-runs the apply over every
+                // live item, so the fan-out rides the reconcile), the leg's
+                // handler attaches at the mount, and the leg's item-bound
+                // binds re-apply per replay pass. The leg's fire fns join
+                // the body's (index-addressed dispatch, unchanged).
+                let leg_fire = emit_item_branch_arm(
+                    module,
+                    frags,
+                    prefix,
+                    for_ir,
+                    item_ty,
+                    if_ir,
+                    di,
+                    &mut commits,
+                )?;
+                leg_fire_fns.extend(leg_fire);
+            }
+            DynamicKind::For(_)
             | DynamicKind::Html
             | DynamicKind::Ref
             | DynamicKind::Children
             | DynamicKind::PropPass { .. }
             | DynamicKind::Style => {
                 return Err(CodegenError::Unsupported(
-                    "control flow inside list item bodies is not admitted in v1",
+                    "list/nested control flow inside list item bodies is not admitted \
+                     (per-item × per-item composition is the foundation follow-up)",
                 ));
             }
         }
     }
+    // M27: the per-item leg trackers this body's else-carrying branches
+    // guard on — `&mut` params of the apply fn (the replay call sites pass
+    // the component's stores; the composed reconcile threads its params).
+    let legs_params: Vec<proc_macro2::TokenStream> = body_frag
+        .dynamics
+        .iter()
+        .enumerate()
+        .filter_map(|(bdi, bd)| match &bd.kind {
+            DynamicKind::If(i) if i.else_.is_some() => {
+                Some((bdi, format!("legs_f{}_d{}", for_ir.body.get(), bdi)))
+            }
+            _ => None,
+        })
+        .map(|(_, field)| {
+            let id = syn::Ident::new(&field, Span::call_site());
+            // A slice: the apply only indexes the tracker (the plan-op
+            // mirrors live in the reconciles, which own the Vec).
+            quote! { #id: &mut [u8] }
+        })
+        .collect();
     let method = syn::Ident::new(
         &format!("apply_item_f{}", for_ir.body.get()),
         proc_macro2::Span::call_site(),
@@ -4732,22 +4997,390 @@ fn emit_item_method(
     Ok((
         quote! {
             fn #method(f: &mut ::lig_runtime::Fragment, h: &mut dyn Host,
-                       item: #item_ty_lit, index: i64, #(#read_params,)*) {
+                       item: #item_ty_lit, index: i64, #(#read_params,)* #(#legs_params,)*) {
                 #(#commits)*
             }
         },
-        fire_fns,
+        {
+            fire_fns.extend(leg_fire_fns);
+            fire_fns
+        },
     ))
 }
 
-/// The M14 per-item slot arm (§7.4 + §7.5): one For-body outlet's mount
-/// and bind commits for the item replay. The outlet's own fallback mounts
-/// into the item's outlet hole (idempotent — `mount_slot` skips a mounted
-/// item), then its scalar binds apply to the mounted content with the
-/// item/index substituted. Fills for list-body outlets are the
-/// cross-component follow-up (the M9 unmatched-fill backstop denies them
-/// at the parent's codegen); content beyond scalar binds keeps the
-/// codegen backstop.
+/// The per-item branch-leg tracker field names (M27): one per else-carrying
+/// If dynamic on a For body, in module order. The struct declares them (the
+/// M13 instance-store pattern), the apply fn guards and writes them per live
+/// index, and both list reconciles mirror the keyed plan ops onto them.
+fn for_body_else_leg_fields(module: &ViewModule) -> Vec<String> {
+    let mut out = Vec::new();
+    for f in &module.fragments {
+        for d in &f.dynamics {
+            if let DynamicKind::For(for_ir) = &d.kind
+                && let Some(body) = module.fragments.get(for_ir.body.get() as usize)
+            {
+                for (bdi, bd) in body.dynamics.iter().enumerate() {
+                    if let DynamicKind::If(i) = &bd.kind
+                        && i.else_.is_some()
+                    {
+                        out.push(format!("legs_f{}_d{}", for_ir.body.get(), bdi));
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// One leg bind commit for the per-item branch arm (M27): the leg's scalar
+/// dynamics addressed on the mounted leg's fragment (`b`), with the
+/// item/index substituted — the body's commit shapes, one borrow level
+/// deeper.
+fn leg_bind_commit(
+    module: &ViewModule,
+    d: &lig_ir::fragment::DynamicIr,
+    di: usize,
+    for_ir: &lig_ir::fragment::ForIr,
+    item_ty: &Ty,
+) -> Result<Option<proc_macro2::TokenStream>, CodegenError> {
+    let v = gen_item_expr(module, d.expr, for_ir, item_ty)?;
+    Ok(match &d.kind {
+        DynamicKind::Text => {
+            // The item binding is the apply fn's `String` param (deref
+            // coerces at `&str`); the index binding is `i64` and must
+            // stringify; parent-state reads follow their declared type (and
+            // are denied upstream — the leg surface is item-scoped).
+            let is_str = match module.exprs.get(d.expr) {
+                lig_ir::expr::Expr::Local(l) if *l == for_ir.item => true,
+                lig_ir::expr::Expr::Local(l) if for_ir.index.is_some_and(|ix| ix == *l) => false,
+                other => matches!(
+                    codegen_ty_of(module, other),
+                    Ty::Str | Ty::List(_) | Ty::Bool
+                ),
+            };
+            if is_str {
+                Some(quote! { b.set_text(h, #di, &(#v)); })
+            } else {
+                Some(quote! {
+                    {
+                        let mut buf = [0u8; 20];
+                        b.set_text(h, #di, ::lig_runtime::format_i64(&mut buf, #v));
+                    }
+                })
+            }
+        }
+        DynamicKind::Class => Some(quote! { b.set_class(h, #di, Some(&(#v))); }),
+        DynamicKind::Attr { key } => {
+            let key_lit = syn::LitStr::new(module.strings.get(*key), Span::call_site());
+            let is_str = matches!(
+                codegen_ty_of(module, module.exprs.get(d.expr)),
+                Ty::Str | Ty::List(_) | Ty::Bool
+            );
+            if is_str {
+                Some(quote! {
+                    b.set_attr(h, #di, #key_lit, Some(::lig_runtime::AttrVal::Str(&(#v))));
+                })
+            } else {
+                Some(quote! {
+                    b.set_attr(h, #di, #key_lit, Some(::lig_runtime::AttrVal::Num((#v) as f64)));
+                })
+            }
+        }
+        DynamicKind::StyleProp { prop } => {
+            let prop_id = prop.get();
+            Some(quote! {
+                b.set_style_dyn(h, #di, &[(#prop_id, ::lig_runtime::PropVal::Raw(&(#v)))]);
+            })
+        }
+        _ => None,
+    })
+}
+
+/// The per-item branch arm (M27, the branch-in-item zone of the E118
+/// discipline): one If dynamic on a For body, emitted INSIDE the per-item
+/// replay. The flip evaluates with the item substituted (the replay loop
+/// re-runs the apply over every live item, so the condition fan-out rides
+/// the reconcile — the per-item control flow the plan names), the mount is
+/// guarded on the item fragment's own branch slot (each item mounts its
+/// own leg instance), the leg's events attach at the mount (one
+/// `attach_foreign` per fresh mount, the M15 attach discipline in a new
+/// location), and the leg's item-bound binds re-apply per replay pass (the
+/// M14 mount-once-bind-per-replay discipline). An else leg adds a per-item
+/// leg tracker (`legs_f{body}_d{di}`, one `Vec<u8>` mirrored by the plan
+/// ops — 0 none / 1 then / 2 else, the M11 leg-field discipline per item):
+/// `branch_is` alone cannot tell the two legs apart. Returns the leg
+/// events' index-addressed fire fns (the M15 dispatch contract, one fire
+/// fn per leg event dynamic).
+///
+/// # Errors
+/// Fail-closed on every shape the arm cannot address: state-reading
+/// conditions or binds (the state→per-item fan-out is the M14 boundary),
+/// structural dynamics inside the legs (per-item × per-item and per-item
+/// slot/component composition are the follow-ups), and any deeper fragment
+/// below the leg roots (the boundary moves, it does not disappear).
+fn emit_item_branch_arm(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    prefix: &str,
+    for_ir: &lig_ir::fragment::ForIr,
+    item_ty: &Ty,
+    if_ir: &lig_ir::fragment::IfIr,
+    di: usize,
+    commits: &mut Vec<proc_macro2::TokenStream>,
+) -> Result<Vec<proc_macro2::TokenStream>, CodegenError> {
+    struct LegCode {
+        tpl: syn::Ident,
+        holes: syn::Ident,
+        branches: syn::Ident,
+        binds: Vec<proc_macro2::TokenStream>,
+        attaches: Vec<proc_macro2::TokenStream>,
+        fire_fns: Vec<proc_macro2::TokenStream>,
+    }
+    if expr_reads_state(module.exprs.get(if_ir.cond)) {
+        return Err(CodegenError::Unsupported(
+            "state-reading item-branch conditions need the state-to-per-item fan-out \
+             (the M14 per-item slot-bind boundary) — keep the condition item-bound",
+        ));
+    }
+    let body_frag = &module.fragments[for_ir.body.get() as usize];
+    let Some(slot) = branch_slot_of_dynamic(body_frag, di as u32) else {
+        return Err(CodegenError::Unsupported(
+            "item-branch dynamic carries no branch anchor slot",
+        ));
+    };
+    let mut leg_ids = vec![if_ir.then];
+    if let Some(el) = if_ir.else_ {
+        leg_ids.push(el);
+    }
+    // Validate + compile both legs: the leg's OWN scalar binds and events
+    // admit; anything structural (nested If/For, components, slots, refs,
+    // html) or any deeper fragment keeps the fail-closed discipline — the
+    // leg surface is exactly the mount arm's reach.
+    let has_else = if_ir.else_.is_some();
+    let mut legs: Vec<LegCode> = Vec::with_capacity(leg_ids.len());
+    let src = gen_expr(module, for_ir.source)?;
+    for &lid in &leg_ids {
+        let Some(info) = frags.iter().find(|f| f.id == lid) else {
+            return Err(CodegenError::Unsupported(
+                "item-branch leg missing from the component tree",
+            ));
+        };
+        let leg_frag = &module.fragments[lid.get() as usize];
+        if !leg_frag.children.is_empty() {
+            return Err(CodegenError::Unsupported(
+                "structural content inside item-branch legs is not admitted — per-item \
+                 composition beyond the leg's own surface is the foundation follow-up",
+            ));
+        }
+        let mut binds = Vec::new();
+        let mut attaches = Vec::new();
+        let mut fire_fns = Vec::new();
+        for (ldi, ld) in leg_frag.dynamics.iter().enumerate() {
+            match &ld.kind {
+                DynamicKind::Text
+                | DynamicKind::Class
+                | DynamicKind::Attr { .. }
+                | DynamicKind::StyleProp { .. } => {
+                    if expr_reads_state(module.exprs.get(ld.expr)) {
+                        return Err(CodegenError::Unsupported(
+                            "state-reading binds inside item-branch legs need the \
+                             state-to-per-item fan-out (the M14 per-item slot-bind \
+                             boundary)",
+                        ));
+                    }
+                    if let Some(ts) = leg_bind_commit(module, ld, ldi, for_ir, item_ty)? {
+                        binds.push(ts);
+                    }
+                }
+                DynamicKind::Event { event, delegate } => {
+                    let Some(rx) = ld.reaction else {
+                        continue;
+                    };
+                    let ev = syn::Ident::new(&format!("{event:?}"), Span::call_site());
+                    let hid = rx.get();
+                    attaches.push(quote! {
+                        let node = f.branch(#slot).map(|b| b.hole(#ldi));
+                        if let Some(n) = node {
+                            f.attach_foreign(
+                                n,
+                                ::lig_runtime::EventKind::#ev,
+                                ::lig_runtime::HandlerId(#hid),
+                                #delegate,
+                                h,
+                            );
+                        }
+                    });
+                    // The leg handler dispatches through its own
+                    // index-addressed fire fn (the M15 contract — the
+                    // source addressing never touches the owner fragment).
+                    let body = gen_item_handler_expr(module, ld.expr, for_ir)?;
+                    let fire = syn::Ident::new(
+                        &format!("fire_f{}_d{}", lid.get(), ldi),
+                        Span::call_site(),
+                    );
+                    let item_ty_lit: syn::Type =
+                        syn::parse_str(&ty_name(item_ty)).expect("valid item type");
+                    fire_fns.push(quote! {
+                        /// Per-item dispatch glue for a branch-in-item event
+                        /// (M27): capture the event payload, substitute the
+                        /// live item/index into the handler body, and flush
+                        /// through the checked front — the mount-time
+                        /// analogue of the body fire fns; a non-converging
+                        /// schedule reports the typed `CycleError`
+                        /// (LIG-E401) instead of panicking inside the event.
+                        pub fn #fire(&mut self, h: &mut dyn Host, index: usize, ev: &::lig_runtime::EvData) -> Result<(), ::lig_runtime::CycleError> {
+                            self.ev = ev.clone();
+                            let items: ::alloc::vec::Vec<#item_ty_lit> =
+                                ::core::clone::Clone::clone(&(#src));
+                            let Some(item) = items.get(index) else {
+                                return Ok(());
+                            };
+                            let index = index as i64;
+                            #body;
+                            ::lig_runtime::flush_checked(self, h)
+                        }
+                    });
+                }
+                DynamicKind::If(_)
+                | DynamicKind::For(_)
+                | DynamicKind::Component(_)
+                | DynamicKind::Slot { .. }
+                | DynamicKind::Html
+                | DynamicKind::Ref
+                | DynamicKind::Children
+                | DynamicKind::PropPass { .. }
+                | DynamicKind::Style => {
+                    return Err(CodegenError::Unsupported(
+                        "structural dynamics inside item-branch legs are not admitted — \
+                         per-item composition beyond the leg's own surface is the \
+                         foundation follow-up",
+                    ));
+                }
+            }
+        }
+        legs.push(LegCode {
+            tpl: tpl_ident(prefix, info.template_id),
+            holes: hole_ident(prefix, info.id.get() as usize),
+            branches: branch_ident(prefix, info.id.get() as usize),
+            binds,
+            attaches,
+            fire_fns,
+        });
+    }
+    let cond = gen_item_expr(module, if_ir.cond, for_ir, item_ty)?;
+    // The tracker field name derives from the BODY's dynamic index of this
+    // If (`legs_f{body}_d{di}`) — the same name [`for_body_else_leg_fields`]
+    // derives, and the name the struct + both reconciles use.
+    let legs_field: Option<syn::Ident> = has_else.then(|| {
+        syn::Ident::new(
+            &format!("legs_f{}_d{}", for_ir.body.get(), di),
+            Span::call_site(),
+        )
+    });
+    // The flip arm (the item's own fragment carries the branch slot; the
+    // replay's item addressing keeps the mount per item) + the per-replay
+    // bind re-application (mounted-guarded, the M14 discipline).
+    let inner = if has_else {
+        let legs_field = legs_field.expect("else carries a tracker");
+        let then = &legs[0];
+        let el = &legs[1];
+        let then_binds = &then.binds;
+        let else_binds = &el.binds;
+        // Identical leg bind streams collapse into one guarded block (the
+        // two-arm shape would carry identical blocks; the re-application is
+        // the same expression for whichever leg is mounted).
+        let binds_rendered = |binds: &[proc_macro2::TokenStream]| {
+            binds
+                .iter()
+                .map(proc_macro2::TokenStream::to_string)
+                .collect::<Vec<_>>()
+        };
+        let binds_section = if then.binds.is_empty() {
+            quote! {}
+        } else if binds_rendered(&then.binds) == binds_rendered(&el.binds) {
+            quote! {
+                if leg != 0u8 {
+                    if let Some(b) = f.branch_mut(#slot) {
+                        #(#then_binds)*
+                    }
+                }
+            }
+        } else {
+            quote! {
+                if leg == 1u8 {
+                    if let Some(b) = f.branch_mut(#slot) {
+                        #(#then_binds)*
+                    }
+                } else if leg == 2u8 {
+                    if let Some(b) = f.branch_mut(#slot) {
+                        #(#else_binds)*
+                    }
+                }
+            }
+        };
+        let then_attaches = &then.attaches;
+        let else_attaches = &el.attaches;
+        let then_tpl = &then.tpl;
+        let then_holes = &then.holes;
+        let then_branches = &then.branches;
+        let else_tpl = &el.tpl;
+        let else_holes = &el.holes;
+        let else_branches = &el.branches;
+        quote! {
+            let on = #cond;
+            let ix = usize::try_from(index.max(0)).unwrap_or(0);
+            let leg = #legs_field.get(ix).copied().unwrap_or(0u8);
+            if on {
+                if !(f.branch_is(#slot) && leg == 1u8) {
+                    if f.branch_is(#slot) {
+                        f.unmount_branch(h, #slot);
+                    }
+                    f.mount_branch(h, #slot, #then_tpl, #then_holes, #then_branches);
+                    if let Some(l) = #legs_field.get_mut(ix) {
+                        *l = 1u8;
+                    }
+                    #(#then_attaches)*
+                }
+            } else {
+                if !(f.branch_is(#slot) && leg == 2u8) {
+                    if f.branch_is(#slot) {
+                        f.unmount_branch(h, #slot);
+                    }
+                    f.mount_branch(h, #slot, #else_tpl, #else_holes, #else_branches);
+                    if let Some(l) = #legs_field.get_mut(ix) {
+                        *l = 2u8;
+                    }
+                    #(#else_attaches)*
+                }
+            }
+            #binds_section
+        }
+    } else {
+        let leg = &legs[0];
+        let binds = &leg.binds;
+        let attaches = &leg.attaches;
+        let tpl = &leg.tpl;
+        let holes = &leg.holes;
+        let branches = &leg.branches;
+        quote! {
+            let on = #cond;
+            if f.branch_is(#slot) != on {
+                if on {
+                    f.mount_branch(h, #slot, #tpl, #holes, #branches);
+                    #(#attaches)*
+                } else {
+                    f.unmount_branch(h, #slot);
+                }
+            }
+            if let Some(b) = f.branch_mut(#slot) {
+                #(#binds)*
+            }
+        }
+    };
+    commits.push(inner);
+    Ok(legs.into_iter().flat_map(|l| l.fire_fns).collect())
+}
+
 fn emit_item_slot_arm(
     module: &ViewModule,
     frags: &[FragInfo],
