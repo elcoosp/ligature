@@ -257,3 +257,13 @@ name = "session_watch_tick"
 metric = "time"
 budget = 40000.0
 note = "watch-tick-seam reference median 7485 µs (session/watch_tick bench, release, Linux x86_64; 8 units into a fresh sink ≈ 8× the emit_mem row plus one recompile); ≈5.3× headroom"
+
+# Codegen over the per-mount-nested-fill-ref surface (M26): the mount
+# walk's recursive capture walk — the nested outlet mounts, nested events
+# and the nested ref captures composing onto the per-mount leg walk — ride
+# generate_module.
+[[budget]]
+name = "codegen_per_mount_nested_fill_ref"
+metric = "time"
+budget = 6000.0
+note = "M26 reference median 1111 µs (codegen/per-mount-nested-fill-ref bench, release, Linux x86_64); ≈5.4× headroom"
