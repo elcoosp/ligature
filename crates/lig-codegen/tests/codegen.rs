@@ -33,12 +33,36 @@ fn counter_codegen_is_byte_reproducible() {
 }
 
 #[test]
-fn event_glue_dispatches_through_the_flush_loop() {
+fn event_glue_dispatches_through_the_checked_flush_loop() {
     let text = counter_code();
     assert!(text.contains("pub fn fire_"), "{text}");
     assert!(text.contains("ev: &::lig_runtime::EvData"), "{text}");
-    assert!(text.contains("::lig_runtime::flush(self, h)"));
     assert!(text.contains("EventKind::Click"), "{text}");
+    // The generated dispatch glue is the checked front (failure as data):
+    // every fire fn hands the convergence loop to `flush_checked` and
+    // reports the typed LIG-E401 `CycleError` to the caller instead of
+    // panicking inside the event (the M21 known gap — "rewiring the
+    // generated calls is a codegen milestone coupled to a D-8 regen").
+    assert!(
+        text.contains(") -> Result<(), ::lig_runtime::CycleError> {"),
+        "fire fns surface the checked front: {text}"
+    );
+    assert!(
+        text.contains("::lig_runtime::flush_checked(self, h)"),
+        "fire bodies call the checked path: {text}"
+    );
+    // The panicking free `flush` stays build-time-only: the glue never
+    // calls it (the prop-pass and build arms keep the panicking front).
+    let fire_block = text
+        .split("pub fn fire_1(")
+        .nth(1)
+        .and_then(|rest| rest.split("pub fn build").next())
+        .expect("fire fn emitted")
+        .to_string();
+    assert!(
+        !fire_block.contains("::lig_runtime::flush("),
+        "fire fns never call the panicking flush: {fire_block}"
+    );
 }
 
 #[test]
@@ -766,8 +790,9 @@ export function App() {
         "the handler body substitutes the item local: {text}"
     );
     assert!(
-        text.contains("::lig_runtime::flush(self, h);"),
-        "the handler's state writes cascade through the flush: {text}"
+        text.contains("::lig_runtime::flush_checked(self, h)")
+            && text.contains(") -> Result<(), ::lig_runtime::CycleError> {"),
+        "the handler's state writes cascade through the checked flush: {text}"
     );
     // The attach rides the KEYED INSERT arm (once per fresh item, at the
     // event's hole, with the handler reaction id) — inside the plan's
