@@ -1636,9 +1636,9 @@ fn generate_component_pieces(
                         if for_ir.key.is_some() {
                             key_methods.push(emit_key_method(module, for_ir, &item_ty)?);
                         }
-                        let (apply_fn, fire_fns) =
+                        let (apply_fns, fire_fns) =
                             emit_item_method(module, &frags, &prefix, for_ir, &item_ty)?;
-                        item_methods.push(apply_fn);
+                        item_methods.extend(apply_fns);
                         item_fire_fns.extend(fire_fns);
                     }
                     DynamicKind::Component(c) => {
@@ -2594,12 +2594,15 @@ fn default_value(ty: &Ty) -> proc_macro2::TokenStream {
 }
 
 fn init_is_literal(module: &ViewModule, e: ExprId) -> bool {
-    match module.exprs.get(e) {
+    expr_is_literal(module.exprs.get(e))
+}
+
+/// Whether an expression is a literal (recursively — nested literal arrays
+/// initialize nested-list state, the M28 per-item × per-item shape's data).
+fn expr_is_literal(e: &lig_ir::expr::Expr) -> bool {
+    match e {
         lig_ir::expr::Expr::Lit(_) => true,
-        // List initializers: array of literals lowers to `vec![...]`.
-        lig_ir::expr::Expr::Array(items) => items
-            .iter()
-            .all(|i| matches!(i, lig_ir::expr::Expr::Lit(_))),
+        lig_ir::expr::Expr::Array(items) => items.iter().all(expr_is_literal),
         _ => false,
     }
 }
@@ -4789,7 +4792,7 @@ fn emit_item_method(
     prefix: &str,
     for_ir: &lig_ir::fragment::ForIr,
     item_ty: &Ty,
-) -> Result<(proc_macro2::TokenStream, Vec<proc_macro2::TokenStream>), CodegenError> {
+) -> Result<(Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>), CodegenError> {
     let body_frag = &module.fragments[for_ir.body.get() as usize];
     let item_ty_lit: syn::Type = syn::parse_str(&ty_name(item_ty)).expect("valid item type");
     let mut item_handlers: Vec<(usize, ExprId)> = Vec::new();
@@ -4812,6 +4815,9 @@ fn emit_item_method(
     // M27: the branch arms' leg fire fns (collected during the walk below,
     // merged into the returned set once the body fire fns are built).
     let mut leg_fire_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    // M28: the nested-list arms' free fns (the inner reconcile/apply/key
+    // trio, module-level like the body's own apply fn).
+    let mut nested_free_fns: Vec<proc_macro2::TokenStream> = Vec::new();
     for (di, d) in body_frag.dynamics.iter().enumerate() {
         match &d.kind {
             DynamicKind::Text => {
@@ -4919,15 +4925,37 @@ fn emit_item_method(
                 )?;
                 leg_fire_fns.extend(leg_fire);
             }
-            DynamicKind::For(_)
-            | DynamicKind::Html
+            DynamicKind::For(inner_for) => {
+                // M28 (per-item × per-item): the nested list mounts PER
+                // OUTER ITEM inside the replay — the inner reconcile
+                // addresses the ITEM fragment's own list table (each item is
+                // its own `Fragment`; `ensure_list` resolves the inner For's
+                // branch anchor), so the per-item-square state is the
+                // fragment-per-item itself: one outer index, one inner
+                // index, no parallel store. The inner body's own scalar
+                // binds and events admit; dispatch rides index-PAIR-addressed
+                // fire fns.
+                let (nested_fns, nested_fire) = emit_item_nested_list_arm(
+                    module,
+                    frags,
+                    prefix,
+                    for_ir,
+                    item_ty,
+                    inner_for,
+                    di,
+                    &mut commits,
+                )?;
+                nested_free_fns.extend(nested_fns);
+                leg_fire_fns.extend(nested_fire);
+            }
+            DynamicKind::Html
             | DynamicKind::Ref
             | DynamicKind::Children
             | DynamicKind::PropPass { .. }
             | DynamicKind::Style => {
                 return Err(CodegenError::Unsupported(
-                    "list/nested control flow inside list item bodies is not admitted \
-                     (per-item × per-item composition is the foundation follow-up)",
+                    "html/ref/children/prop-pass/style dynamics inside list item bodies \
+                     are not admitted (the per-item composition follow-ups)",
                 ));
             }
         }
@@ -4995,12 +5023,14 @@ fn emit_item_method(
         }
     }
     Ok((
-        quote! {
+        core::iter::once(quote! {
             fn #method(f: &mut ::lig_runtime::Fragment, h: &mut dyn Host,
                        item: #item_ty_lit, index: i64, #(#read_params,)* #(#legs_params,)*) {
                 #(#commits)*
             }
-        },
+        })
+        .chain(nested_free_fns)
+        .collect(),
         {
             fire_fns.extend(leg_fire_fns);
             fire_fns
@@ -5513,6 +5543,414 @@ fn emit_item_slot_arm(
     Ok(())
 }
 
+/// One nested-list bind commit for the per-item nested-list arm (M28): the
+/// inner body's scalar dynamics addressed on the INNER item's fragment
+/// (`g`), with the outer item/index and inner item/index substituted — the
+/// body's commit shapes, two borrow levels deeper.
+fn nested_bind_commit(
+    module: &ViewModule,
+    d: &lig_ir::fragment::DynamicIr,
+    di: usize,
+    outer_for: &lig_ir::fragment::ForIr,
+    inner_for: &lig_ir::fragment::ForIr,
+) -> Result<Option<proc_macro2::TokenStream>, CodegenError> {
+    let v = gen_nested_item_expr(module, d.expr, outer_for, inner_for)?;
+    Ok(match &d.kind {
+        DynamicKind::Text => {
+            // The inner/outer item bindings are the apply fns' `String`
+            // params (deref coerces at `&str`); the index bindings are `i64`
+            // and must stringify; parent-state reads follow their declared
+            // type (and are denied upstream — the inner surface is
+            // item-scoped).
+            let is_str = match module.exprs.get(d.expr) {
+                lig_ir::expr::Expr::Local(l) if *l == inner_for.item || *l == outer_for.item => {
+                    true
+                }
+                lig_ir::expr::Expr::Local(l) if inner_for.index.is_some_and(|ix| ix == *l) => false,
+                lig_ir::expr::Expr::Local(l) if outer_for.index.is_some_and(|ix| ix == *l) => false,
+                other => matches!(
+                    codegen_ty_of(module, other),
+                    Ty::Str | Ty::List(_) | Ty::Bool
+                ),
+            };
+            if is_str {
+                Some(quote! { g.set_text(h, #di, &(#v)); })
+            } else {
+                Some(quote! {
+                    {
+                        let mut buf = [0u8; 20];
+                        g.set_text(h, #di, ::lig_runtime::format_i64(&mut buf, #v));
+                    }
+                })
+            }
+        }
+        DynamicKind::Class => Some(quote! { g.set_class(h, #di, Some(&(#v))); }),
+        DynamicKind::Attr { key } => {
+            let key_lit = syn::LitStr::new(module.strings.get(*key), Span::call_site());
+            let is_str = matches!(
+                codegen_ty_of(module, module.exprs.get(d.expr)),
+                Ty::Str | Ty::List(_) | Ty::Bool
+            );
+            if is_str {
+                Some(quote! {
+                    g.set_attr(h, #di, #key_lit, Some(::lig_runtime::AttrVal::Str(&(#v))));
+                })
+            } else {
+                Some(quote! {
+                    g.set_attr(
+                        h,
+                        #di,
+                        #key_lit,
+                        Some(::lig_runtime::AttrVal::Num((#v) as f64)),
+                    );
+                })
+            }
+        }
+        DynamicKind::StyleProp { prop } => {
+            let prop_id = prop.get();
+            Some(quote! {
+                g.set_style_dyn(h, #di, &[(#prop_id, ::lig_runtime::PropVal::Raw(&(#v)))]);
+            })
+        }
+        _ => None,
+    })
+}
+
+/// The per-item nested-list arm (M28, the nested-list zone of the E118
+/// discipline): one For dynamic on a For body, emitted INSIDE the per-item
+/// replay. The inner list mounts per OUTER item — the inner reconcile
+/// addresses the ITEM fragment's own list table (`ensure_list` resolves the
+/// inner For's branch anchor; each item is its own `Fragment`), so the
+/// per-item-square state is the fragment-per-item itself: one outer index,
+/// one inner index, no parallel store (the item teardown disposes the inner
+/// table with the item). The inner body's own scalar binds and events admit
+/// (the binds re-apply per replay pass through the inner apply — the M14
+/// mount-once-bind-per-replay discipline squared; the inner events attach
+/// ONCE per fresh inner item at the inner insert arm, the M15 attach
+/// discipline one level deeper). The replay call site is ONE commit in the
+/// outer apply, so the three replay contexts (keyed, unkeyed, composed)
+/// cannot drift — the M27 arm's single-mechanism discipline.
+///
+/// Returns the inner free fns (the nested reconcile/apply/key trio,
+/// module-level like the body's own apply fn) and the inner fire fns (one
+/// per inner event dynamic — index-PAIR-addressed dispatch: outer index,
+/// inner index).
+///
+/// # Errors
+/// Fail-closed on every shape the arm cannot address: state-reading inner
+/// sources/binds/keys (the state→per-item fan-out is the M14 boundary),
+/// inner sources other than the outer item binding (the backend lattice
+/// types the item-bound list only), structural dynamics inside the inner
+/// body (the deeper per-item compositions are the follow-ups), and any
+/// deeper fragment below the inner body (the boundary moves, it does not
+/// disappear).
+fn emit_item_nested_list_arm(
+    module: &ViewModule,
+    frags: &[FragInfo],
+    prefix: &str,
+    outer_for: &lig_ir::fragment::ForIr,
+    outer_item_ty: &Ty,
+    inner_for: &lig_ir::fragment::ForIr,
+    di: usize,
+    commits: &mut Vec<proc_macro2::TokenStream>,
+) -> Result<(Vec<proc_macro2::TokenStream>, Vec<proc_macro2::TokenStream>), CodegenError> {
+    if expr_reads_state(module.exprs.get(inner_for.source)) {
+        return Err(CodegenError::Unsupported(
+            "state-reading nested-list sources need the state-to-per-item fan-out \
+             (the M14 per-item slot-bind boundary) — keep the source item-bound",
+        ));
+    }
+    if let Some(key_id) = inner_for.key
+        && expr_reads_state(module.exprs.get(key_id))
+    {
+        return Err(CodegenError::Unsupported(
+            "state-reading nested-list keys need the state-to-per-item fan-out \
+             (the M14 per-item slot-bind boundary) — keep the key item-bound",
+        ));
+    }
+    // The inner item type: the source reads the outer item binding directly
+    // (`each={g}`), so its element type IS the outer item's element type.
+    let inner_item_ty: Ty = match module.exprs.get(inner_for.source) {
+        lig_ir::expr::Expr::Local(l) if *l == outer_for.item => match outer_item_ty {
+            Ty::List(inner) => (**inner).clone(),
+            _ => {
+                return Err(CodegenError::Unsupported(
+                    "the nested list source must lower to a list — the outer item's \
+                     element type carries the inner item type",
+                ));
+            }
+        },
+        _ => {
+            return Err(CodegenError::Unsupported(
+                "the nested list source must read the outer item binding directly \
+                 (item-bound lists only — the backend lattice types the item's \
+                 element list; state-reading sources keep the M14 boundary)",
+            ));
+        }
+    };
+    let outer_body = &module.fragments[outer_for.body.get() as usize];
+    let Some(inner_slot) = branch_slot_of_dynamic(outer_body, di as u32) else {
+        return Err(CodegenError::Unsupported(
+            "nested-list dynamic carries no branch anchor slot",
+        ));
+    };
+    let Some(inner_info) = frags.iter().find(|f| f.id == inner_for.body) else {
+        return Err(CodegenError::Unsupported(
+            "nested-list body missing from the component tree",
+        ));
+    };
+    let inner_body = &module.fragments[inner_for.body.get() as usize];
+    if !inner_body.children.is_empty() {
+        return Err(CodegenError::Unsupported(
+            "structural content inside nested list bodies is not admitted — per-item \
+             composition beyond the inner body's own surface is the foundation follow-up",
+        ));
+    }
+    // Validate + compile the inner body's OWN surface: scalar binds and
+    // events admit; anything structural keeps the fail-closed discipline —
+    // the nested surface is exactly the inner replay's reach.
+    let mut binds: Vec<proc_macro2::TokenStream> = Vec::new();
+    for (ldi, ld) in inner_body.dynamics.iter().enumerate() {
+        match &ld.kind {
+            DynamicKind::Text
+            | DynamicKind::Class
+            | DynamicKind::Attr { .. }
+            | DynamicKind::StyleProp { .. } => {
+                if expr_reads_state(module.exprs.get(ld.expr)) {
+                    return Err(CodegenError::Unsupported(
+                        "state-reading binds inside nested list bodies need the \
+                         state-to-per-item fan-out (the M14 per-item slot-bind \
+                         boundary)",
+                    ));
+                }
+                if let Some(ts) = nested_bind_commit(module, ld, ldi, outer_for, inner_for)? {
+                    binds.push(ts);
+                }
+            }
+            DynamicKind::Event { .. } => {}
+            DynamicKind::If(_)
+            | DynamicKind::For(_)
+            | DynamicKind::Component(_)
+            | DynamicKind::Slot { .. }
+            | DynamicKind::Html
+            | DynamicKind::Ref
+            | DynamicKind::Children
+            | DynamicKind::PropPass { .. }
+            | DynamicKind::Style => {
+                return Err(CodegenError::Unsupported(
+                    "structural dynamics inside nested list bodies are not admitted — \
+                     per-item × per-item composition beyond the inner body's own \
+                     surface is the foundation follow-up",
+                ));
+            }
+        }
+    }
+    let inner_tpl = tpl_ident(prefix, inner_info.template_id);
+    let inner_holes = hole_ident(prefix, inner_info.id.get() as usize);
+    let inner_branches = branch_ident(prefix, inner_info.id.get() as usize);
+    let outer_ty_lit: syn::Type = syn::parse_str(&ty_name(outer_item_ty)).expect("valid item type");
+    let inner_ty_lit: syn::Type =
+        syn::parse_str(&ty_name(&inner_item_ty)).expect("valid item type");
+    let apply_inner = syn::Ident::new(
+        &format!("apply_item_f{}", inner_for.body.get()),
+        Span::call_site(),
+    );
+    let reconcile_inner = syn::Ident::new(
+        &format!("reconcile_item_f{}", inner_for.body.get()),
+        Span::call_site(),
+    );
+    let key_inner = syn::Ident::new(
+        &format!("key_of_f{}", inner_for.body.get()),
+        Span::call_site(),
+    );
+    let inner_src = gen_nested_item_expr(module, inner_for.source, outer_for, inner_for)?;
+    let slot = inner_slot;
+    // The per-item event attaches (M15): one attach commit per event dynamic
+    // of the inner body, emitted inside the inner reconcile's INSERT arms so
+    // every fresh inner item's element gets its handler record exactly once.
+    // The shared renderer spells the slot as a bare `slot` identifier (the
+    // top-level reconcile's param name), so the inner reconcile binds the
+    // literal slot to the same name.
+    let keyed_event_attaches = item_event_attaches(module, inner_for, &quote!(f), &quote!(index));
+    let unkeyed_event_attaches = item_event_attaches(module, inner_for, &quote!(f), &quote!(i));
+    // The inner free fns: reconcile + apply (+ key when keyed). The reconcile
+    // addresses the ITEM fragment's list table (`f` — the replay's per-item
+    // fragment), the replay loop re-applies the inner binds per pass.
+    let mut free_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    free_fns.push(quote! {
+        fn #apply_inner(g: &mut ::lig_runtime::Fragment, h: &mut dyn Host,
+                        outer_item: #outer_ty_lit, outer_index: i64,
+                        item: #inner_ty_lit, index: i64) {
+            #(#binds)*
+        }
+    });
+    if let Some(key_id) = inner_for.key {
+        let key_expr = module.exprs.get(key_id);
+        let key_ty = match key_expr {
+            lig_ir::expr::Expr::Local(l) if *l == inner_for.item => inner_item_ty.clone(),
+            lig_ir::expr::Expr::Local(l) if inner_for.index.is_some_and(|ix| ix == *l) => Ty::Int,
+            lig_ir::expr::Expr::Local(l) if *l == outer_for.item => outer_item_ty.clone(),
+            lig_ir::expr::Expr::Local(l) if outer_for.index.is_some_and(|ix| ix == *l) => Ty::Int,
+            _ => codegen_ty_of(module, key_expr),
+        };
+        let raw = gen_nested_item_expr(module, key_id, outer_for, inner_for)?;
+        let norm = match &key_ty {
+            Ty::Str => quote!(::lig_runtime::key_hash(&(#raw))),
+            Ty::Int | Ty::Float | Ty::Bool => quote!((#raw) as u64),
+            _ => {
+                return Err(CodegenError::Unsupported(
+                    "nested-list key must lower to a string or number",
+                ));
+            }
+        };
+        free_fns.push(quote! {
+            fn #key_inner(outer_item: #outer_ty_lit, outer_index: i64,
+                          item: #inner_ty_lit, index: i64) -> u64 {
+                #norm
+            }
+        });
+    }
+    if inner_for.key.is_some() {
+        free_fns.push(quote! {
+            fn #reconcile_inner(f: &mut ::lig_runtime::Fragment, h: &mut dyn Host,
+                                outer_item: #outer_ty_lit, outer_index: i64) {
+                let slot: usize = #slot;
+                let items: ::alloc::vec::Vec<#inner_ty_lit> =
+                    ::core::clone::Clone::clone(&(#inner_src));
+                let old_len = f.list_len(slot);
+                let mut old_keys: ::alloc::vec::Vec<u64> =
+                    ::alloc::vec::Vec::with_capacity(old_len);
+                for i in 0..old_len {
+                    old_keys.push(f.list_key(slot, i).unwrap_or(u64::MAX));
+                }
+                let mut new_keys: ::alloc::vec::Vec<u64> =
+                    ::alloc::vec::Vec::with_capacity(items.len());
+                for (i, it) in items.iter().enumerate() {
+                    new_keys.push(#key_inner(outer_item.clone(), outer_index, it.clone(), i as i64));
+                }
+                for step in ::lig_runtime::plan_keyed(&old_keys, &new_keys) {
+                    match step {
+                        ::lig_runtime::SeqOp::Remove { index } => {
+                            f.list_remove(h, slot, index);
+                        }
+                        ::lig_runtime::SeqOp::Move { from, to } => {
+                            f.list_move(h, slot, from, to);
+                        }
+                        ::lig_runtime::SeqOp::Insert { key, index } => {
+                            f.list_insert(
+                                h,
+                                slot,
+                                index,
+                                key,
+                                #inner_tpl,
+                                #inner_holes,
+                                #inner_branches,
+                            );
+                            #keyed_event_attaches
+                        }
+                    }
+                }
+                for (i, it) in items.iter().enumerate() {
+                    if let Some(g) = f.list_item_mut(slot, i) {
+                        #apply_inner(g, h, outer_item.clone(), outer_index, it.clone(), i as i64);
+                    }
+                }
+            }
+        });
+    } else {
+        free_fns.push(quote! {
+            fn #reconcile_inner(f: &mut ::lig_runtime::Fragment, h: &mut dyn Host,
+                                outer_item: #outer_ty_lit, outer_index: i64) {
+                let slot: usize = #slot;
+                let items: ::alloc::vec::Vec<#inner_ty_lit> =
+                    ::core::clone::Clone::clone(&(#inner_src));
+                let old = f.list_len(slot);
+                let common = old.min(items.len());
+                for i in common..items.len() {
+                    f.list_insert(
+                        h,
+                        slot,
+                        i,
+                        i as u64,
+                        #inner_tpl,
+                        #inner_holes,
+                        #inner_branches,
+                    );
+                    #unkeyed_event_attaches
+                }
+                for i in (common..old).rev() {
+                    f.list_remove(h, slot, i);
+                }
+                for (i, it) in items.iter().enumerate() {
+                    if let Some(g) = f.list_item_mut(slot, i) {
+                        #apply_inner(g, h, outer_item.clone(), outer_index, it.clone(), i as i64);
+                    }
+                }
+            }
+        });
+    }
+    // The replay commit: the inner reconcile rides the OUTER apply — the
+    // replay loop's fan-out re-runs it per outer item per pass (the flip
+    // arm's discipline, one list deeper).
+    commits.push(quote! {
+        #reconcile_inner(f, h, item.clone(), index);
+    });
+    // The inner fire fns: one per event dynamic of the inner body. Each
+    // captures the payload, re-evaluates BOTH sources — the outer source
+    // through `self`, the inner source through the live outer item —
+    // substitutes the outer and inner item/index into the handler body, and
+    // flushes through the checked front (a stale index pair is a no-op; a
+    // non-converging schedule reports the typed `CycleError`).
+    let mut fire_fns: Vec<proc_macro2::TokenStream> = Vec::new();
+    let outer_src = gen_expr(module, outer_for.source)?;
+    for (bdi, bd) in inner_body.dynamics.iter().enumerate() {
+        let DynamicKind::Event { .. } = &bd.kind else {
+            continue;
+        };
+        // A reactionless event never attaches (the insert-arm attaches skip
+        // it too), so it gets no fire fn — one fn per attached event, the
+        // M15 contract.
+        if bd.reaction.is_none() {
+            continue;
+        }
+        let body = gen_nested_item_handler_expr(module, bd.expr, outer_for, inner_for)?;
+        let fire = syn::Ident::new(
+            &format!("fire_f{}_d{}", inner_for.body.get(), bdi),
+            Span::call_site(),
+        );
+        fire_fns.push(quote! {
+            /// Per-item dispatch glue for a nested-list event (M28,
+            /// per-item × per-item): capture the event payload, re-evaluate
+            /// BOTH sources — the outer through `self`, the inner through
+            /// the live outer item — substitute the outer and inner
+            /// item/index into the handler body, and flush through the
+            /// checked front — the per-item-square analogue of the body fire
+            /// fns; a stale index pair returns, and a non-converging
+            /// schedule reports the typed `CycleError` (LIG-E401) instead of
+            /// panicking inside the event.
+            pub fn #fire(&mut self, h: &mut dyn Host, outer_index: usize, index: usize, ev: &::lig_runtime::EvData) -> Result<(), ::lig_runtime::CycleError> {
+                self.ev = ev.clone();
+                let outer_items: ::alloc::vec::Vec<#outer_ty_lit> =
+                    ::core::clone::Clone::clone(&(#outer_src));
+                let Some(outer_item) = outer_items.get(outer_index) else {
+                    return Ok(());
+                };
+                let outer_index = outer_index as i64;
+                let outer_item = outer_item.clone();
+                let items: ::alloc::vec::Vec<#inner_ty_lit> =
+                    ::core::clone::Clone::clone(&(#inner_src));
+                let Some(item) = items.get(index) else {
+                    return Ok(());
+                };
+                let index = index as i64;
+                #body;
+                ::lig_runtime::flush_checked(self, h)
+            }
+        });
+    }
+    Ok((free_fns, fire_fns))
+}
+
 /// `gen_expr` with `item`/`index` locals resolved (item bodies see the item
 /// value and position; parent state reads take the replay's `s_<field>`
 /// params). M15: the substitution threads through EVERY nesting level (the
@@ -5529,7 +5967,9 @@ fn gen_item_expr(
         id,
         &ExprCtx {
             item_scope: Some((for_ir.item, for_ir.index)),
+            outer_scope: None,
             clone_item: false,
+            clone_outer: false,
             state_recv: StateRecv::SParams,
         },
     )
@@ -5549,7 +5989,55 @@ fn gen_item_handler_expr(
         id,
         &ExprCtx {
             item_scope: Some((for_ir.item, for_ir.index)),
+            outer_scope: None,
             clone_item: true,
+            clone_outer: false,
+            state_recv: StateRecv::SelfField,
+        },
+    )
+}
+
+/// `gen_expr` with BOTH list scopes resolved (M28, per-item × per-item):
+/// the nested body's binds see the INNER list's `item`/`index` params and
+/// the ENCLOSING list's `outer_item`/`outer_index` params — the inner
+/// source, binds and keys close over the outer item (the per-item-square
+/// surface). Parent state reads take the replay's `s_<field>` params.
+fn gen_nested_item_expr(
+    module: &ViewModule,
+    id: ExprId,
+    outer_for: &lig_ir::fragment::ForIr,
+    inner_for: &lig_ir::fragment::ForIr,
+) -> Result<proc_macro2::TokenStream, CodegenError> {
+    gen_expr_ctx(
+        module,
+        id,
+        &ExprCtx {
+            item_scope: Some((inner_for.item, inner_for.index)),
+            outer_scope: Some((outer_for.item, outer_for.index)),
+            clone_item: false,
+            clone_outer: false,
+            state_recv: StateRecv::SParams,
+        },
+    )
+}
+
+/// `gen_expr` for a NESTED per-item HANDLER body (M28): both scopes
+/// substitute at every nesting level on the `self` receiver, both items
+/// clone per reference (a handler may read either twice).
+fn gen_nested_item_handler_expr(
+    module: &ViewModule,
+    id: ExprId,
+    outer_for: &lig_ir::fragment::ForIr,
+    inner_for: &lig_ir::fragment::ForIr,
+) -> Result<proc_macro2::TokenStream, CodegenError> {
+    gen_expr_ctx(
+        module,
+        id,
+        &ExprCtx {
+            item_scope: Some((inner_for.item, inner_for.index)),
+            outer_scope: Some((outer_for.item, outer_for.index)),
+            clone_item: true,
+            clone_outer: true,
             state_recv: StateRecv::SelfField,
         },
     )
