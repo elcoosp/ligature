@@ -4,10 +4,10 @@
 
 use compile_clean::{
     component_use, counter, dynamic_style, effect_multi, event_object, for_composed_content,
-    for_event, for_event_composed, for_event_item_branch, for_keyed, for_list, list_component,
-    list_slot, per_mount_fill_ref, per_mount_nested_fill_ref, show_else, slots_branch_component,
-    slots_branch_outlet, slots_component, slots_dynamic, slots_named, slots_nested,
-    slots_structural, template_ref, v_model,
+    for_event, for_event_composed, for_event_item_branch, for_event_nested, for_keyed, for_list,
+    list_component, list_slot, per_mount_fill_ref, per_mount_nested_fill_ref, show_else,
+    slots_branch_component, slots_branch_outlet, slots_component, slots_dynamic, slots_named,
+    slots_nested, slots_structural, template_ref, v_model,
 };
 use lig_runtime::{EvData, SlotOrigin, key_hash};
 use mock_host::{Commit, MockHost};
@@ -1401,5 +1401,147 @@ fn item_branch_events_mount_and_dispatch_per_item() {
     assert_eq!(
         app.picked, "longest",
         "the fresh leg's handler dispatches the live item"
+    );
+}
+
+/// The M28 per-item × per-item contract, end to end: the inner list mounts
+/// per OUTER item inside the replay (each item is its own fragment with its
+/// own list table — the per-item-square state is the fragment-per-item
+/// itself), the inner binds apply with the inner item substituted, dispatch
+/// rides the index-PAIR-addressed fire fn (outer index, inner index), a
+/// keyed inner diff repositions the same instances, and teardown disposes
+/// the inner table with the outer item.
+#[test]
+fn nested_list_events_mount_and_dispatch_per_item_square() {
+    let mut h = MockHost::new();
+    let mut app = for_event_nested::generated::Groups::build(
+        &mut h,
+        for_event_nested::generated::GroupsProps::default(),
+    );
+    // One outer group; its item fragment carries the INNER list with both
+    // items mounted and their binds applied.
+    let outer = app.frag.list_item(0, 0).expect("the outer item mounted");
+    assert_eq!(
+        outer.list_len(0),
+        2,
+        "alpha/beta mounted on the item's own table"
+    );
+    let beta = outer
+        .list_item(0, 1)
+        .expect("the second inner item mounted");
+    assert_eq!(
+        h.text_of(beta.hole(1)),
+        Some("beta"),
+        "the inner bind applied"
+    );
+    // One attach per fresh inner item, at the inner insert arm.
+    let attaches: Vec<_> = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, Commit::Attach { .. }))
+        .collect();
+    assert_eq!(attaches.len(), 2, "one attach per fresh inner item: {h:?}");
+    // Dispatch rides the index-PAIR-addressed fire fn: outer 0, inner 1.
+    app.fire_f2_d0(&mut h, 0, 1, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(
+        app.picked, "beta",
+        "the inner handler dispatched the live pair"
+    );
+    // A stale outer or inner index is a no-op (the sources no longer have
+    // the pair) — never a panic.
+    app.fire_f2_d0(&mut h, 3, 0, &EvData::new())
+        .expect("the dispatch converges");
+    app.fire_f2_d0(&mut h, 0, 9, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(app.picked, "beta", "stale pairs are no-ops, not panics");
+    // A fresh outer item mounts its own inner list with its own attach —
+    // the replay fans out over every live item.
+    app.set_groups(vec![
+        vec!["alpha".into(), "beta".into()],
+        vec!["gamma".into()],
+    ]);
+    lig_runtime::flush(&mut app, &mut h);
+    let second = app
+        .frag
+        .list_item(0, 1)
+        .expect("the fresh outer item mounted");
+    assert_eq!(
+        second.list_len(0),
+        1,
+        "gamma mounted on the fresh item's table"
+    );
+    app.fire_f2_d0(&mut h, 1, 0, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(
+        app.picked, "gamma",
+        "the fresh item's inner handler dispatches"
+    );
+    // The keyed inner diff repositions the SAME instances (LIS-stable — no
+    // remount): reversing the first group's items moves beta 1 → 0, the same
+    // fragment repositioned, never rebuilt.
+    let beta_node = app
+        .frag
+        .list_item(0, 0)
+        .and_then(|f| f.list_item(0, 1))
+        .map(|f| f.hole(1))
+        .expect("beta's node");
+    app.set_groups(vec![
+        vec!["beta".into(), "alpha".into()],
+        vec!["gamma".into()],
+    ]);
+    lig_runtime::flush(&mut app, &mut h);
+    let moved = app
+        .frag
+        .list_item(0, 0)
+        .and_then(|f| f.list_item(0, 0))
+        .map(|f| f.hole(1))
+        .expect("the moved item's fragment");
+    assert_eq!(
+        moved, beta_node,
+        "the keyed inner move repositions the same fragment"
+    );
+    assert_eq!(
+        app.frag
+            .list_item(0, 0)
+            .and_then(|f| f.list_item(0, 0))
+            .map(|f| h.text_of(f.hole(1))),
+        Some(Some("beta")),
+        "beta now sits at index 0 with its text"
+    );
+    // Removing the outer item disposes its inner table with it (the item
+    // teardown is recursive).
+    app.set_groups(vec![]);
+    lig_runtime::flush(&mut app, &mut h);
+    assert_eq!(app.frag.list_len(0), 0, "both outer items removed");
+    // A fresh outer item re-mounts its inner list and re-attaches exactly
+    // once — never the disposed nodes.
+    let before = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, Commit::Attach { .. }))
+        .count();
+    app.set_groups(vec![vec!["again".into()]]);
+    lig_runtime::flush(&mut app, &mut h);
+    let fresh = app
+        .frag
+        .list_item(0, 0)
+        .expect("the fresh outer item mounted");
+    assert_eq!(fresh.list_len(0), 1, "the fresh item's inner list mounted");
+    let after = h
+        .commits
+        .iter()
+        .filter(|c| matches!(c, Commit::Attach { .. }))
+        .count();
+    assert_eq!(
+        after,
+        before + 1,
+        "the fresh inner item attached exactly once"
+    );
+    app.fire_f2_d0(&mut h, 0, 0, &EvData::new())
+        .expect("the dispatch converges");
+    assert_eq!(
+        app.picked, "again",
+        "the fresh item's handler dispatches the live pair"
     );
 }
