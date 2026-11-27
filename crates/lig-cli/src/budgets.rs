@@ -328,7 +328,8 @@ fn samples_for(name: &str) -> usize {
         | "codegen_for_composed_content"
         | "codegen_per_mount_fill_ref"
         | "codegen_per_mount_nested_fill_ref"
-        | "codegen_for_event_item_branch" => 40,
+        | "codegen_for_event_item_branch"
+        | "codegen_for_event_nested" => 40,
         "runtime_instantiate"
         | "runtime_update_mask"
         | "runtime_mount_lifecycle"
@@ -408,6 +409,15 @@ fn per_mount_nested_fill_ref_source(root: &Path) -> String {
 /// committed fixture so the gate and the parity harness share one source.
 fn for_event_item_branch_source(root: &Path) -> String {
     let path = root.join("fixtures/conformance/for-event-item-branch/input.solid.tsx");
+    std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
+}
+
+/// The nested-list fixture (the M28 codegen bench's workload: the inner
+/// reconcile called from the item replay, the inner keyed plan on the item
+/// fragment's own list table, and the index-pair fire fns), read from the
+/// committed fixture so the gate and the parity harness share one source.
+fn for_event_nested_source(root: &Path) -> String {
+    let path = root.join("fixtures/conformance/for-event-nested/input.solid.tsx");
     std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()))
 }
 
@@ -686,6 +696,14 @@ fn measure(name: &str, root: &Path) -> f64 {
                 black_box(u);
             })
         }
+        "codegen_for_event_nested" => {
+            let src = for_event_nested_source(root);
+            let m = lig_parse_solid::lower_module(&src, "for-event-nested.tsx").expect("lower");
+            median_us(samples_for(name), || {
+                let u = lig_codegen::generate_module(&m).expect("codegen");
+                black_box(u);
+            })
+        }
         "codegen_for_composed_content" => {
             let src = for_composed_content_source(root);
             let m = lig_parse_solid::lower_module(&src, "for-composed-content.tsx").expect("lower");
@@ -835,6 +853,7 @@ const REGISTRY: &[&str] = &[
     "codegen_per_mount_fill_ref",
     "codegen_per_mount_nested_fill_ref",
     "codegen_for_event_item_branch",
+    "codegen_for_event_nested",
     "session_compile_counter",
     "session_observe",
     "session_emit_mem",
@@ -1033,8 +1052,9 @@ mod tests {
         // adds runtime_registry_lifecycle, the per-mount fill refs add
         // codegen_per_mount_fill_ref, the mount walk's recursive capture
         // walk adds codegen_per_mount_nested_fill_ref, branch-in-item
-        // events add codegen_for_event_item_branch), all named, no dupes.
-        assert_eq!(REGISTRY.len(), 32);
+        // events add codegen_for_event_item_branch, nested-list events add
+        // codegen_for_event_nested), all named, no dupes.
+        assert_eq!(REGISTRY.len(), 33);
         let mut sorted: Vec<_> = REGISTRY.to_vec();
         sorted.sort_unstable();
         sorted.dedup();
