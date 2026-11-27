@@ -212,10 +212,10 @@ pub mod generated {
         h: &mut dyn Host,
         item: ::alloc::string::String,
         index: i64,
-        legs_f1_d0: &mut ::alloc::vec::Vec<u8>,
+        legs_f1_d0: &mut [u8],
     ) {
         let on = ((item.len() as i64) > 4i64);
-        let ix = index.max(0) as usize;
+        let ix = usize::try_from(index.max(0)).unwrap_or(0);
         let leg = legs_f1_d0.get(ix).copied().unwrap_or(0u8);
         if on {
             if !(f.branch_is(0usize) && leg == 1u8) {
@@ -270,11 +270,7 @@ pub mod generated {
                 }
             }
         }
-        if leg == 1u8 {
-            if let Some(b) = f.branch_mut(0usize) {
-                b.set_text(h, 1usize, &(item));
-            }
-        } else if leg == 2u8 {
+        if leg != 0u8 {
             if let Some(b) = f.branch_mut(0usize) {
                 b.set_text(h, 1usize, &(item));
             }
