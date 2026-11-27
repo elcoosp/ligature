@@ -1,20 +1,18 @@
 import { For, Show } from "solid-js";
 
 export function Rows() {
-  const [items, setItems] = createSignal(["a", "b"]);
+  const [groups, setGroups] = createSignal([["alpha", "beta"]]);
   return (
-    <ul>
-      <For each={items()}>
-        {(n) => (
-          <Show when={n.length > 0}>
-            <div>
-              <Show when={n.length > 1}>
-                <li onClick={() => setItems([n])}>{n}</li>
-              </Show>
-            </div>
-          </Show>
-        )}
-      </For>
-    </ul>
+    <For each={groups()} key={(g) => g.length}>
+      {(g) => (
+        <For each={g} key={(n) => n}>
+          {(n) => (
+            <Show when={n.length > 0}>
+              <li onClick={() => setGroups([[n]])}>{n}</li>
+            </Show>
+          )}
+        </For>
+      )}
+    </For>
   );
 }
