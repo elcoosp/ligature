@@ -746,3 +746,70 @@ export function PickList() {
         "the owner-direct outlet lowers with its item-bound fallback"
     );
 }
+
+/// The M28 composed-content nested lift (Solid leg): a nested For body's own
+/// handler inside slot content lowers — the composed content contract lifts
+/// one level with the mechanism (the M18/M27 precedent: own-tree and
+/// composed move together).
+#[test]
+fn nested_list_events_admit_in_composed_content() {
+    let src = r#"export function App() {
+  const [groups, setGroups] = createSignal([["a", "b"]]);
+  const [picked, setPicked] = createSignal("");
+  return (
+    <Panel title="x" header={
+      <For each={groups()} key={(g) => g.length}>
+        {(g) => (
+          <For each={g} key={(n) => n}>
+            {(n) => <li onClick={() => setPicked(n)}>{n}</li>}
+          </For>
+        )}
+      </For>
+    } />
+  );
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /><Slot name="foot" /></section>;
+}
+"#;
+    expect_ok(src, "nested_composed.tsx");
+}
+
+/// M28 boundary on the composed leg: the nested body's OWN branch legs keep
+/// the fail-closed denial (the nested surface is the inner body's own
+/// events — one level, own-tree and composed alike).
+#[test]
+fn nested_list_events_leg_in_composed_content_denies() {
+    let src = r#"export function App() {
+  const [groups, setGroups] = createSignal([["a", "b"]]);
+  const [picked, setPicked] = createSignal("");
+  return (
+    <Panel title="x" header={
+      <For each={groups()}>
+        {(g) => (
+          <For each={g}>
+            {(n) => (
+              <Show when={n.length > 0}>
+                <li onClick={() => setPicked(n)}>{n}</li>
+              </Show>
+            )}
+          </For>
+        )}
+      </For>
+    } />
+  );
+}
+
+export function Panel({ title }) {
+  return <section><Slot name="header" /><Slot name="foot" /></section>;
+}
+"#;
+    let Err(diags) = lig_parse_solid::lower_module(src, "nested_composed_leg.tsx") else {
+        panic!("the nested body's own branch leg keeps the denial");
+    };
+    assert!(
+        diags.iter().any(|d| d.code == "LIG-E001"),
+        "the content contract denies the leg handler: {diags:?}"
+    );
+}
