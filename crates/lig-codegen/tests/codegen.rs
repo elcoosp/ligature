@@ -1459,3 +1459,98 @@ export function Rows() {
         "no leg addressing leaks into the component scope: {text}"
     );
 }
+
+#[test]
+fn for_event_nested_list_compiles_per_item_square() {
+    // The E118 foundation follow-up, zone two (docs/errors/LIG-E118.md,
+    // "explanation"): "events inside nested list bodies (per-item ×
+    // per-item). Each needs per-item control flow … the named foundation
+    // follow-up, its own mechanism milestone, not a codegen flag." M28
+    // grows the per-item control flow for the nested-list zone: the INNER
+    // list mounts per OUTER item inside the per-item replay (the inner
+    // reconcile addresses the ITEM fragment's own list table — one outer
+    // index, one inner index), the inner handler attaches per fresh inner
+    // item, and dispatch rides index-PAIR-addressed fire fns. The
+    // acceptance line this test pins: the nested-list denial lifts and the
+    // inner list reconciles per item inside the replay.
+    let src = r#"import { For } from "solid-js";
+
+export function Groups() {
+  const [groups, setGroups] = createSignal([["alpha", "beta"]]);
+  const [picked, setPicked] = createSignal("");
+  return (
+    <ul>
+      <For each={groups()} key={(g) => g.length}>
+        {(g) => (
+          <For each={g} key={(n) => n}>
+            {(n) => <li onClick={() => setPicked(n)}>{n}</li>}
+          </For>
+        )}
+      </For>
+    </ul>
+  );
+}
+"#;
+    let module = lig_parse_solid::lower_module(src, "for-event-nested.tsx").expect("lower");
+    let text = lig_codegen::generate_module(&module)
+        .expect(
+            "codegen: an event inside a nested list body compiles — the nested-list \
+                 zone of the E118 discipline lifts with per-item × per-item control flow",
+        )
+        .text;
+    // The inner reconcile is a free fn called INSIDE the outer per-item
+    // apply — the fan-out rides the outer replay (one outer index, one
+    // inner index).
+    let apply = text
+        .split("fn apply_item_f")
+        .nth(1)
+        .and_then(|rest| rest.split("fn ").next())
+        .expect("the outer per-item apply fn is emitted")
+        .to_string();
+    assert!(
+        apply.contains("reconcile_item_f"),
+        "the inner list reconciles inside the per-item replay: {apply}"
+    );
+    // The inner reconcile addresses the ITEM fragment's own list table
+    // (the per-item-square state): keyed plan, list_insert with the inner
+    // body template, and the attach per fresh inner item.
+    let inner = text
+        .split("fn reconcile_item_f")
+        .nth(1)
+        .and_then(|rest| rest.split("fn ").next())
+        .expect("the nested-list reconcile fn is emitted")
+        .to_string();
+    assert!(
+        inner.contains("list_insert("),
+        "the inner list mounts on the item fragment's table: {inner}"
+    );
+    assert!(
+        inner.contains(".attach("),
+        "the inner handler attaches per fresh inner item: {inner}"
+    );
+    // The inner apply substitutes BOTH items (the outer item rides the
+    // inner binds' closure).
+    let inner_apply = text
+        .split("fn apply_item_f")
+        .nth(2)
+        .and_then(|rest| rest.split("fn ").next())
+        .expect("the inner per-item apply fn is emitted")
+        .to_string();
+    assert!(
+        inner_apply.contains("outer_item"),
+        "the inner apply carries the outer item (the per-item-square surface): {inner_apply}"
+    );
+    // Dispatch rides the index-PAIR-addressed fire fn (the M15 addressing,
+    // squared: one outer index, one inner index).
+    assert!(
+        text.contains("pub fn fire_f") && text.contains("outer_index: usize,"),
+        "the inner fire fn stays index-pair-addressed: {text}"
+    );
+    // The inner body's reactions never join the component schedule (one
+    // reaction, N×M live items — the M14 flush-scope discipline squared):
+    // no run arm addresses the inner body.
+    assert!(
+        !text.contains("INNER_BODY_RX"),
+        "no inner-body addressing leaks into the component scope: {text}"
+    );
+}
