@@ -26,9 +26,17 @@ pub struct ExprCtx {
     /// either render as the per-item fn's `item`/`index` params; any other
     /// local is denied (fail-closed, the pre-M15 item-expr contract).
     pub item_scope: Option<(StrId, Option<StrId>)>,
+    /// The ENCLOSING list's item/index scope (M28, per-item × per-item):
+    /// `Local` reads of either render as the nested fn's
+    /// `outer_item`/`outer_index` params. `None` everywhere pre-M28 — the
+    /// default reproduces the existing rendering byte-for-byte (D-8).
+    pub outer_scope: Option<(StrId, Option<StrId>)>,
     /// Whether `Local(item)` reads clone per reference (handler bodies may
     /// read the item more than once; the replay's single-use shapes move).
     pub clone_item: bool,
+    /// Whether `Local(outer_item)` reads clone per reference (nested
+    /// handler bodies, same discipline as `clone_item`).
+    pub clone_outer: bool,
     /// The state-read discipline of the enclosing fn.
     pub state_recv: StateRecv,
 }
@@ -37,7 +45,9 @@ pub struct ExprCtx {
 /// no item scope).
 pub const CTX_SELF: ExprCtx = ExprCtx {
     item_scope: None,
+    outer_scope: None,
     clone_item: false,
+    clone_outer: false,
     state_recv: StateRecv::SelfField,
 };
 
@@ -135,6 +145,20 @@ fn gen_expr_value(
                     }
                 } else if index.is_some_and(|ix| ix == *name) {
                     quote!(index)
+                } else if let Some((outer, outer_ix)) = ctx.outer_scope {
+                    if *name == outer {
+                        if ctx.clone_outer {
+                            quote!(outer_item.clone())
+                        } else {
+                            quote!(outer_item)
+                        }
+                    } else if outer_ix.is_some_and(|ix| ix == *name) {
+                        quote!(outer_index)
+                    } else {
+                        return Err(crate::CodegenError::Unsupported(
+                            "locals other than the item/index bindings are not admitted in list item bodies (v1)",
+                        ));
+                    }
                 } else {
                     return Err(crate::CodegenError::Unsupported(
                         "locals other than the item/index bindings are not admitted in list item bodies (v1)",
