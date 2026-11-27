@@ -15,7 +15,7 @@
     <a href="docs/adr/0012-msrv-and-dependency-pins.md"><img src="https://img.shields.io/badge/MSRV-1.97%2B-informational?style=flat-square" alt="MSRV 1.97+"/></a>
     <a href="LICENSE-MIT"><img src="https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-informational?style=flat-square" alt="License: MIT OR Apache-2.0"/></a>
     <a href="CHANGELOG.md"><img src="https://img.shields.io/badge/version-1.4.0-blue?style=flat-square" alt="Version 1.4.0"/></a>
-    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-38%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="38 conformance fixtures, both frontend legs"/></a>
+    <a href="fixtures/README.md"><img src="https://img.shields.io/badge/conformance-40%20fixtures%20%C3%97%202%20legs-informational?style=flat-square" alt="40 conformance fixtures, both frontend legs"/></a>
   </p>
 </div>
 
@@ -29,7 +29,7 @@
 
 |                                    |                                                                                                                                                                                                      |
 | ---------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| 🧬 **Two frontends, one contract** | The same component in Solid TSX and Vue SFC lowers to byte-identical View IR — 38 fixtures × 2 legs, byte-compared against the committed contract on every push.                                     |
+| 🧬 **Two frontends, one contract** | The same component in Solid TSX and Vue SFC lowers to byte-identical View IR — 40 fixtures × 2 legs, byte-compared against the committed contract on every push.                                     |
 | 🚧 **Fail-closed admission**       | Every construct lands in exactly one Deny/Lint/Allow tier — 11 rules, each backed by an allow fixture _and_ a deny/lint fixture, synced 1:1 by CI. A Deny means zero output downstream.              |
 | 📦 **Byte-reproducible codegen**   | `quote!` → `syn::File` → `prettyplease`; the committed counter unit (7,666 B, digest `0x85d06a5c087b3589`) is byte-diffed against fresh generation, and a syn visitor enforces a readability budget. |
 | 🔩 **no_std runtime**              | `#![no_std]` + alloc, `forbid(unsafe_code)`, `Copy` node handles, LIS-stable keyed diffs, a const-scheduled flush — proven on bare-metal targets in CI.                                              |
@@ -41,7 +41,7 @@
 
 | Gate            | What it proves                                                                          | Command               |
 | --------------- | --------------------------------------------------------------------------------------- | --------------------- |
-| Frontend parity | Both legs of all 38 fixtures byte-match the committed IR; a fixture missing a leg fails | `lig fixtures verify` |
+| Frontend parity | Both legs of all 40 fixtures byte-match the committed IR; a fixture missing a leg fails | `lig fixtures verify` |
 | Reproducibility | Committed codegen byte-diffed against a fresh generation + the readability budget       | `lig reproducibility` |
 | Budgets         | Every bench workload under its pinned ceiling (`docs/benchmarks/budgets.toml`)          | `lig budgets`         |
 | no_std          | Bare-metal builds: `thumbv7em-none-eabihf`, `aarch64-unknown-none-softfloat`            | `lig no-std`          |
@@ -173,10 +173,12 @@ every mount — each row is fixture-pinned on **both** frontend legs:
 | **Per-item events**           | A handler on a list body attaches once per fresh item, dispatches index-addressed through a generated fire fn (the live item's value substitutes in); moves carry the record, removals dispose it, stale indices are no-ops | M15   |
 | **Composed-list events**      | The body can hang inside a branch or slot content: receiver-parameterized insert arms, the same fire fn; list-carrying branches remount through the mount mark                                                              | M17   |
 | **Composed content**          | A handler **and** an outlet directly on a composed _content_ list body admit — the fill mounts into the fresh instance at branch mount (per-mount fill assembly)                                                            | M18   |
+| **Branch-in-item events**     | The item body's direct branch legs carry their own handlers: the branch mounts per item (per-item × per-mount legs, else legs add a per-item leg tracker), dispatch rides the leg fire fns                                     | M27   |
+| **Nested-list events**        | A keyed inner `For` on the item body mounts per OUTER item on the item's own list table: the inner binds re-apply per replay pass, the inner handlers attach per fresh inner item, dispatch rides index-pair fire fns          | M28   |
 
 Every component use's root attaches at its use hole exactly once per mount, in every ownership
-shape. **The boundary stays honest**: handlers deeper in the item subtree — branches in items,
-nested lists — still deny with the precise code.
+shape. **The boundary stays honest**: handlers deeper than the per-item surface — the legs' own
+subtrees, the nested bodies' own branches, doubly-nested lists — still deny with the precise code.
 
 ## The no_std runtime
 
@@ -246,6 +248,7 @@ Runnable consumer examples (`crates/lig-incremental/examples`) — no `dist/` to
 | `composed_events`                                    | M17: a handler on a list body inside a branch — and the zone that still denies                |
 | `composed_content`                                   | M18: a handler + an outlet on a composed _content_ list body — and the zone that still denies |
 | `for_event_item_branch`                              | M27: branch-in-item legs mounting and dispatching per item                                    |
+| `for_event_nested`                                   | M28: nested-list legs mounting per outer item and dispatching per pair                        |
 | `mem_sink`                                           | the full artifact set emitted into memory                                                     |
 | `watch_sync`                                         | `Session::sync`: a watch tick's added/edited/removed diff                                     |
 | `observed_pass`                                      | M19: per-stage outcomes and wall clocks as events                                             |
@@ -297,8 +300,8 @@ cargo run -p lig-sourcemap --example resolve_position  # generated positions res
 
 The compiled subset is **deliberately small**: constructs outside the contract — events in the
 branch legs' subtrees, nested list bodies, callback calls, raw DOM access — deny with a precise
-code rather than mis-compile (events on the list body and its direct branch legs admit: M15
-through M27).
+code rather than mis-compile (events on the list body, its direct branch legs, and nested list
+bodies admit: M15 through M28).
 
 | Milestone | Delivered                                                    | Report                       |
 | --------- | ------------------------------------------------------------ | ---------------------------- |
@@ -318,13 +321,14 @@ through M27).
 | M25       | Per-mount fill refs (the ref-composed guard)                 | [report](docs/m25/REPORT.md) |
 | M26       | The mount walk's recursive capture walk (nested fill refs)   | [report](docs/m26/REPORT.md) |
 | M27       | Branch-in-item events (per-item × per-mount legs)            | [report](docs/m27/REPORT.md) |
+| M28       | Nested-list events (per-item × per-item legs)                | [report](docs/m28/REPORT.md) |
 
 M0–M11 (the frontends, IR, admission, codegen, runtime, slots and branch assembly) are covered
 by the reports below and the [composition table](#what-composes).
 
 ## Learn more
 
-- [Milestone reports](docs/m0/REPORT.md) — `docs/m0/` through `docs/m27/`: what each milestone delivered and measured
+- [Milestone reports](docs/m0/REPORT.md) — `docs/m0/` through `docs/m28/`: what each milestone delivered and measured
 - [docs/appendix-a.md](docs/appendix-a.md) — the annotated generated unit every gate pins
 - [Admission rules](docs/admission/rules.md) — the Deny/Lint/Allow table · the [15-doc diagnostic catalog](docs/errors/)
 - [fixtures/README.md](fixtures/README.md) — the conformance contract both frontends must satisfy
@@ -360,6 +364,7 @@ by the reports below and the [composition table](#what-composes).
 | 0031 | The composed-content owner-direct lift      |
 | 0039 | The per-mount fill refs                     |
 | 0040 | The mount walk's recursive capture walk     |
+| 0042 | Nested-list events                          |
 
 **Consumer & sessions**
 
