@@ -203,6 +203,22 @@ fn bench_codegen_for_event_item_branch(c: &mut Criterion) {
     });
 }
 
+/// Lower the nested-list fixture once (M28: the per-item × per-item mount —
+/// the inner reconcile called from the item replay, the inner keyed plan on
+/// the item fragment's own list table, and the index-pair fire fns ride
+/// generate_module).
+fn bench_codegen_for_event_nested(c: &mut Criterion) {
+    let src = include_str!("../../../fixtures/conformance/for-event-nested/input.solid.tsx");
+    let module =
+        lig_parse_solid::lower_module(src, "for-event-nested.tsx").expect("fixture lowers");
+    c.bench_function("codegen/for-event-nested", |b| {
+        b.iter(|| {
+            black_box(lig_codegen::generate_module(black_box(&module)))
+                .expect("for-event-nested codegens");
+        });
+    });
+}
+
 criterion_group!(
     benches,
     bench_codegen,
@@ -217,6 +233,7 @@ criterion_group!(
     bench_codegen_for_composed_content,
     bench_codegen_per_mount_fill_ref,
     bench_codegen_per_mount_nested_fill_ref,
-    bench_codegen_for_event_item_branch
+    bench_codegen_for_event_item_branch,
+    bench_codegen_for_event_nested
 );
 criterion_main!(benches);
