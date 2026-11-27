@@ -133,10 +133,10 @@ Render text via {expr}, or build against a web-capable host profile.
 "),
     ("LIG-E118", r#"# LIG-E118 — Event handler beyond the list item body
 
-Status: deny (M1; narrowed by M15, by M17, by M18, then by M27)
+Status: deny (M1; narrowed by M15, by M17, by M18, by M27, then by M28)
 
 ## message
-Event handler beyond the list item body and its branch legs
+Event handler beyond the list item body, its branch legs, and nested list bodies
 
 ## explanation
 Per-item dispatch for events DIRECTLY on a `For`/`v-for` body is the M15
@@ -152,18 +152,25 @@ the zone narrows once more: events on the DIRECT branch legs of a list item
 body admit (per-item × per-mount composition — the branch mounts per item
 inside the per-item replay, the leg's handler attaches at the mount, and
 dispatch rides the same index-addressed fire fns; an else leg adds a
-per-item leg tracker mirrored by the keyed plan ops). What stays denied is
-everything BEYOND the leg surface — events inside the legs' own branches
-and subtrees, and events inside nested list bodies (per-item × per-item).
-The remainder needs composition the mount arm cannot reach (per-item ×
-per-item is the named foundation follow-up, its own mechanism milestone,
-not a codegen flag).
+per-item leg tracker mirrored by the keyed plan ops). Since M28 the zone
+narrows a fifth time: events on the body's DIRECT nested list bodies admit
+(per-item × per-item composition — the inner list mounts per outer item
+inside the replay, the inner reconcile addresses the ITEM fragment's own
+list table so the per-item-square state is the fragment-per-item itself,
+the inner handler attaches per fresh inner item, and dispatch rides the
+index-PAIR-addressed fire fns: outer index, inner index). What stays denied
+is everything BEYOND that surface — events inside the legs' own branches
+and subtrees, events inside the nested bodies' own branches, and events
+inside doubly-nested lists. The remainder needs composition the inner
+replay cannot reach (per-item³ and the state-reading fan-out are carried
+boundaries, not codegen flags).
 
 ## suggestion
 Hoist the handler to the list body level (direct, branch-composed, or
 content-composed — all admit), onto a direct branch leg of the item body
-(admitted since M27), or extract the row into a keyed component (M13
-per-item instance identity carries the handler per item).
+(admitted since M27), onto a nested list body one level down (admitted
+since M28), or extract the row into a keyed component (M13 per-item
+instance identity carries the handler per item).
 "#),
     ("LIG-E401", r"# LIG-E401 — Reactive cycle at runtime
 
