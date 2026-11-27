@@ -51,6 +51,10 @@ single_match = "allow"
 # The generated plan loops index templates by construction (§7.5).
 unnecessary_cast = "allow"
 cast_possible_wrap = "allow"
+# Generated key fns route Int keys through `(expr) as u64` — lengths and
+# indices, non-negative by construction (the M28 nested-list key shape is
+# the first unit to carry the i64→u64 cast in committed generated code).
+cast_sign_loss = "allow"
 needless_range_loop = "allow"
 # Mount arms compose `if let` guards (branch → content → hole) — collapsible
 # only by obscuring the addressing chain the ADRs narrate.
