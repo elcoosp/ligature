@@ -983,6 +983,11 @@ enum ItemSurface {
     Outside,
     Body,
     Leg,
+    /// The body of a For hanging DIRECTLY on a list item body (M28,
+    /// per-item × per-item): its own events admit — the inner list mounts
+    /// per outer item inside the replay. Its own branch legs and nested
+    /// Fors get `Deep` (the one-level surface).
+    NestedBody,
     Deep,
 }
 
@@ -2649,7 +2654,10 @@ impl ComponentLowering<'_> {
         // the item subtree stays fail-closed; outside a list there is no
         // per-item context to deny against.
         let in_list_item = !matches!(surface, ItemSurface::Outside);
-        let owner_direct = matches!(surface, ItemSurface::Body | ItemSurface::Leg);
+        let owner_direct = matches!(
+            surface,
+            ItemSurface::Body | ItemSurface::Leg | ItemSurface::NestedBody
+        );
         let (dynamics, children) = {
             let f = &self.module.fragments[frag.get() as usize];
             (f.dynamics.clone(), f.children.clone())
@@ -2672,11 +2680,13 @@ impl ComponentLowering<'_> {
                 | DynamicKind::For(_)
                 | DynamicKind::Component(_) => None,
                 DynamicKind::Event { .. } => (in_list_item && !owner_direct).then(|| {
-                    "event handlers beyond the composed list item body and its direct \
-                         branch legs are not admitted — per-item dispatch covers the body's \
-                         own handler and the legs' own handlers (the M27 per-item × \
-                         per-mount lift); the legs' subtrees and nested lists keep the \
-                         denial (the LIG-E118 discipline)"
+                    "event handlers beyond the composed list item body, its direct \
+                         branch legs, and nested list bodies are not admitted — per-item \
+                         dispatch covers the body's own handler, the legs' own handlers \
+                         (the M27 per-item × per-mount lift), and the nested list \
+                         bodies' own handlers (the M28 per-item × per-item lift); the \
+                         legs' subtrees, the nested bodies' own branches, and \
+                         doubly-nested lists keep the denial (the LIG-E118 discipline)"
                         .to_string()
                 }),
                 DynamicKind::Slot { .. } => (in_list_item && !owner_direct).then(|| {
@@ -2718,11 +2728,15 @@ impl ComponentLowering<'_> {
                 match &d.kind {
                     DynamicKind::If(i) => {
                         // M27: the body's direct legs carry the surface (one
-                        // level — a leg's own legs land in `Deep`).
+                        // level — a leg's own legs land in `Deep`). M28: a
+                        // NESTED body's legs stay denied (the nested surface
+                        // is the inner body's own events only).
                         let leg_surface = match surface {
                             ItemSurface::Body => ItemSurface::Leg,
                             ItemSurface::Outside => ItemSurface::Outside,
-                            ItemSurface::Leg | ItemSurface::Deep => ItemSurface::Deep,
+                            ItemSurface::Leg | ItemSurface::NestedBody | ItemSurface::Deep => {
+                                ItemSurface::Deep
+                            }
                         };
                         structural.push((i.then, leg_surface));
                         if let Some(el) = i.else_ {
@@ -2730,11 +2744,17 @@ impl ComponentLowering<'_> {
                         }
                     }
                     DynamicKind::For(fo) => {
-                        // A nested list body (inside an item subtree) never
-                        // gains the owner-direct surface.
+                        // M28: the body of a For hanging DIRECTLY on a list
+                        // item body admits its own events (per-item ×
+                        // per-item — the inner list mounts per outer item
+                        // inside the replay); a nested body's own nested
+                        // Fors stay `Deep` (one level).
                         let body_surface = match surface {
                             ItemSurface::Outside => ItemSurface::Body,
-                            _ => ItemSurface::Deep,
+                            ItemSurface::Body => ItemSurface::NestedBody,
+                            ItemSurface::Leg | ItemSurface::NestedBody | ItemSurface::Deep => {
+                                ItemSurface::Deep
+                            }
                         };
                         structural.push((fo.body, body_surface));
                     }
