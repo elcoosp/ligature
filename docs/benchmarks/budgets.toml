@@ -276,3 +276,13 @@ name = "codegen_for_event_item_branch"
 metric = "time"
 budget = 11000.0
 note = "M27 reference median 2198 µs (codegen/for-event-item-branch bench, release, Linux x86_64; the per-item branch arm, the tracker mirrors, and the two leg fire fns ride generate_module); ≈5.0× headroom"
+
+# Codegen over the nested-list surface (M28): the per-item × per-item mount —
+# the inner reconcile called from the item replay, the inner keyed plan on the
+# item fragment's own list table, and the index-pair fire fns ride
+# generate_module.
+[[budget]]
+name = "codegen_for_event_nested"
+metric = "time"
+budget = 5500.0
+note = "M28 reference median 1044 µs (codegen/for-event-nested bench, release, Linux x86_64; the inner reconcile + apply + key trio and the index-pair fire fn ride generate_module); ≈5.3× headroom"
